@@ -1,7 +1,7 @@
 /** What's new: toast on a real version change, then a carousel of short animated recreations. */
-import { h, openSheet, btn, icon, toast } from "./ui.js?v=133";
-import { APP_VERSION } from "./util.js?v=133";
-import { deviceGet, deviceSet } from "./store.js?v=133";
+import { h, openSheet, btn, icon, toast } from "./ui.js?v=134";
+import { APP_VERSION } from "./util.js?v=134";
+import { deviceGet, deviceSet } from "./store.js?v=134";
 
 const RELEASES = [
   {
@@ -66,6 +66,16 @@ const RELEASES = [
         demo: "activity",
         title: "A full budget can open.",
         body: "Thousands of transactions no longer freeze the plan. Activity shows the latest ones first, and you can show more.",
+      },
+    ],
+  },
+  {
+    version: "1.3.2",
+    slides: [
+      {
+        demo: "plan",
+        title: "Cover overspending properly.",
+        body: "Pick the categories the money comes from. The gap shrinks as you add them. A negative available amount moves money in, instead of opening cover.",
       },
     ],
   },

@@ -1,15 +1,16 @@
-import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, openAmountPad } from "../ui.js?v=133";
-import { fmt, monthLabel, monthKey, prevMonth, nextMonth, todayKey, toTitleCase, uid } from "../util.js?v=133";
+import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, openAmountPad } from "../ui.js?v=134";
+import { fmt, monthLabel, monthKey, prevMonth, nextMonth, todayKey, toTitleCase, uid, round2 } from "../util.js?v=134";
 import {
   budgetSnapshot, getGoalMetrics, trailingAvg, monthAccessible, historySeries,
-  overspentMonths, available, globalFree,
-} from "../calc.js?v=133";
+  overspentMonths, available, globalFree, ccMismatches,
+} from "../calc.js?v=134";
 import {
   setAssigned, moveMoney, coverOverspending, planClawback, applyClawback,
   computeMonthAssignments, applyAssignments, setCategory, addCategory, archiveCategory,
   deleteCategory, setMonthNote, addGroup, renameGroup, deleteGroup, moveGroup, moveCategory,
-} from "../mutate.js?v=133";
-import { collectReminders } from "../notify.js?v=133";
+} from "../mutate.js?v=134";
+import { collectReminders } from "../notify.js?v=134";
+import { openMissingSide } from "./transactions.js?v=134";
 
 function noteOf(budget, month, cat) {
   return budget.categoryNotes?.[month]?.[cat.id] || "";
@@ -23,13 +24,16 @@ export function renderBudget(root, ctx) {
   const snap = budgetSnapshot(budget, month, today);
   const collapsed = ctx.ui.collapsed;
 
+  const prevMk = prevMonth(month);
+  const nextMk = nextMonth(month);
+  const prevOk = monthAccessible(budget, prevMk, today);
+  const nextOk = monthAccessible(budget, nextMk, today);
   const head = h("div", { class: "month-nav" },
-    h("button", { class: "icon-btn", type: "button", "aria-label": "Previous month", text: "‹", onclick: () => ctx.setMonth(prevMonth(month)) }),
+    h("button", { class: "icon-btn", type: "button", "aria-label": "Previous month", text: "‹", disabled: !prevOk, onclick: () => { if (prevOk) ctx.setMonth(prevMk); } }),
     h("button", { class: "month-label", type: "button", text: monthLabel(month), onclick: () => ctx.setMonth(today) }),
-    h("button", { class: "icon-btn", type: "button", "aria-label": "Next month", text: "›", onclick: () => {
-      const n = nextMonth(month);
-      if (!monthAccessible(budget, n, today) && n > nextMonth(today)) { toast("Assign money in the previous month first"); return; }
-      ctx.setMonth(n);
+    h("button", { class: "icon-btn", type: "button", "aria-label": "Next month", text: "›", disabled: !nextOk, onclick: () => {
+      if (!nextOk) { toast("Assign money in the previous month first"); return; }
+      ctx.setMonth(nextMk);
     } }),
   );
   const planLinks = h("nav", { class: "link-row", "aria-label": "Plan" },
@@ -54,31 +58,61 @@ export function renderBudget(root, ctx) {
   const notices = h("div", { class: "notices" });
   if (overs.length) {
     const oldest = overs[0];
+    const extra = overs.length > 1 ? ` (+${overs.length - 1} more)` : "";
     notices.append(h("button", { class: "notice", type: "button", onclick: () => { ctx.setMonth(oldest.month); openCover(ctx, oldest.month); } },
-      h("strong", { text: oldest.month === month ? "Overspent this month" : `Overspent in ${monthLabel(oldest.month)}` }),
+      h("strong", { text: `Overspending in ${monthLabel(oldest.month)}${extra}` }),
+      h("span", { text: "Covering moves money from other categories so those balances come back to zero. Start with the oldest month." }),
       h("span", { class: "notice-go", text: "Cover" }),
     ));
   }
-  for (const cat of budget.categories || []) {
-    if (cat.goal?.type !== "date" || cat.archived) continue;
-    const m = getGoalMetrics(cat, snap.available[cat.id] || 0, snap.budgeted[cat.id] || 0, month);
-    if (m?.expired && !m.complete) {
-      notices.append(h("button", { class: "notice warn", type: "button", onclick: () => openCategory(ctx, cat) },
-        h("strong", { text: cat.name }),
-        h("span", { class: "notice-go", text: "Edit" }),
-      ));
-    }
+  for (const cat of expiredDateGoals(budget)) {
+    notices.append(h("button", { class: "notice warn", type: "button", onclick: () => openCategory(ctx, cat) },
+      h("strong", { text: `${cat.name} goal date has passed` }),
+      h("span", { class: "notice-go", text: "Edit" }),
+    ));
   }
 
   const under = (budget.categories || []).filter((c) => {
-    if (c.archived || c.creditCardId || !c.goal) return false;
+    if (c.archived || !c.goal) return false;
     const m = getGoalMetrics(c, snap.available[c.id] || 0, snap.budgeted[c.id] || 0, month);
-    return m && ((m.type === "monthly" && m.underfunded) || (m.type === "date" && !m.complete && !m.onTrack && !m.expired));
+    if (!m || m.complete) return false;
+    return (m.type === "monthly" && m.underfunded) || (m.type === "date" && !m.onTrack);
   });
   if (under.length) {
+    let needed = 0;
+    for (const c of under) {
+      const m = getGoalMetrics(c, snap.available[c.id] || 0, snap.budgeted[c.id] || 0, month);
+      if (!m) continue;
+      if (m.type === "monthly") needed += m.needed;
+      else if (m.type === "date") needed += Math.max(0, m.monthlyNeeded - (snap.budgeted[c.id] || 0));
+    }
+    const noun = under.length === 1 ? "goal needs" : "goals need";
     notices.append(h("button", { class: "notice warn", type: "button", onclick: () => openAllGoals(ctx) },
-      h("strong", { text: under.slice(0, 2).map((c) => c.name).join(", ") + (under.length > 2 ? "…" : "") }),
+      h("strong", { text: `${under.length} ${noun} funding` }),
+      h("span", { text: `${fmt(needed)} still needed this month` }),
       h("span", { class: "notice-go", text: "Goals" }),
+    ));
+  }
+  for (const miss of ccMismatches(budget, today)) {
+    notices.append(h("button", { class: "notice warn", type: "button", onclick: () => {
+      const openPad = () => {
+        const live = ctx.budget();
+        const cat = (live.categories || []).find((c) => c.id === miss.pay.id);
+        if (!cat) return;
+        const cur = Number((live.monthlyBudgets?.[today] || {})[cat.id] || 0);
+        openAmountPad({
+          title: cat.name,
+          value: round2(cur + miss.short),
+          allowNegative: true,
+          onCommit: (val) => commitAssigned(ctx, cat, today, val),
+        });
+      };
+      if (ctx.month !== today) ctx.setMonth(today);
+      openPad();
+    } },
+      h("strong", { text: `${miss.card.name} payment is short ${fmt(miss.short)}` }),
+      h("span", { text: `Balance ${fmt(miss.owed)}. Set aside ${fmt(Math.max(0, miss.setAside))}.` }),
+      h("span", { class: "notice-go", text: "Assign" }),
     ));
   }
 
@@ -114,6 +148,52 @@ export function renderBudget(root, ctx) {
   }
 }
 
+function commitAssigned(ctx, cat, month, val) {
+  if (!Number.isFinite(val)) return;
+  const plan = planClawback(ctx.budget(), month, cat.id, val);
+  if (plan.direct) {
+    ctx.updateBudget((b) => setAssigned(b, month, cat.id, val));
+    return;
+  }
+  if (plan.insufficient) {
+    const sheet = openSheet({
+      title: "Not enough money",
+      body: (host) => {
+        host.append(h("p", { class: "lede", text: `That needs ${fmt(plan.shortfall)} more than is Ready to Assign, and only ${fmt(plan.available)} can be pulled back from future months.` }));
+        host.append(h("p", { class: "hint", text: "This change can’t be made. You’d be assigning money you don’t have." }));
+        host.append(btn("OK", { block: true, onClick: () => sheet.close() }));
+      },
+    });
+    return;
+  }
+  if (plan.ok && plan.plan) {
+    const sheet = openSheet({
+      title: "Free up money from future months?",
+      body: (host) => {
+        host.append(h("p", { class: "lede", text: `${cat.name} needs ${fmt(plan.shortfall)} more than is Ready to Assign. That money is already assigned in later months.` }));
+        host.append(h("p", { class: "kicker", text: "Unassign to cover it" }));
+        for (const step of plan.plan) {
+          host.append(h("div", { class: "line" },
+            h("span", { text: `${step.categoryName} · ${monthLabel(step.month)}` }),
+            h("span", { class: "money neg", text: `−${fmt(step.amount)}` }),
+          ));
+        }
+        host.append(h("div", { class: "line" }, h("strong", { text: "Total unassigned" }), h("strong", { text: fmt(plan.shortfall) })));
+        host.append(h("div", { class: "row gap" },
+          btn("Cancel", { kind: "ghost", onClick: () => sheet.close() }),
+          btn("Free it up", { onClick: () => {
+            ctx.updateBudget((b) => applyClawback(b, month, plan.plan, cat.id, val, plan.shortfall));
+            sheet.close();
+            toast("Moved from later months", { label: "Undo", action: () => ctx.undo() });
+          }}),
+        ));
+      },
+    });
+    return;
+  }
+  ctx.updateBudget((b) => setAssigned(b, month, cat.id, val));
+}
+
 function categoryRow(ctx, cat, snap, month, today) {
   const budgeted = Number(snap.budgeted[cat.id] || 0);
   const activity = Number(snap.activity[cat.id] || 0);
@@ -144,22 +224,7 @@ function categoryRow(ctx, cat, snap, month, today) {
       title: cat.name,
       value: budgeted,
       allowNegative: true,
-      onCommit: (val) => {
-        if (!Number.isFinite(val)) return;
-        const plan = planClawback(ctx.budget(), month, cat.id, val);
-        if (plan.direct || (plan.ok === true && plan.direct)) {
-          ctx.updateBudget((b) => setAssigned(b, month, cat.id, val));
-        } else if (plan.insufficient) {
-          toast("Not enough Ready to Assign, even after future months.");
-        } else if (plan.ok && plan.plan) {
-          confirmDialog({
-            title: "Pull from future months?",
-            message: plan.plan.map((p) => `${p.categoryName} in ${p.month}: ${fmt(p.amount)}`).join("\n"),
-            confirm: "Move it",
-            onConfirm: () => ctx.updateBudget((b) => applyClawback(b, month, plan.plan, cat.id, val)),
-          });
-        } else ctx.updateBudget((b) => setAssigned(b, month, cat.id, val));
-      },
+      onCommit: (val) => commitAssigned(ctx, cat, month, val),
     });
   }});
   bBtn.append(h("span", { class: "fig-k", text: "Assigned" }), h("span", { class: "fig-n", text: fmt(budgeted) }));
@@ -171,12 +236,16 @@ function categoryRow(ctx, cat, snap, month, today) {
     ? h("div", { class: "goal-bar" }, h("span", { style: `width:${Math.max(0, Math.min(100, metrics.complete ? 100 : (metrics.progress != null ? metrics.progress : (metrics.target ? (avail / metrics.target) * 100 : 0))))}%` }))
     : null;
 
+  const availControl = Math.abs(avail) < 0.005
+    ? h("div", { class: avCls }, h("span", { class: "fig-n", text: fmt(avail) }))
+    : h("button", { class: avCls, type: "button", onclick: () => {
+      if (avail < -0.005) openMove(ctx, null, cat.id);
+      else openMove(ctx, cat.id, null);
+    } }, h("span", { class: "fig-n", text: fmt(avail) }));
+
   row.append(
     h("div", { class: "cat-id" }, title, sub),
-    h("button", { class: avCls, type: "button", onclick: () => {
-      if (avail < -0.005) openCover(ctx, month, cat.id);
-      else openMove(ctx, cat.id, null);
-    } }, h("span", { class: "fig-n", text: fmt(avail) })),
+    availControl,
     h("div", { class: "cat-figs" },
       bBtn,
       h("button", { class: actCls, type: "button", onclick: () => ctx.go("transactions", { categoryId: cat.id, month }) },
@@ -196,97 +265,187 @@ function openMove(ctx, fromId, toId) {
   let from = fromId || "rta";
   let to = toId || "";
   let amount = 0;
+  if (toId && fromId == null) {
+    const av = snap.available[toId] || 0;
+    if (av < -0.005) amount = round2(Math.abs(av));
+  }
   const sheet = openSheet({
     title: "Move money",
     body: (host) => {
-      const fromSel = h("select", { class: "input" });
-      const toSel = h("select", { class: "input" });
-      const fill = () => {
-        fromSel.replaceChildren(h("option", { value: "rta", text: `Ready to Assign (${fmt(Math.max(0, snap.free))})` }));
-        toSel.replaceChildren(h("option", { value: "", text: "Select destination" }), h("option", { value: "rta", text: "Ready to Assign" }));
-        for (const g of budget.categoryGroups) {
+      const paint = () => {
+        const fromAvail = from === "rta" ? Math.max(0, snap.free) : Math.max(0, snap.available[from] || 0);
+        const fromSel = h("select", { class: "input" });
+        const toSel = h("select", { class: "input" });
+        fromSel.append(h("option", { value: "rta", text: `Ready to Assign (${fmt(Math.max(0, snap.free))})` }));
+        toSel.append(h("option", { value: "", text: "Select destination" }), h("option", { value: "rta", text: "Ready to Assign" }));
+        for (const g of budget.categoryGroups || []) {
           const og1 = h("optgroup", { label: g.name });
           const og2 = h("optgroup", { label: g.name });
+          let n1 = 0;
+          let n2 = 0;
           for (const c of budget.categories.filter((c) => c.groupId === g.id && !c.archived)) {
             const av = snap.available[c.id] || 0;
             og1.append(h("option", { value: c.id, text: `${c.name} (${fmt(av)})`, disabled: av <= 0 }));
-            if (c.id !== from) og2.append(h("option", { value: c.id, text: c.name }));
+            n1++;
+            if (c.id !== from) { og2.append(h("option", { value: c.id, text: c.name })); n2++; }
           }
-          fromSel.append(og1); toSel.append(og2);
+          if (n1) fromSel.append(og1);
+          if (n2) toSel.append(og2);
         }
-        fromSel.value = from; toSel.value = to;
+        fromSel.value = from;
+        toSel.value = to;
+        fromSel.addEventListener("change", () => { from = fromSel.value; if (to === from) to = ""; paint(); });
+        toSel.addEventListener("change", () => { to = toSel.value; paint(); });
+        const err = h("p", { class: "error", text: "" });
+        const can = to && from !== to && amount > 0.005;
+        host.replaceChildren(
+          field("From", fromSel),
+          field("To", toSel),
+          field(`Amount (max ${fmt(fromAvail)})`, moneyButton(amount, (n) => { amount = round2(n); paint(); })),
+          err,
+          btn("Move money", { block: true, disabled: !can, onClick: () => {
+            const avail = from === "rta" ? Math.max(0, snap.free) : Math.max(0, snap.available[from] || 0);
+            if (!to || from === to || !(amount > 0.005)) return;
+            if (amount > avail + 0.001) { err.textContent = `Only ${fmt(avail)} available.`; return; }
+            ctx.updateBudget((b) => moveMoney(b, month, from === "rta" ? null : from, to === "rta" ? null : to, amount));
+            sheet.close();
+            toast("Money moved", { label: "Undo", action: () => ctx.undo() });
+          }}),
+        );
       };
-      fill();
-      fromSel.addEventListener("change", () => { from = fromSel.value; fill(); });
-      toSel.addEventListener("change", () => { to = toSel.value; });
-      const err = h("p", { class: "error", text: "" });
-      host.append(field("From", fromSel), field("To", toSel), field("Amount", moneyButton(0, (n) => { amount = n; })), err,
-        btn("Move", { block: true, onClick: () => {
-          const avail = from === "rta" ? Math.max(0, snap.free) : (snap.available[from] || 0);
-          if (!to || from === to || !(amount > 0)) return;
-          if (amount > avail + 0.001) { err.textContent = `Only ${fmt(avail)} available.`; return; }
-          ctx.updateBudget((b) => moveMoney(b, month, from === "rta" ? null : from, to === "rta" ? null : to, amount));
-          sheet.close();
-          toast("Money moved", { label: "Undo", action: () => ctx.undo() });
-        }}));
+      paint();
     },
   });
 }
 
-function openCover(ctx, month, focusId, note) {
+function catName(budget, id) {
+  if (!id || id === "rta") return "Ready to Assign";
+  return budget.categories?.find((c) => c.id === id)?.name || "Unknown";
+}
+
+function openCover(ctx, month, note) {
   const budget = ctx.budget();
-  const overs = (budget.categories || []).filter((c) => !c.archived && !c.creditCardId && available(budget, c.id, month) < -0.005);
+  const snap = budgetSnapshot(budget, month);
+  const overs = (budget.categories || []).filter((c) => !c.archived && !c.creditCardId && (snap.available[c.id] || 0) < -0.005);
   if (!overs.length) { toast("Nothing overspent this month"); return; }
+  const total = overs.reduce((s, c) => s + Math.abs(snap.available[c.id] || 0), 0);
+  const rta = Math.max(0, snap.free);
+  const availOf = (id) => (id === "rta" ? rta : (snap.available[id] || 0));
   const sources = [];
   const before = new Set(overspentMonths(budget, monthKey()).map((o) => o.month));
   const sheet = openSheet({
-    title: "Cover overspending",
+    title: `Cover overspending — ${monthLabel(month)}`,
     body: (host) => {
-      if (note) host.append(h("p", { class: "notice", text: note }));
-      host.append(h("p", { class: "lede", text: overs.map((c) => `${c.name} ${fmt(available(budget, c.id, month))}`).join("\n") }));
-      const free = globalFree(budget, month);
-      const addSrc = (id, name, max) => {
-        let amt = 0;
-        const row = h("div", { class: "line" }, h("span", { text: name }), moneyButton(0, (n) => { amt = Math.min(n, max); const i = sources.find((s) => s.id === id); if (i) i.amount = amt; else sources.push({ id, amount: amt }); }));
-        host.append(row);
-      };
-      if (free > 0.005) addSrc("rta", `Ready to Assign (${fmt(free)})`, free);
-      for (const c of budget.categories) {
-        if (c.archived || c.creditCardId) continue;
-        const av = available(budget, c.id, month);
-        if (av > 0.005 && !overs.some((o) => o.id === c.id)) addSrc(c.id, `${c.name} (${fmt(av)})`, av);
-      }
-      host.append(btn("Cover", { block: true, onClick: () => {
-        const use = sources.filter((s) => s.amount > 0);
-        if (!use.length) return;
-        ctx.updateBudget((b) => coverOverspending(b, month, use));
-        sheet.close();
-        const b = ctx.budget();
-        const today = monthKey();
-        let mk = nextMonth(month);
-        for (let i = 0; i < 24 && mk <= today; i++) {
-          const still = (b.categories || []).some((c) => !c.archived && !c.creditCardId && available(b, c.id, mk) < -0.005);
-          if (still) {
-            const created = !before.has(mk);
-            ctx.setMonth(mk);
-            openCover(ctx, mk, null, created ? `Covering ${monthLabel(month)} left overspending in ${monthLabel(mk)}.` : `Still overspent in ${monthLabel(mk)}.`);
+      const paint = () => {
+        const covered = sources.reduce((s, src) => s + src.amount, 0);
+        const gap = Math.max(0, round2(total - covered));
+        const used = new Set(sources.map((s) => s.id));
+        const options = [];
+        if (rta > 0.005 && !used.has("rta")) options.push({ id: "rta", name: "Ready to Assign", available: rta, group: "" });
+        for (const g of budget.categoryGroups || []) {
+          for (const c of budget.categories || []) {
+            if (c.groupId !== g.id || c.archived || c.creditCardId || used.has(c.id)) continue;
+            const av = snap.available[c.id] || 0;
+            if (av > 0.005) options.push({ id: c.id, name: c.name, available: av, group: g.name });
+          }
+        }
+        const pool = options.reduce((s, o) => s + o.available, 0) + sources.reduce((s, src) => s + availOf(src.id), 0);
+        const noMoney = pool < 0.005 && sources.length === 0;
+        const kids = [];
+        if (note) kids.push(h("p", { class: "lede", text: note }));
+        kids.push(h("p", { class: "kicker", text: "Overspent categories" }));
+        for (const c of overs) {
+          kids.push(h("div", { class: "line" }, h("span", { text: c.name }), h("span", { class: "money neg", text: fmt(snap.available[c.id]) })));
+        }
+        kids.push(h("div", { class: "line" }, h("strong", { text: "Total to cover" }), h("span", { class: "money neg", text: fmt(-total) })));
+        if (noMoney) {
+          kids.push(h("p", { class: "hint", text: "There are no available funds in any category or Ready to Assign to cover this overspending. Add income or reduce spending in another category first." }));
+        } else {
+          if (sources.length) {
+            kids.push(h("p", { class: "kicker", text: "Pulling from" }));
+            for (const src of sources) {
+              kids.push(h("div", { class: "line" },
+                h("span", { text: catName(budget, src.id) }),
+                h("span", { class: "muted", text: `Available ${fmt(availOf(src.id))}` }),
+                h("button", { class: "text-link", type: "button", text: "Remove", onclick: () => {
+                  const i = sources.findIndex((s) => s.id === src.id);
+                  if (i >= 0) sources.splice(i, 1);
+                  paint();
+                } }),
+              ));
+              kids.push(moneyButton(src.amount, (n) => {
+                const avail = availOf(src.id);
+                const coveredNow = sources.reduce((s, x) => s + x.amount, 0);
+                const room = Math.max(0, total - coveredNow) + src.amount;
+                src.amount = round2(Math.min(Math.max(0, n), Math.min(avail, room)));
+                paint();
+              }, { label: catName(budget, src.id) }));
+            }
+            kids.push(h("div", { class: "line" },
+              h("strong", { text: "Remaining gap" }),
+              h("span", { class: gap < 0.005 ? "money pos" : "money neg", text: gap < 0.005 ? "Covered" : fmt(-gap) }),
+            ));
+          }
+          if (options.length && gap > 0.005) {
+            const sel = h("select", { class: "input" });
+            sel.append(h("option", { value: "", text: "Select a category to add…" }));
+            let last = null;
+            let group = null;
+            for (const o of options) {
+              if (o.group !== last) {
+                if (group) sel.append(group);
+                last = o.group;
+                group = o.group ? h("optgroup", { label: o.group }) : null;
+              }
+              const opt = h("option", { value: o.id, text: `${o.name} (${fmt(o.available)} available)` });
+              if (group) group.append(opt);
+              else sel.append(opt);
+            }
+            if (group) sel.append(group);
+            sel.addEventListener("change", () => {
+              const id = sel.value;
+              if (!id || sources.some((s) => s.id === id)) return;
+              const avail = availOf(id);
+              if (avail <= 0.005) return;
+              const coveredNow = sources.reduce((s, x) => s + x.amount, 0);
+              const rem = Math.max(0, total - coveredNow);
+              sources.push({ id, amount: round2(Math.min(avail, rem)) });
+              paint();
+            });
+            kids.push(field("Pull from", sel));
+          }
+          if (!options.length && gap > 0.005) {
+            kids.push(h("p", { class: "hint", text: "No more sources available. You can partially cover and return later." }));
+          }
+        }
+        const canApply = !noMoney && sources.some((s) => s.amount > 0.005);
+        kids.push(btn("Apply", { block: true, disabled: !canApply, onClick: () => {
+          if (!canApply) return;
+          const use = sources.filter((s) => s.amount > 0.005).map((s) => ({ id: s.id, amount: s.amount }));
+          ctx.updateBudget((b) => coverOverspending(b, month, use));
+          sheet.close();
+          const b = ctx.budget();
+          const today = monthKey();
+          const next = overspentMonths(b, today).find((o) => o.month > month);
+          if (next) {
+            const created = !before.has(next.month);
+            ctx.setMonth(next.month);
+            openCover(ctx, next.month, created ? `Covering overspending in ${monthLabel(month)} created overspending in ${monthLabel(next.month)}. Please cover it below.` : null);
             return;
           }
-          mk = nextMonth(mk);
-        }
-        toast("Overspending covered", { label: "Undo", action: () => ctx.undo() });
-      }}));
-      if (focusId) host.dataset.focus = focusId;
+          const stillHere = (b.categories || []).some((c) => !c.archived && !c.creditCardId && available(b, c.id, month) < -0.005);
+          toast(stillHere ? "Partly covered. This month is still overspent." : "Overspending covered", { label: "Undo", action: () => ctx.undo() });
+        }}));
+        host.replaceChildren(...kids);
+      };
+      paint();
     },
   });
 }
 
-function expiredDateGoals(budget, month) {
-  return (budget.categories || []).filter((c) => {
-    if (c.archived || c.goal?.type !== "date") return false;
-    const m = getGoalMetrics(c, available(budget, c.id, month), (budget.monthlyBudgets?.[month] || {})[c.id] || 0, month);
-    return m?.expired && !m.complete;
-  });
+function expiredDateGoals(budget) {
+  const today = monthKey();
+  return (budget.categories || []).filter((c) => c.goal?.type === "date" && c.goal.targetDate && c.goal.targetDate < today && !c.archived);
 }
 
 function openExpired(ctx, cats, then) {
@@ -294,7 +453,7 @@ function openExpired(ctx, cats, then) {
   const sheet = openSheet({
     title: "Goals past their date",
     body: (host) => {
-      host.append(h("p", { class: "lede", text: "Set a new date or remove the goal before auto-assign continues." }));
+      host.append(h("p", { class: "lede", text: "These target-by-date goals have passed. Set a new goal or remove each one before auto-assign continues." }));
       for (const cat of cats) {
         const box = h("div", { class: "pair" });
         const date = h("input", { class: "input", type: "month", min: nextMonth(monthKey()) });
@@ -302,7 +461,12 @@ function openExpired(ctx, cats, then) {
         box.append(h("strong", { text: cat.name }), h("p", { class: "hint", text: `${fmt(cat.goal.target)} by ${cat.goal.targetDate}` }),
           field("New month", date), field("New target", moneyButton(target, (n) => { target = n; })),
           h("div", { class: "row gap wrap" },
-            btn("Use new goal", { kind: "ghost", onClick: () => { if (!date.value) { toast("Pick a future month"); return; } choices[cat.id] = { date: date.value, amount: target }; toast("Noted"); } }),
+            btn("Use new goal", { kind: "ghost", onClick: () => {
+              if (!date.value || date.value <= monthKey()) { toast("Pick a future month"); return; }
+              if (!(target > 0)) { toast("Enter a target amount"); return; }
+              choices[cat.id] = { date: date.value, amount: target };
+              toast("Noted");
+            } }),
             btn("Remove goal", { kind: "quiet", onClick: () => { choices[cat.id] = "remove"; toast("Will remove"); } }),
           ));
         host.append(box);
@@ -328,112 +492,209 @@ function openExpired(ctx, cats, then) {
 function openAuto(ctx) {
   const budget = ctx.budget();
   const month = ctx.month;
-  const expired = expiredDateGoals(budget, month);
+  const expired = expiredDateGoals(budget);
   if (expired.length) { openExpired(ctx, expired, () => openAuto(ctx)); return; }
   runAuto(ctx, month, null);
+}
+
+function stillUnderfunded(budget, mk) {
+  return (budget.categories || []).some((cat) => {
+    if (!cat.goal?.type || cat.archived) return false;
+    const avail = available(budget, cat.id, mk);
+    const budgeted = (budget.monthlyBudgets?.[mk] || {})[cat.id] || 0;
+    const m = getGoalMetrics(cat, avail, budgeted, mk);
+    if (!m || m.complete) return false;
+    return (m.type === "monthly" && m.underfunded) || (m.type === "date" && !m.onTrack);
+  });
 }
 
 function runAuto(ctx, month, carried) {
   const budget = ctx.budget();
   const result = computeMonthAssignments(budget, month, budget.monthlyBudgets || {}, budget.inflows || {});
-  if (!result.assignments.length && !carried) { toast("Nothing to assign. Goals are funded, or Ready to Assign is empty."); return; }
+  const all = carried ? carried.map((b) => ({ ...b, assignments: [...(b.assignments || [])] })) : [];
+  if (!result.assignments.length) {
+    if (!all.length) { toast("Nothing to assign. Goals are funded, or Ready to Assign is empty."); return; }
+    proceedAfter(ctx, month, all);
+    return;
+  }
+  openAssignPreview(ctx, month, result, all);
+}
+
+function openAssignPreview(ctx, month, result, all) {
+  const budget = ctx.budget();
   const amounts = {};
   result.assignments.forEach((a) => { amounts[a.categoryId] = a.amount; });
-  const all = carried ? [...carried] : [];
-  if (!result.assignments.length) { openSavings(ctx, month, all); return; }
   const sheet = openSheet({
-    title: `Auto-assign ${monthLabel(month)}`,
+    title: `Auto-assign — ${monthLabel(month)}`,
     body: (host) => {
-      host.append(h("p", { class: "lede", text: "Underfunded monthly and dated goals. Edit any amount before it lands." }));
-      for (const a of result.assignments) {
-        const cat = budget.categories.find((c) => c.id === a.categoryId);
-        host.append(h("div", { class: "line" }, h("span", { text: cat?.name || "Category" }), moneyButton(a.amount, (n) => { amounts[a.categoryId] = n; })));
-      }
-      host.append(btn("Assign", { block: true, onClick: () => {
-        ctx.updateBudget((b) => applyAssignments(b, month, amounts));
-        sheet.close();
-        const applied = result.assignments.map((a) => ({ ...a, amount: amounts[a.categoryId] || 0 })).filter((a) => a.amount > 0);
-        openSavings(ctx, month, [...all, { month, assignments: applied }]);
-      }}));
+      const paint = () => {
+        const total = Object.values(amounts).reduce((s, v) => s + (Number(v) || 0), 0);
+        const remaining = globalFree(ctx.budget(), month) - total;
+        const kids = [h("p", { class: "lede", text: "Review the suggested amounts. Tap any amount to change it before it lands." })];
+        for (const a of result.assignments) {
+          const cat = budget.categories.find((c) => c.id === a.categoryId);
+          kids.push(h("div", { class: "line" }, h("span", { text: cat?.name || "Category" }), moneyButton(amounts[a.categoryId] || 0, (n) => {
+            amounts[a.categoryId] = round2(Math.max(0, n));
+            paint();
+          })));
+        }
+        kids.push(h("div", { class: "line" },
+          h("span", { text: "Ready to Assign after this" }),
+          h("span", { class: remaining < -0.001 ? "money neg" : "money pos", text: fmt(remaining) }),
+        ));
+        if (remaining < -0.001) kids.push(h("p", { class: "error", text: "That total is more than Ready to Assign. Reduce one or more amounts." }));
+        const ok = remaining >= -0.001 && total > 0.005;
+        kids.push(h("div", { class: "row gap" },
+          btn("Cancel", { kind: "ghost", onClick: () => sheet.close() }),
+          btn("Assign", { block: true, disabled: !ok, onClick: () => {
+            if (!ok) return;
+            ctx.updateBudget((b) => applyAssignments(b, month, amounts));
+            sheet.close();
+            const applied = result.assignments.map((a) => ({ categoryId: a.categoryId, amount: amounts[a.categoryId] || 0 })).filter((a) => a.amount > 0.005);
+            const next = [...all];
+            if (applied.length) next.push({ month, assignments: applied });
+            proceedAfter(ctx, month, next);
+          }}),
+        ));
+        host.replaceChildren(...kids);
+      };
+      paint();
     },
   });
 }
 
-function openSavings(ctx, month, all) {
+function proceedAfter(ctx, month, all) {
   const budget = ctx.budget();
   const left = globalFree(budget, month);
-  const goals = (budget.categories || []).filter((c) => c.goal?.type === "savings" && !c.archived && !getGoalMetrics(c, available(budget, c.id, month), 0, month)?.complete);
-  if (!(left > 1) || !goals.length) { offerCascade(ctx, month, all); return; }
+  if (stillUnderfunded(budget, month) || !(left > 0.005)) { openRecap(ctx, all); return; }
+  const goals = (budget.categories || []).filter((c) => {
+    if (c.goal?.type !== "savings" || c.archived) return false;
+    const cur = available(budget, c.id, month);
+    return (c.goal.target || 0) - cur > 0.001;
+  }).map((c) => {
+    const current = available(budget, c.id, month);
+    const target = c.goal.target || 0;
+    return { id: c.id, name: c.name, current, target, need: Math.max(0, target - current) };
+  });
+  if (goals.length) openSavings(ctx, month, all, goals, left);
+  else if ((budget.categories || []).some((c) => c.goal?.type && !c.archived)) openCascade(ctx, month, all, left);
+  else openRecap(ctx, all);
+}
+
+function openSavings(ctx, month, all, goals, left) {
   const amounts = {};
   const sheet = openSheet({
-    title: "Savings goals",
+    title: "Fund savings goals?",
     body: (host) => {
-      host.append(h("p", { class: "lede", text: `${fmt(left)} is still Ready to Assign. Fund savings targets, or skip.` }));
-      for (const g of goals) host.append(h("div", { class: "line" }, h("span", { text: g.name }), moneyButton(0, (n) => { amounts[g.id] = n; })));
-      host.append(h("div", { class: "row gap" },
-        btn("Skip", { kind: "ghost", onClick: () => { sheet.close(); offerCascade(ctx, month, all); } }),
-        btn("Fund", { block: true, onClick: () => {
-          ctx.updateBudget((b) => applyAssignments(b, month, amounts));
-          sheet.close();
-          const applied = Object.entries(amounts).filter(([, n]) => n > 0).map(([categoryId, amount]) => ({ categoryId, amount }));
-          const bucket = all.find((a) => a.month === month);
-          if (bucket) bucket.assignments.push(...applied);
-          else if (applied.length) all.push({ month, assignments: applied });
-          offerCascade(ctx, month, all);
-        }}),
-      ));
+      const paint = () => {
+        const allocated = Object.values(amounts).reduce((s, v) => s + (Number(v) || 0), 0);
+        const after = left - allocated;
+        const kids = [h("p", { class: "lede", text: `${fmt(left)} is left after this month’s other goals. Savings targets aren’t filled automatically.` })];
+        for (const g of goals) {
+          kids.push(h("div", { class: "pair" },
+            h("div", { class: "line" },
+              h("strong", { text: g.name }),
+              h("span", { class: "muted", text: `${fmt(g.current)} of ${fmt(g.target)} · needs ${fmt(g.need)}` }),
+            ),
+            moneyButton(amounts[g.id] || 0, (n) => {
+              amounts[g.id] = round2(Math.max(0, Math.min(n, g.need)));
+              paint();
+            }),
+          ));
+        }
+        kids.push(h("div", { class: "line" },
+          h("span", { text: "Remaining after this" }),
+          h("span", { class: after < -0.001 ? "money neg" : "money pos", text: fmt(after) }),
+        ));
+        if (after < -0.001) kids.push(h("p", { class: "error", text: "That’s more than what’s available. Reduce one or more amounts." }));
+        const ok = after >= -0.001 && allocated > 0.005;
+        kids.push(h("div", { class: "row gap" },
+          btn("Skip", { kind: "ghost", onClick: () => { sheet.close(); afterSavings(ctx, month, all, left); } }),
+          btn("Assign", { block: true, disabled: !ok, onClick: () => {
+            if (!ok) return;
+            ctx.updateBudget((b) => applyAssignments(b, month, amounts));
+            sheet.close();
+            const applied = Object.entries(amounts).filter(([, n]) => n > 0.005).map(([categoryId, amount]) => ({ categoryId, amount }));
+            const next = all.map((b) => ({ ...b, assignments: [...(b.assignments || [])] }));
+            const bucket = next.find((a) => a.month === month);
+            if (applied.length && bucket) bucket.assignments.push(...applied);
+            else if (applied.length) next.push({ month, assignments: applied });
+            afterSavings(ctx, month, next, globalFree(ctx.budget(), month));
+          }}),
+        ));
+        host.replaceChildren(...kids);
+      };
+      paint();
     },
   });
 }
 
-function offerCascade(ctx, month, all) {
+function afterSavings(ctx, month, all, left) {
   const budget = ctx.budget();
-  const left = globalFree(budget, month);
-  const hasGoals = (budget.categories || []).some((c) => c.goal && !c.archived && c.goal.type !== "savings");
-  if (!(left > 1) || !hasGoals) { openRecap(all); return; }
-  const fund = () => {
-    ctx.updateBudget((b) => {
-      let cur = b;
-      let mk = nextMonth(month);
-      for (let i = 0; i < 18; i++) {
-        const res = computeMonthAssignments(cur, mk, cur.monthlyBudgets || {}, cur.inflows || {});
-        if (!res.assignments.length) break;
-        const am = {};
-        res.assignments.forEach((a) => { am[a.categoryId] = a.amount; });
-        cur = applyAssignments(cur, mk, am);
-        mk = nextMonth(mk);
-      }
-      return cur;
-    });
-    toast("Funded later months that still had goals");
-  };
-  confirmDialog({
-    title: "Keep assigning?",
-    message: `${fmt(left)} is still Ready to Assign.`,
-    confirm: "Next month",
-    extra: (host) => {
-      host.append(btn("Fund every later month", { kind: "quiet", block: true, onClick: () => { fund(); closeAndRecap(all); } }));
+  if (left > 0.005 && (budget.categories || []).some((c) => c.goal?.type && !c.archived)) openCascade(ctx, month, all, left);
+  else openRecap(ctx, all);
+}
+
+function openCascade(ctx, month, all, left) {
+  const nxt = nextMonth(month);
+  const sheet = openSheet({
+    title: "This month’s goals are funded",
+    body: (host) => {
+      host.append(h("p", { class: "lede", text: `Goals for ${monthLabel(month)} are funded. ${fmt(left)} is still Ready to Assign.` }));
+      host.append(btn("Fund every later month", { block: true, onClick: () => {
+        ctx.updateBudget((b) => {
+          let cur = b;
+          let mk = nxt;
+          const extra = [];
+          for (let i = 0; i < 24; i++) {
+            const res = computeMonthAssignments(cur, mk, cur.monthlyBudgets || {}, cur.inflows || {});
+            if (!res.assignments.length) break;
+            extra.push({ month: mk, assignments: res.assignments.map((a) => ({ categoryId: a.categoryId, amount: a.amount })) });
+            const am = {};
+            res.assignments.forEach((a) => { am[a.categoryId] = a.amount; });
+            cur = applyAssignments(cur, mk, am);
+            mk = nextMonth(mk);
+          }
+          sheet._extra = extra;
+          return cur;
+        });
+        sheet.close();
+        openRecap(ctx, [...all, ...(sheet._extra || [])]);
+      }}));
+      host.append(btn(`Continue with ${monthLabel(nxt)} only`, { kind: "ghost", block: true, onClick: () => {
+        sheet.close();
+        runAuto(ctx, nxt, all);
+      }}));
+      host.append(btn("Stop here", { kind: "quiet", block: true, onClick: () => { sheet.close(); openRecap(ctx, all); } }));
     },
-    onConfirm: () => runAuto(ctx, nextMonth(month), all),
   });
 }
 
-function closeAndRecap(all) {
-  document.querySelector(".scrim")?.querySelector(".icon-btn")?.click();
-  openRecap(all);
-}
-
-function openRecap(all) {
-  const lines = [];
-  for (const block of all || []) {
-    for (const a of block.assignments || []) lines.push(`${monthLabel(block.month)}: ${fmt(a.amount)}`);
-  }
-  if (!lines.length) { toast("Assigned"); return; }
-  openSheet({
-    title: "Assigned",
+function openRecap(ctx, all) {
+  const budget = ctx.budget();
+  const blocks = (all || []).map((block) => ({
+    month: block.month,
+    items: (block.assignments || []).filter((a) => a.amount > 0.005).map((a) => ({
+      name: budget.categories.find((c) => c.id === a.categoryId)?.name || "Category",
+      amount: a.amount,
+    })),
+  })).filter((b) => b.items.length);
+  if (!blocks.length) { toast("Assigned"); return; }
+  const grand = blocks.reduce((s, b) => s + b.items.reduce((t, i) => t + i.amount, 0), 0);
+  const sheet = openSheet({
+    title: "Auto-assign recap",
     body: (host) => {
-      host.append(h("p", { class: "lede", text: lines.join("\n") }));
-      host.append(btn("Done", { block: true, onClick: () => document.querySelector(".sheet .icon-btn")?.click() }));
+      host.append(h("p", { class: "lede", text: "Here’s everything that was assigned." }));
+      for (const block of blocks) {
+        host.append(h("p", { class: "kicker", text: monthLabel(block.month) }));
+        for (const item of block.items) {
+          host.append(h("div", { class: "line" }, h("span", { text: item.name }), h("span", { class: "money pos", text: `+${fmt(item.amount)}` })));
+        }
+        const sub = block.items.reduce((s, i) => s + i.amount, 0);
+        host.append(h("div", { class: "line" }, h("span", { class: "muted", text: "Subtotal" }), h("span", { text: fmt(sub) })));
+      }
+      host.append(h("div", { class: "line" }, h("strong", { text: "Total assigned" }), h("strong", { text: fmt(grand) })));
+      host.append(btn("Done", { block: true, onClick: () => sheet.close() }));
     },
   });
 }
@@ -524,6 +785,7 @@ function openCategory(ctx, cat) {
         ctx.updateBudget((b) => setCategory(b, { ...cat, name: titled, groupId, note, rollover: cat.rollover || "rollover", rolloverChanges, rolloverMax: rollover === "max" ? max : 0, goal: goalObj }));
         sheet.close();
       }}));
+      host.append(btn("Note for this month", { kind: "ghost", block: true, onClick: () => { sheet.close(); openNote(ctx, cat); } }));
       if (!cat.creditCardId) {
         host.append(btn(cat.archived ? "Restore" : "Archive", { kind: "ghost", block: true, onClick: () => { ctx.updateBudget((b) => archiveCategory(b, cat.id, month)); sheet.close(); } }));
         host.append(btn("Delete", { kind: "danger", block: true, onClick: () => {
@@ -659,15 +921,38 @@ void uid;
 
 export function openInbox(ctx) {
   const notes = collectReminders(ctx.budget(), ctx.month);
-  openSheet({
+  const sheet = openSheet({
     title: notes.length ? `${notes.length} notice${notes.length === 1 ? "" : "s"}` : "Notices",
     body: (host) => {
       if (!notes.length) host.append(h("p", { class: "empty", text: "Nothing needs you right now." }));
       for (const n of notes) {
         host.append(h("button", { class: "notice", type: "button", onclick: () => {
+          sheet.close();
+          if (n.kind === "overspend") {
+            const mk = String(n.id || "").split(":")[1];
+            if (mk) ctx.setMonth(mk);
+            openCover(ctx, mk || ctx.month);
+            return;
+          }
+          if (n.kind === "payment") {
+            const id = String(n.id || "").slice("payment:".length);
+            const tx = (ctx.budget().transactions || []).find((t) => t.id === id);
+            if (tx) openMissingSide(ctx, tx);
+            else toast("That payment is already matched");
+            return;
+          }
+          if (n.kind === "reconcile") {
+            const id = String(n.id || "").split(":")[1];
+            ctx.ui.focusAccount = id;
+            ctx.go("accounts");
+            return;
+          }
+          if (n.kind === "cc" || n.kind === "goal" || n.kind === "bill" || n.kind === "rta") {
+            ctx.go("budget");
+            return;
+          }
           const hash = String(n.url || "").replace(/^\.\//, "");
           if (hash) location.hash = hash.startsWith("#") ? hash : `#${hash}`;
-          document.querySelector(".scrim .icon-btn")?.click();
         } }, h("strong", { text: n.title }), h("span", { text: n.body || "" })));
       }
     },
@@ -675,14 +960,28 @@ export function openInbox(ctx) {
 }
 
 function openLog(ctx) {
-  const log = [...(ctx.budget().moneyMoveLog || [])].reverse();
+  const budget = ctx.budget();
+  const month = ctx.month;
+  const label = (type) => type === "cover" ? "Cover overspending" : type === "cover-future" ? "Cover from future months" : type === "assign" ? "Budget assignment" : "Move money";
+  const when = (ts) => {
+    const d = new Date(ts || 0);
+    if (!ts || Number.isNaN(d.getTime())) return "";
+    return d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  };
+  const log = [...(budget.moneyMoveLog || [])].filter((e) => e.month === month).reverse();
   openSheet({
-    title: "Money moves",
+    title: `Move history — ${monthLabel(month)}`,
     body: (host) => {
-      if (!log.length) host.append(h("p", { class: "empty", text: "Moves you make will show up here." }));
-      for (const entry of log.slice(0, 40)) {
-        const bits = (entry.entries || []).map((e) => `${fmt(e.amount)}`).join(", ");
-        host.append(h("div", { class: "line" }, h("span", {}, h("strong", { text: entry.type || "move" }), h("span", { class: "muted", text: ` ${entry.month || ""}` })), h("span", { text: bits })));
+      if (!log.length) host.append(h("p", { class: "empty", text: `No moves recorded for ${monthLabel(month)}.` }));
+      for (const entry of log) {
+        const head = h("div", { class: "line" }, h("strong", { text: label(entry.type) }), h("span", { class: "muted", text: when(entry.ts) }));
+        host.append(head);
+        for (const e of entry.entries || []) {
+          host.append(h("div", { class: "line" },
+            h("span", { text: `${catName(budget, e.from)} → ${catName(budget, e.to)}` }),
+            h("span", { class: "money pos", text: fmt(e.amount) }),
+          ));
+        }
       }
     },
   });

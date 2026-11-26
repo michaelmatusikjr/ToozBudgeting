@@ -1,17 +1,18 @@
-import { APP_VERSION, monthKey, prevMonth, nextMonth, deepClone } from "./util.js?v=133";
-import { loadState, saveState, subscribe, exportData, importData, deviceGet, deviceSet } from "./store.js?v=133";
-import { h, clear, icon, toast, closeAllModals, btn } from "./ui.js?v=133";
-import { renderIdentity, renderWizard } from "./views/gate.js?v=133";
-import { renderBudget, openInbox } from "./views/budget.js?v=133";
-import { renderTransactions, openTx } from "./views/transactions.js?v=133";
-import { renderAccounts } from "./views/accounts.js?v=133";
-import { renderPayees } from "./views/payees.js?v=133";
-import { renderSettings } from "./views/settings.js?v=133";
-import { registerSW, activateWaiting } from "./pwa.js?v=133";
-import { scheduleLocal, collectReminders } from "./notify.js?v=133";
-import { pushOnOpen } from "./push.js?v=133";
-import { normalizeBudget } from "./mutate.js?v=133";
-import { announceIfUpdated } from "./whatsnew.js?v=133";
+import { APP_VERSION, monthKey, prevMonth, nextMonth, deepClone } from "./util.js?v=134";
+import { loadState, saveState, subscribe, exportData, importData, deviceGet, deviceSet } from "./store.js?v=134";
+import { h, clear, icon, toast, closeAllModals, btn } from "./ui.js?v=134";
+import { renderIdentity, renderWizard } from "./views/gate.js?v=134";
+import { renderBudget, openInbox } from "./views/budget.js?v=134";
+import { renderTransactions, openTx } from "./views/transactions.js?v=134";
+import { renderAccounts } from "./views/accounts.js?v=134";
+import { renderPayees } from "./views/payees.js?v=134";
+import { renderSettings } from "./views/settings.js?v=134";
+import { registerSW, activateWaiting } from "./pwa.js?v=134";
+import { scheduleLocal, collectReminders } from "./notify.js?v=134";
+import { pushOnOpen } from "./push.js?v=134";
+import { normalizeBudget } from "./mutate.js?v=134";
+import { announceIfUpdated } from "./whatsnew.js?v=134";
+import { monthAccessible } from "./calc.js?v=134";
 
 const root = document.getElementById("app");
 const undoStack = [];
@@ -199,9 +200,18 @@ window.addEventListener("keydown", (e) => {
     if (dest) { e.preventDefault(); ctx.go(dest); }
     return;
   }
-  if (ctx.nav === "budget" && ctx.state?.setupComplete) {
-    if (e.key === "ArrowLeft") { e.preventDefault(); ctx.setMonth(prevMonth(ctx.month)); }
-    if (e.key === "ArrowRight") { e.preventDefault(); ctx.setMonth(nextMonth(ctx.month)); }
+  if (ctx.nav === "budget" && ctx.state?.setupComplete && ctx.budget()) {
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      const p = prevMonth(ctx.month);
+      if (monthAccessible(ctx.budget(), p)) ctx.setMonth(p);
+    }
+    if (e.key === "ArrowRight") {
+      e.preventDefault();
+      const n = nextMonth(ctx.month);
+      if (!monthAccessible(ctx.budget(), n)) { toast("Assign money in the previous month first"); return; }
+      ctx.setMonth(n);
+    }
   }
   if (ctx.nav === "transactions") {
     if (e.key === "n" || e.key === "N") { e.preventDefault(); openTx(ctx, null); }

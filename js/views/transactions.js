@@ -1,8 +1,8 @@
-import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, keepFocus } from "../ui.js?v=133";
-import { fmt, todayKey, toTitleCase, isCard, ccPayCat, makePayFrom, RTA } from "../util.js?v=133";
-import { displayName, payeeDefaultCategory, payeeSuggestedCategory, findFuzzyDuplicates } from "../payees.js?v=133";
-import { addTransaction, deleteTransactions, isLocked, setTxCategory, updateTransaction, replaceTransaction, confirmCategories } from "../mutate.js?v=133";
-import { parseCSV, guessColumnMapping, applyMapping } from "../csv.js?v=133";
+import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, keepFocus } from "../ui.js?v=134";
+import { fmt, todayKey, toTitleCase, isCard, ccPayCat, makePayFrom, RTA } from "../util.js?v=134";
+import { displayName, payeeDefaultCategory, payeeSuggestedCategory, findFuzzyDuplicates } from "../payees.js?v=134";
+import { addTransaction, deleteTransactions, isLocked, setTxCategory, updateTransaction, replaceTransaction, confirmCategories } from "../mutate.js?v=134";
+import { parseCSV, guessColumnMapping, applyMapping } from "../csv.js?v=134";
 
 export function renderTransactions(root, ctx) {
   const budget = ctx.budget();
@@ -157,7 +157,7 @@ function txRow(ctx, tx, selected) {
       ),
       h("div", { class: "tx-sub" },
         h("button", { class: `pill ${tx.categoryConfirmed === false ? "bad" : ""}`, type: "button", text: tx.categoryConfirmed === false ? `${cat} · confirm` : cat, disabled: !!locked, onclick: (e) => { e.stopPropagation(); openInlineCat(ctx, tx); } }),
-        tx.type === "payment" ? h("button", { class: `quiet-link ${tx.paymentLinkStatus === "linked" ? "" : "bad"}`, type: "button", text: tx.paymentLinkStatus === "linked" ? "Linked" : "Other side", onclick: (e) => { e.stopPropagation(); if (tx.paymentLinkStatus === "linked") return; enterOtherSide(ctx, tx); } }) : null,
+        tx.type === "payment" ? h("button", { class: `quiet-link ${tx.paymentLinkStatus === "linked" ? "" : "bad"}`, type: "button", text: tx.paymentLinkStatus === "linked" ? "Linked" : "Other side", onclick: (e) => { e.stopPropagation(); if (tx.paymentLinkStatus === "linked") return; openMissingSide(ctx, tx); } }) : null,
       ),
     ),
   );
@@ -172,25 +172,19 @@ function amountClass(budget, tx) {
   return "tx-amt";
 }
 
-function enterOtherSide(ctx, tx) {
+export function openMissingSide(ctx, tx) {
   const budget = ctx.budget();
   const card = isCard(budget, tx.accountId);
   if (card) {
     const from = tx.paymentFromAccountId || budget.accounts.find((a) => !a.archived)?.id;
     const pay = ccPayCat(budget, tx.accountId);
     if (!from || !pay) { toast("Pick the bank account on the card payment first"); return; }
-    const res = addTransaction(budget, { date: tx.date, payee: tx.payee, amount: Math.abs(tx.amount), accountId: from, categoryId: pay.id, type: "payment" });
-    if (res.error) { toast(res.error); return; }
-    ctx.updateBudget(() => res.budget);
-    toast("Entered the bank side");
+    openTx(ctx, { draft: true, date: tx.date, amount: Math.abs(tx.amount), accountId: from, categoryId: pay.id, type: "payment", payee: "" });
     return;
   }
   const cat = (budget.categories || []).find((c) => c.id === tx.categoryId);
   if (!cat?.creditCardId) { toast("This payment isn’t tied to a card"); return; }
-  const res = addTransaction(budget, { date: tx.date, payee: tx.payee, amount: Math.abs(tx.amount), accountId: cat.creditCardId, categoryId: makePayFrom(tx.accountId) });
-  if (res.error) { toast(res.error); return; }
-  ctx.updateBudget(() => res.budget);
-  toast("Entered the card side");
+  openTx(ctx, { draft: true, date: tx.date, amount: Math.abs(tx.amount), accountId: cat.creditCardId, categoryId: makePayFrom(tx.accountId), type: "payment", payee: "" });
 }
 
 function amountLabel(budget, tx) {
@@ -240,7 +234,8 @@ function categorySelect(budget, accountId, includeRta) {
 export function openTx(ctx, existing) {
   const budget = ctx.budget();
   if (existing?.subtype === "starting_balance") { toast("Starting balances can’t be edited or deleted"); return; }
-  const locked = existing && isLocked(budget, existing);
+  const editing = !!(existing?.id && !existing.draft);
+  const locked = editing && isLocked(budget, existing);
   const form = {
     date: existing?.date || todayKey(),
     payee: existing ? displayName(budget, existing.originalPayee || existing.payee) : "",
@@ -254,7 +249,7 @@ export function openTx(ctx, existing) {
     type: existing?.type || "expense",
   };
   const sheet = openSheet({
-    title: existing ? "Edit transaction" : "New transaction",
+    title: existing?.draft ? "Enter the other side" : (editing ? "Edit transaction" : "New transaction"),
     body: (host) => {
       const date = h("input", { class: "input", type: "date", value: form.date });
       date.addEventListener("change", () => { form.date = date.value; });
@@ -318,6 +313,7 @@ export function openTx(ctx, existing) {
         splitsBox.append(btn("Add split line", { kind: "quiet", onClick: () => { form.splits.push({ categoryId: "", amount: 0 }); paintSplits(); } }));
       };
       host.append(
+        existing?.draft ? h("p", { class: "lede", text: "This is the missing side of a card payment. Check the account and category, then add it." }) : null,
         field("Date", date),
         field("Payee", payee),
         suggest,
@@ -335,7 +331,7 @@ export function openTx(ctx, existing) {
       );
       paintSplits();
         if (!locked) {
-        host.append(btn(existing ? "Save" : "Add", { block: true, onClick: () => {
+        host.append(btn(editing ? "Save" : "Add", { block: true, onClick: () => {
           if (form.splits?.length) {
             const sum = form.splits.reduce((s, sp) => s + Math.abs(Number(sp.amount) || 0), 0);
             if (Math.abs(sum - Math.abs(form.amount)) > 0.02) { toast("Splits have to add up to the amount"); return; }
@@ -343,15 +339,15 @@ export function openTx(ctx, existing) {
           }
           const payload = { ...form, payee: form.payee, type: form.transferAccountId ? "transfer" : (form.categoryId === RTA ? "income" : form.type) };
           ctx.updateBudget((b) => {
-            const res = existing ? replaceTransaction(b, existing.id, payload) : addTransaction(b, payload);
+            const res = editing ? replaceTransaction(b, existing.id, payload) : addTransaction(b, payload);
             if (res.error) { toast(res.error); return b; }
             sheet.close();
-            toast(existing ? "Saved" : "Added", { label: "Undo", action: () => ctx.undo() });
+            toast(editing ? "Saved" : "Added", { label: "Undo", action: () => ctx.undo() });
             return res.budget;
           });
         }}));
       } else host.append(h("p", { class: "hint", text: "Reconciled transactions can’t be deleted. You can still edit the note." }));
-      if (existing && !locked) host.append(btn("Delete", { kind: "danger", block: true, onClick: () => {
+      if (editing && !locked) host.append(btn("Delete", { kind: "danger", block: true, onClick: () => {
         ctx.updateBudget((b) => deleteTransactions(b, [existing.id]));
         sheet.close();
         toast("Deleted", { label: "Undo", action: () => ctx.undo() });

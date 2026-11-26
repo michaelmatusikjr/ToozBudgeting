@@ -2,12 +2,12 @@
 import {
   uid, toTitleCase, monthKey, todayKey, nextMonth, prevMonth, isCard, isBank, ccPayCat,
   isPayFrom, payFromId, round2, deepClone,
-} from "./util.js?v=133";
-import { available, readyToAssign, getGoalMetrics, globalFree, furthestMonth, accountBalances } from "./calc.js?v=133";
+} from "./util.js?v=134";
+import { available, readyToAssign, getGoalMetrics, globalFree, furthestMonth, accountBalances } from "./calc.js?v=134";
 import {
   ensurePayee, prunePayees, findFuzzyDuplicates, runPaymentMatchScan, displayName,
   originalsForCanonical, payeeDefaultCategory, payeeSuggestedCategory,
-} from "./payees.js?v=133";
+} from "./payees.js?v=134";
 
 const stamp = () => new Date().toISOString();
 
@@ -120,7 +120,7 @@ export function planClawback(budget, month, catId, newVal) {
   return { ok: true, plan, catId, newVal, shortfall: delta - free };
 }
 
-export function applyClawback(budget, month, plan, catId, newVal) {
+export function applyClawback(budget, month, plan, catId, newVal, shortfall) {
   const mb = deepClone(budget.monthlyBudgets || {});
   const entries = [];
   for (const step of plan) {
@@ -128,9 +128,11 @@ export function applyClawback(budget, month, plan, catId, newVal) {
     mb[step.month][step.categoryId] = round2((mb[step.month][step.categoryId] || 0) - step.amount);
     entries.push({ type: "move", month: step.month, entries: [{ from: step.categoryId, to: "rta", amount: step.amount }] });
   }
+  const old = Number((budget.monthlyBudgets?.[month] || {})[catId] || 0);
+  const logged = round2(shortfall > 0.005 ? shortfall : (newVal - old));
   mb[month] = { ...(mb[month] || {}), [catId]: round2(newVal) };
   const log = [...(budget.moneyMoveLog || []), ...entries.map((e) => ({ ...e, ts: stamp() })), {
-    type: "assign", month, ts: stamp(), entries: [{ from: "rta", to: catId, amount: round2(newVal - Number((budget.monthlyBudgets?.[month] || {})[catId] || 0)) }],
+    type: "assign", month, ts: stamp(), entries: [{ from: "rta", to: catId, amount: logged }],
   }].slice(-200);
   return touch(budget, { monthlyBudgets: mb, moneyMoveLog: log });
 }

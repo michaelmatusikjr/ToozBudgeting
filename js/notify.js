@@ -1,7 +1,7 @@
 /** Local reminders while the app is open. Closed-app delivery is js/push.js. */
-import { deviceGet, deviceSet } from "./store.js?v=133";
-import { monthKey, todayKey, timeZone } from "./util.js?v=133";
-import { overspentMonths, staleReconcile, ccMismatches, readyToAssign, getGoalMetrics, available } from "./calc.js?v=133";
+import { deviceGet, deviceSet } from "./store.js?v=134";
+import { monthKey, todayKey, timeZone, monthLabel, fmt } from "./util.js?v=134";
+import { overspentMonths, staleReconcile, ccMismatches, readyToAssign, getGoalMetrics, available } from "./calc.js?v=134";
 
 const timers = new Set();
 
@@ -45,10 +45,16 @@ export function collectReminders(budget, month) {
   const rules = [];
   const push = (r) => rules.push({ time: "09:00", offsetDays: 0, ...r });
 
-  for (const { month: mk } of overspentMonths(budget).slice(0, 3)) {
+  const overs = overspentMonths(budget);
+  if (overs.length) {
+    const oldest = overs[0].month;
+    const count = overs.length;
+    const extra = count > 1 ? ` (+${count - 1} more)` : "";
     push({
-      id: `overspend:${mk}`, kind: "overspend", title: "Overspending",
-      body: `Cover overspending in ${mk}.`, url: `./#budget/${mk}`, tag: `overspend:${mk}`,
+      id: `overspend:${oldest}`, kind: "overspend",
+      title: `Overspending in ${monthLabel(oldest)}${extra}`,
+      body: `${count > 1 ? `${count} months have` : `${monthLabel(oldest)} has`} unresolved overspending. Covering moves funds from other categories to bring them back to zero. Start with the oldest month.`,
+      url: `./#budget/${oldest}`, tag: `overspend:${oldest}`,
       date: today, recur: { type: "none" },
     });
   }
@@ -67,11 +73,28 @@ export function collectReminders(budget, month) {
       url: "./#budget", tag: `rta:${monthKey()}`, date: today, recur: { type: "none" },
     });
   }
-  for (const m of ccMismatches(budget, month || monthKey())) {
+  for (const m of ccMismatches(budget, monthKey())) {
     push({
-      id: `cc:${m.card.id}`, kind: "cc", title: m.card.name + " payment",
-      body: "The payment category doesn’t cover the card balance.",
-      url: `./#budget/${month || monthKey()}/${m.pay.id}`, tag: `cc:${m.card.id}`,
+      id: `cc:${m.card.id}`, kind: "cc", title: `${m.card.name} payment is short`,
+      body: `The card balance is ${fmt(m.owed)}, and ${fmt(Math.max(0, m.setAside))} is set aside. Assign ${fmt(m.short)} more to the payment category.`,
+      url: `./#budget/${monthKey()}`, tag: `cc:${m.card.id}`,
+      date: today, recur: { type: "none" },
+    });
+  }
+  for (const tx of budget.transactions || []) {
+    if (tx.type !== "payment" || tx.paymentLinkStatus !== "broken") continue;
+    const cardSide = (budget.creditCards || []).some((c) => c.id === tx.accountId);
+    const acct = cardSide
+      ? (budget.creditCards || []).find((c) => c.id === tx.accountId)
+      : (budget.accounts || []).find((a) => a.id === tx.accountId);
+    const who = acct?.name || (cardSide ? "a card" : "a bank account");
+    push({
+      id: `payment:${tx.id}`, kind: "payment",
+      title: `${fmt(Math.abs(tx.amount))} payment unmatched`,
+      body: cardSide
+        ? `A payment on ${tx.date} was recorded on ${who}, but the bank side is missing.`
+        : `A payment on ${tx.date} from ${who} hasn’t been matched to the card.`,
+      url: "./#transactions", tag: `payment:${tx.id}`,
       date: today, recur: { type: "none" },
     });
   }

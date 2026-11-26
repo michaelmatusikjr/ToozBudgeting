@@ -1,5 +1,5 @@
 /** Zero-based budget math. Matches the ClearBudget rules: rollover, return, max, date goals, RTA. */
-import { monthKey, prevMonth, nextMonth, round2 } from "./util.js?v=133";
+import { monthKey, prevMonth, nextMonth, round2 } from "./util.js?v=134";
 
 const spentCache = new WeakMap();
 const monthsCache = new WeakMap();
@@ -255,7 +255,10 @@ export function monthHasActivity(budget, mk) {
   return (budget.transactions || []).some((tx) => tx.date?.startsWith(mk));
 }
 export function monthAccessible(budget, mk, today = monthKey()) {
-  if (mk <= today) return true;
+  if (mk <= today) {
+    if (mk === today) return true;
+    return monthHasActivity(budget, mk) || monthHasAssigned(budget, mk);
+  }
   if (mk === nextMonth(today)) return true;
   return monthHasAssigned(budget, prevMonth(mk));
 }
