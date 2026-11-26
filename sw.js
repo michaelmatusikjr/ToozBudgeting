@@ -1,4 +1,4 @@
-const CACHE = "tooz-shell-v1";
+const CACHE = "tooz-shell-v4";
 const SHELL = [
   "./",
   "./index.html",
@@ -15,6 +15,7 @@ const SHELL = [
   "./js/store.js",
   "./js/ui.js",
   "./js/util.js",
+  "./js/whatsnew.js",
   "./js/views/accounts.js",
   "./js/views/budget.js",
   "./js/views/gate.js",
@@ -57,12 +58,18 @@ self.addEventListener("fetch", (event) => {
 
 async function networkFirst(req) {
   const cache = await caches.open(CACHE);
+  const cleanUrl = new URL(req.url);
+  cleanUrl.search = "";
+  const clean = new Request(cleanUrl.toString());
   try {
-    const res = await fetch(req);
-    if (res && res.ok) cache.put(req, res.clone());
+    const res = await fetch(new Request(req, { cache: "no-cache" }));
+    if (res && res.ok) {
+      cache.put(req, res.clone());
+      cache.put(clean, res.clone());
+    }
     return res;
   } catch {
-    const hit = await cache.match(req);
+    const hit = (await cache.match(req)) || (await cache.match(clean));
     if (hit) return hit;
     if (req.mode === "navigate") {
       const home = await cache.match("./index.html");

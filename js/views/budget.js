@@ -1,14 +1,15 @@
-import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog } from "../ui.js";
-import { fmt, monthLabel, monthKey, prevMonth, nextMonth, todayKey, toTitleCase, uid } from "../util.js";
+import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, openAmountPad } from "../ui.js?v=120";
+import { fmt, monthLabel, monthKey, prevMonth, nextMonth, todayKey, toTitleCase, uid } from "../util.js?v=120";
 import {
   budgetSnapshot, getGoalMetrics, trailingAvg, monthAccessible, historySeries,
   overspentMonths, available, globalFree,
-} from "../calc.js";
+} from "../calc.js?v=120";
 import {
   setAssigned, moveMoney, coverOverspending, planClawback, applyClawback,
   computeMonthAssignments, applyAssignments, setCategory, addCategory, archiveCategory,
-  deleteCategory, setMonthNote,
-} from "../mutate.js";
+  deleteCategory, setMonthNote, addGroup, renameGroup, deleteGroup, moveGroup, moveCategory,
+} from "../mutate.js?v=120";
+import { collectReminders } from "../notify.js?v=120";
 
 function noteOf(budget, month, cat) {
   return budget.categoryNotes?.[month]?.[cat.id] || "";
@@ -35,14 +36,16 @@ export function renderBudget(root, ctx) {
     h("div", { class: "head-actions" },
       h("button", { class: "icon-btn", type: "button", "aria-label": "History", text: "History", onclick: () => openHistory(ctx) }),
       h("button", { class: "icon-btn", type: "button", "aria-label": "Move money", text: "Move", onclick: () => openMove(ctx, null, null) }),
+      h("button", { class: "icon-btn", type: "button", "aria-label": "Money moves", text: "Log", onclick: () => openLog(ctx) }),
     ),
   );
 
   const rtaClass = snap.free < -0.005 ? "rta bad" : snap.free < 0.005 ? "rta zero" : "rta";
+  const returned = snap.returned > 0.005 ? ` · ${fmt(snap.returned)} returned` : "";
   const rta = h("section", { class: rtaClass },
     h("p", { class: "kicker", text: "Ready to Assign" }),
     h("p", { class: "rta-num", text: fmt(snap.free) }),
-    h("p", { class: "muted", text: month === today ? `This month ${fmt(snap.rta)} · ${fmt(snap.ahead)} assigned ahead` : `Showing ${monthLabel(month)}` }),
+    h("p", { class: "muted", text: month === today ? `This month ${fmt(snap.rta)} · ${fmt(snap.ahead)} assigned ahead${returned}` : `Showing ${monthLabel(month)}${returned}` }),
   );
 
   const overs = overspentMonths(budget, today).filter((o) => o.month <= today);
@@ -65,12 +68,27 @@ export function renderBudget(root, ctx) {
     }
   }
 
-  const tools = h("div", { class: "row gap wrap" },
+  const tools = h("div", { class: "tool-row" },
     btn("Auto-assign", { kind: "ghost", onClick: () => openAuto(ctx) }),
-    btn("Cover overspending", { kind: "ghost", onClick: () => openCover(ctx, month) }),
+    overs.length ? btn("Cover overspending", { kind: "ghost", onClick: () => openCover(ctx, month) }) : null,
+    btn("Goals", { kind: "quiet", onClick: () => openAllGoals(ctx) }),
     btn("Add category", { kind: "quiet", onClick: () => openAddCategory(ctx) }),
+    btn(ctx.ui.showArchived ? "Hide archived" : "Archived", { kind: "quiet", onClick: () => { ctx.ui.showArchived = !ctx.ui.showArchived; ctx.render(); } }),
   );
 
+  const under = (budget.categories || []).filter((c) => {
+    if (c.archived || c.creditCardId || !c.goal) return false;
+    const m = getGoalMetrics(c, snap.available[c.id] || 0, snap.budgeted[c.id] || 0, month);
+    return m && ((m.type === "monthly" && m.underfunded) || (m.type === "date" && !m.complete && !m.onTrack && !m.expired));
+  });
+  if (under.length) {
+    notices.append(h("button", { class: "notice warn", type: "button", onclick: () => openAllGoals(ctx) },
+      h("strong", { text: "Underfunded goals" }),
+      h("span", { text: under.slice(0, 3).map((c) => c.name).join(", ") + (under.length > 3 ? "…" : "") }),
+    ));
+  }
+
+  const cols = h("div", { class: "cols" }, h("span", { text: "Budgeted" }), h("span", { text: "Activity" }), h("span", { text: "Available" }));
   const groups = h("div", { class: "groups" });
   for (const g of budget.categoryGroups || []) {
     const cats = (budget.categories || []).filter((c) => c.groupId === g.id && (ctx.ui.showArchived || !c.archived));
@@ -80,20 +98,31 @@ export function renderBudget(root, ctx) {
     const gActivity = cats.reduce((s, c) => s + Number(snap.activity[c.id] || 0), 0);
     const gAvail = cats.reduce((s, c) => s + Number(snap.available[c.id] || 0), 0);
     const sec = h("section", { class: "group" });
+    const gCls = gAvail < -0.005 ? "neg" : gAvail > 0.005 ? "pos" : "";
     sec.append(h("button", { class: "group-h", type: "button", onclick: () => { collapsed[g.id] = !collapsed[g.id]; ctx.render(); } },
       h("span", { class: "chev", text: open ? "▾" : "▸" }),
       h("span", { class: "grow", text: g.name }),
-      h("span", { class: "num", text: fmt(gAvail) }),
+      h("span", { class: `num ${gCls}`, text: fmt(gAvail) }),
     ));
     if (open) {
-      sec.append(h("div", { class: "cols" }, h("span", { text: "Budgeted" }), h("span", { text: "Activity" }), h("span", { text: "Available" })));
       for (const cat of cats) sec.append(categoryRow(ctx, cat, snap, month, today));
-      sec.append(h("div", { class: "group-foot muted", text: `${fmt(gBudgeted)} budgeted · ${fmt(gActivity)} activity` }));
+      sec.append(h("div", { class: "group-foot" },
+        h("span", { class: "muted", text: `${fmt(gBudgeted)} budgeted` }),
+        h("button", { class: "quiet-link", type: "button", text: `${fmt(-gActivity)} activity`, onclick: (e) => { e.stopPropagation(); ctx.go("transactions", { groupId: g.id, month }); } }),
+        g.name === "Credit Card Payments" ? null : h("button", { class: "quiet-link", type: "button", text: "Edit group", onclick: (e) => { e.stopPropagation(); openGroup(ctx, g); } }),
+      ));
     }
     groups.append(sec);
   }
 
-  root.append(head, rta, notices, tools, groups);
+  const stick = h("div", { class: "plan-stick" }, head, rta);
+  root.append(stick, notices, tools, cols, groups);
+  if (ctx.ui.focusCat) {
+    const id = ctx.ui.focusCat;
+    ctx.ui.focusCat = null;
+    const cat = (budget.categories || []).find((c) => c.id === id);
+    if (cat) openCategory(ctx, cat);
+  }
 }
 
 function categoryRow(ctx, cat, snap, month, today) {
@@ -110,56 +139,57 @@ function categoryRow(ctx, cat, snap, month, today) {
     const label = metrics.type === "monthly"
       ? (metrics.underfunded ? `Underfunded ${fmt(metrics.needed)}` : "Funded")
       : metrics.type === "date"
-        ? (metrics.complete ? "Goal reached" : `${fmt(metrics.monthlyNeeded)} / mo · ${metrics.monthsLeft} mo`)
+        ? (metrics.complete ? "Goal reached" : metrics.expired ? "Goal date passed" : `${fmt(metrics.monthlyNeeded)} / mo · ${metrics.monthsLeft} mo`)
         : `${Math.round(metrics.progress)}% of ${fmt(metrics.target)}`;
     meta.append(h("span", { class: "pill", text: label }));
   }
   if (note || cat.note) meta.append(h("button", { class: "pill", type: "button", text: "Note", onclick: () => openNote(ctx, cat) }));
-  if (avg && ctx.ui.avg === cat.id) meta.append(h("span", { class: "pill", text: `Avg ${fmt(avg.avg)} · ${avg.monthsUsed} mo` }));
+  if (avg) meta.append(h("span", { class: "pill", text: `Avg ${fmt(avg.avg)}` }));
 
-  const bBtn = h("button", { class: "num-btn", type: "button", text: fmt(budgeted), onclick: () => {
-    if (cat.creditCardId) { toast("Card payment categories are funded by charges"); return; }
-    const input = h("input", { class: "input num-edit", inputmode: "decimal", value: String(budgeted) });
-    const sheet = openSheet({
+  const bBtn = h("button", { class: `num-btn ${budgeted ? "" : "zero"}`, type: "button", text: fmt(budgeted), onclick: () => {
+    openAmountPad({
       title: cat.name,
-      body: (host) => {
-        host.append(field("Budgeted this month", input));
-        if (avg) host.append(h("p", { class: "hint", text: `Recent average spend ${fmt(avg.avg)}.` }));
-        host.append(btn("Save", { block: true, onClick: () => {
-          const val = Math.round(parseFloat(input.value) * 100) / 100;
-          if (!Number.isFinite(val)) return;
-          const plan = planClawback(ctx.budget(), month, cat.id, val);
-          sheet.close();
-          if (plan.direct || plan.ok === true && plan.direct) {
-            ctx.updateBudget((b) => setAssigned(b, month, cat.id, val));
-          } else if (plan.insufficient) {
-            toast("Not enough Ready to Assign, even after future months.");
-          } else if (plan.ok && plan.plan) {
-            confirmDialog({
-              title: "Pull from future months?",
-              message: plan.plan.map((p) => `${p.categoryName} in ${p.month}: ${fmt(p.amount)}`).join("\n"),
-              confirm: "Move it",
-              onConfirm: () => ctx.updateBudget((b) => applyClawback(b, month, plan.plan, cat.id, val)),
-            });
-          } else ctx.updateBudget((b) => setAssigned(b, month, cat.id, val));
-        }}));
+      value: budgeted,
+      allowNegative: true,
+      onCommit: (val) => {
+        if (!Number.isFinite(val)) return;
+        const plan = planClawback(ctx.budget(), month, cat.id, val);
+        if (plan.direct || (plan.ok === true && plan.direct)) {
+          ctx.updateBudget((b) => setAssigned(b, month, cat.id, val));
+        } else if (plan.insufficient) {
+          toast("Not enough Ready to Assign, even after future months.");
+        } else if (plan.ok && plan.plan) {
+          confirmDialog({
+            title: "Pull from future months?",
+            message: plan.plan.map((p) => `${p.categoryName} in ${p.month}: ${fmt(p.amount)}`).join("\n"),
+            confirm: "Move it",
+            onConfirm: () => ctx.updateBudget((b) => applyClawback(b, month, plan.plan, cat.id, val)),
+          });
+        } else ctx.updateBudget((b) => setAssigned(b, month, cat.id, val));
       },
     });
-    input.focus();
   }});
 
+  const actCls = activity > 0.005 ? "num-btn neg" : activity < -0.005 ? "num-btn pos" : "num-btn zero";
+  const actText = activity > 0.005 || activity < -0.005 ? fmt(-activity) : fmt(0);
+  const avCls = avail < -0.005 ? "num-btn avail neg" : avail > 0.005 ? "num-btn avail pos" : "num-btn avail zero";
+  const bar = metrics && (metrics.type === "savings" || metrics.type === "date")
+    ? h("div", { class: "goal-bar" }, h("span", { style: `width:${Math.max(0, Math.min(100, metrics.complete ? 100 : (metrics.progress != null ? metrics.progress : (metrics.target ? (avail / metrics.target) * 100 : 0))))}%` }))
+    : null;
+
   row.append(
-    h("div", { class: "cat-top" }, title, h("button", { class: "quiet-link", type: "button", text: "avg", onclick: () => { ctx.ui.avg = ctx.ui.avg === cat.id ? null : cat.id; ctx.render(); } })),
+    h("div", { class: "cat-top" }, title),
     meta,
     h("div", { class: "cat-nums" },
       bBtn,
-      h("button", { class: "num-btn", type: "button", text: fmt(activity), onclick: () => ctx.go("transactions", { categoryId: cat.id, month }) }),
-      h("button", { class: `num-btn avail ${avail < -0.005 ? "bad" : ""}`, type: "button", text: fmt(avail), onclick: () => {
+      h("button", { class: actCls, type: "button", text: actText, onclick: () => ctx.go("transactions", { categoryId: cat.id, month }) }),
+      h("button", { class: avCls, type: "button", text: fmt(avail), onclick: () => {
         if (avail < -0.005) openCover(ctx, month, cat.id);
         else openMove(ctx, cat.id, null);
       }}),
     ),
   );
+  if (bar) row.append(bar);
   return row;
 }
 
@@ -207,15 +237,17 @@ function openMove(ctx, fromId, toId) {
   });
 }
 
-function openCover(ctx, month, focusId) {
+function openCover(ctx, month, focusId, note) {
   const budget = ctx.budget();
   const overs = (budget.categories || []).filter((c) => !c.archived && !c.creditCardId && available(budget, c.id, month) < -0.005);
   if (!overs.length) { toast("Nothing overspent this month"); return; }
   const sources = [];
+  const before = new Set(overspentMonths(budget, monthKey()).map((o) => o.month));
   const sheet = openSheet({
     title: "Cover overspending",
     body: (host) => {
-      host.append(h("p", { class: "lede", text: overs.map((c) => `${c.name} ${fmt(available(budget, c.id, month))}`).join(" · ") }));
+      if (note) host.append(h("p", { class: "notice", text: note }));
+      host.append(h("p", { class: "lede", text: overs.map((c) => `${c.name} ${fmt(available(budget, c.id, month))}`).join("\n") }));
       const free = globalFree(budget, month);
       const addSrc = (id, name, max) => {
         let amt = 0;
@@ -233,6 +265,19 @@ function openCover(ctx, month, focusId) {
         if (!use.length) return;
         ctx.updateBudget((b) => coverOverspending(b, month, use));
         sheet.close();
+        const b = ctx.budget();
+        const today = monthKey();
+        let mk = nextMonth(month);
+        for (let i = 0; i < 24 && mk <= today; i++) {
+          const still = (b.categories || []).some((c) => !c.archived && !c.creditCardId && available(b, c.id, mk) < -0.005);
+          if (still) {
+            const created = !before.has(mk);
+            ctx.setMonth(mk);
+            openCover(ctx, mk, null, created ? `Covering ${monthLabel(month)} left overspending in ${monthLabel(mk)}.` : `Still overspent in ${monthLabel(mk)}.`);
+            return;
+          }
+          mk = nextMonth(mk);
+        }
         toast("Overspending covered", { label: "Undo", action: () => ctx.undo() });
       }}));
       if (focusId) host.dataset.focus = focusId;
@@ -240,17 +285,70 @@ function openCover(ctx, month, focusId) {
   });
 }
 
+function expiredDateGoals(budget, month) {
+  return (budget.categories || []).filter((c) => {
+    if (c.archived || c.goal?.type !== "date") return false;
+    const m = getGoalMetrics(c, available(budget, c.id, month), (budget.monthlyBudgets?.[month] || {})[c.id] || 0, month);
+    return m?.expired && !m.complete;
+  });
+}
+
+function openExpired(ctx, cats, then) {
+  const choices = {};
+  const sheet = openSheet({
+    title: "Goals past their date",
+    body: (host) => {
+      host.append(h("p", { class: "lede", text: "Set a new date or remove the goal before auto-assign continues." }));
+      for (const cat of cats) {
+        const box = h("div", { class: "pair" });
+        const date = h("input", { class: "input", type: "month", min: nextMonth(monthKey()) });
+        let target = cat.goal?.target || 0;
+        box.append(h("strong", { text: cat.name }), h("p", { class: "hint", text: `${fmt(cat.goal.target)} by ${cat.goal.targetDate}` }),
+          field("New month", date), field("New target", moneyButton(target, (n) => { target = n; })),
+          h("div", { class: "row gap wrap" },
+            btn("Use new goal", { kind: "ghost", onClick: () => { if (!date.value) { toast("Pick a future month"); return; } choices[cat.id] = { date: date.value, amount: target }; toast("Noted"); } }),
+            btn("Remove goal", { kind: "quiet", onClick: () => { choices[cat.id] = "remove"; toast("Will remove"); } }),
+          ));
+        host.append(box);
+      }
+      host.append(btn("Continue", { block: true, onClick: () => {
+        if (cats.some((c) => !choices[c.id])) { toast("Resolve each goal first"); return; }
+        ctx.updateBudget((b) => ({
+          ...b,
+          categories: b.categories.map((c) => {
+            const res = choices[c.id];
+            if (!res) return c;
+            if (res === "remove") return { ...c, goal: null, rollover: "rollover" };
+            return { ...c, goal: { type: "date", target: res.amount, targetDate: res.date } };
+          }),
+        }));
+        sheet.close();
+        then?.();
+      }}));
+    },
+  });
+}
+
 function openAuto(ctx) {
   const budget = ctx.budget();
   const month = ctx.month;
+  const expired = expiredDateGoals(budget, month);
+  if (expired.length) { openExpired(ctx, expired, () => openAuto(ctx)); return; }
+  runAuto(ctx, month, null);
+}
+
+function runAuto(ctx, month, carried) {
+  const budget = ctx.budget();
   const result = computeMonthAssignments(budget, month, budget.monthlyBudgets || {}, budget.inflows || {});
-  if (!result.assignments.length) { toast("Nothing to assign. Goals are funded, or Ready to Assign is empty."); return; }
+  if (!result.assignments.length && !carried) { toast("Nothing to assign. Goals are funded, or Ready to Assign is empty."); return; }
   const amounts = {};
   result.assignments.forEach((a) => { amounts[a.categoryId] = a.amount; });
+  const all = carried ? [...carried] : [];
+  if (!result.assignments.length) { openSavings(ctx, month, all); return; }
   const sheet = openSheet({
-    title: "Auto-assign",
+    title: `Auto-assign ${monthLabel(month)}`,
     body: (host) => {
-      host.append(h("p", { class: "lede", text: "Underfunded monthly and dated goals, in order. Edit any amount." }));
+      host.append(h("p", { class: "lede", text: "Underfunded monthly and dated goals. Edit any amount before it lands." }));
       for (const a of result.assignments) {
         const cat = budget.categories.find((c) => c.id === a.categoryId);
         host.append(h("div", { class: "line" }, h("span", { text: cat?.name || "Category" }), moneyButton(a.amount, (n) => { amounts[a.categoryId] = n; })));
@@ -258,23 +356,88 @@ function openAuto(ctx) {
       host.append(btn("Assign", { block: true, onClick: () => {
         ctx.updateBudget((b) => applyAssignments(b, month, amounts));
         sheet.close();
-        const left = globalFree(ctx.budget(), month);
-        if (left > 1) {
-          confirmDialog({
-            title: "Keep assigning?",
-            message: `${fmt(left)} is still Ready to Assign. Fund the next month with the same goals?`,
-            confirm: "Fund next month",
-            onConfirm: () => {
-              const b = ctx.budget();
-              const n = computeMonthAssignments(b, nextMonth(month), b.monthlyBudgets || {}, b.inflows || {});
-              const am = {};
-              n.assignments.forEach((a) => { am[a.categoryId] = a.amount; });
-              if (n.assignments.length) ctx.updateBudget((bb) => applyAssignments(bb, nextMonth(month), am));
-              else toast("Next month has nothing to fund");
-            },
-          });
-        } else toast("Assigned");
+        const applied = result.assignments.map((a) => ({ ...a, amount: amounts[a.categoryId] || 0 })).filter((a) => a.amount > 0);
+        openSavings(ctx, month, [...all, { month, assignments: applied }]);
       }}));
+    },
+  });
+}
+
+function openSavings(ctx, month, all) {
+  const budget = ctx.budget();
+  const left = globalFree(budget, month);
+  const goals = (budget.categories || []).filter((c) => c.goal?.type === "savings" && !c.archived && !getGoalMetrics(c, available(budget, c.id, month), 0, month)?.complete);
+  if (!(left > 1) || !goals.length) { offerCascade(ctx, month, all); return; }
+  const amounts = {};
+  const sheet = openSheet({
+    title: "Savings goals",
+    body: (host) => {
+      host.append(h("p", { class: "lede", text: `${fmt(left)} is still Ready to Assign. Fund savings targets, or skip.` }));
+      for (const g of goals) host.append(h("div", { class: "line" }, h("span", { text: g.name }), moneyButton(0, (n) => { amounts[g.id] = n; })));
+      host.append(h("div", { class: "row gap" },
+        btn("Skip", { kind: "ghost", onClick: () => { sheet.close(); offerCascade(ctx, month, all); } }),
+        btn("Fund", { block: true, onClick: () => {
+          ctx.updateBudget((b) => applyAssignments(b, month, amounts));
+          sheet.close();
+          const applied = Object.entries(amounts).filter(([, n]) => n > 0).map(([categoryId, amount]) => ({ categoryId, amount }));
+          const bucket = all.find((a) => a.month === month);
+          if (bucket) bucket.assignments.push(...applied);
+          else if (applied.length) all.push({ month, assignments: applied });
+          offerCascade(ctx, month, all);
+        }}),
+      ));
+    },
+  });
+}
+
+function offerCascade(ctx, month, all) {
+  const budget = ctx.budget();
+  const left = globalFree(budget, month);
+  const hasGoals = (budget.categories || []).some((c) => c.goal && !c.archived && c.goal.type !== "savings");
+  if (!(left > 1) || !hasGoals) { openRecap(all); return; }
+  const fund = () => {
+    ctx.updateBudget((b) => {
+      let cur = b;
+      let mk = nextMonth(month);
+      for (let i = 0; i < 18; i++) {
+        const res = computeMonthAssignments(cur, mk, cur.monthlyBudgets || {}, cur.inflows || {});
+        if (!res.assignments.length) break;
+        const am = {};
+        res.assignments.forEach((a) => { am[a.categoryId] = a.amount; });
+        cur = applyAssignments(cur, mk, am);
+        mk = nextMonth(mk);
+      }
+      return cur;
+    });
+    toast("Funded later months that still had goals");
+  };
+  confirmDialog({
+    title: "Keep assigning?",
+    message: `${fmt(left)} is still Ready to Assign.`,
+    confirm: "Next month",
+    extra: (host) => {
+      host.append(btn("Fund every later month", { kind: "quiet", block: true, onClick: () => { fund(); closeAndRecap(all); } }));
+    },
+    onConfirm: () => runAuto(ctx, nextMonth(month), all),
+  });
+}
+
+function closeAndRecap(all) {
+  document.querySelector(".scrim")?.querySelector(".icon-btn")?.click();
+  openRecap(all);
+}
+
+function openRecap(all) {
+  const lines = [];
+  for (const block of all || []) {
+    for (const a of block.assignments || []) lines.push(`${monthLabel(block.month)}: ${fmt(a.amount)}`);
+  }
+  if (!lines.length) { toast("Assigned"); return; }
+  openSheet({
+    title: "Assigned",
+    body: (host) => {
+      host.append(h("p", { class: "lede", text: lines.join("\n") }));
+      host.append(btn("Done", { block: true, onClick: () => document.querySelector(".sheet .icon-btn")?.click() }));
     },
   });
 }
@@ -370,8 +533,17 @@ function openCategory(ctx, cat) {
         host.append(btn("Delete", { kind: "danger", block: true, onClick: () => {
           const used = (budget.transactions || []).some((t) => t.categoryId === cat.id || t.splits?.some((s) => s.categoryId === cat.id));
           if (used) { toast("This category has transactions. Archive it instead."); return; }
-          ctx.updateBudget((b) => deleteCategory(b, cat.id));
-          sheet.close();
+          confirmDialog({
+            title: `Delete ${cat.name}?`,
+            message: "This removes the category and its assignments. You can undo it from the top bar.",
+            confirm: "Delete",
+            danger: true,
+            onConfirm: () => {
+              ctx.updateBudget((b) => deleteCategory(b, cat.id));
+              sheet.close();
+              toast("Deleted", { label: "Undo", action: () => ctx.undo() });
+            },
+          });
         }}));
       }
       paintExtra();
@@ -425,7 +597,13 @@ function openHistory(ctx) {
     title: "History",
     body: (host) => {
       const canvas = h("canvas", { class: "chart", width: "640", height: "280" });
-      host.append(canvas, h("p", { class: "hint", text: "Income, spending (excluding card payments), and Ready to Assign." }));
+      host.append(canvas,
+        h("div", { class: "legend" },
+          h("span", {}, h("i", { style: "background:var(--accent)" }), "Income"),
+          h("span", {}, h("i", { style: "background:var(--danger)" }), "Spending"),
+          h("span", {}, h("i", { style: "background:var(--brass)" }), "Ready to Assign"),
+        ),
+        h("p", { class: "hint", text: "Spending leaves out card-payment categories. The line is Ready to Assign, including when it’s negative." }));
       const list = h("div", { class: "stack" });
       for (const row of [...series].reverse()) {
         list.append(h("button", { class: "line", type: "button", onclick: () => { ctx.setMonth(row.month); sheet.close(); } },
@@ -441,7 +619,7 @@ function openHistory(ctx) {
 }
 
 function drawChart(canvas, series) {
-  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const dpr = Math.min(3, window.devicePixelRatio || 1);
   const w = canvas.clientWidth || 320;
   const hgt = 180;
   canvas.width = w * dpr;
@@ -450,6 +628,11 @@ function drawChart(canvas, series) {
   g.scale(dpr, dpr);
   g.clearRect(0, 0, w, hgt);
   if (!series.length) return;
+  const css = getComputedStyle(document.documentElement);
+  const ink = (name, fallback) => css.getPropertyValue(name).trim() || fallback;
+  const income = ink("--accent", "#2f6f62");
+  const spend = ink("--danger", "#a33b32");
+  const free = ink("--brass", "#c4a574");
   const max = Math.max(1, ...series.flatMap((s) => [s.income, s.spent, Math.abs(s.free)]));
   const slot = w / series.length;
   series.forEach((s, i) => {
@@ -457,20 +640,144 @@ function drawChart(canvas, series) {
     const bw = slot * 0.25;
     const ih = (s.income / max) * (hgt - 24);
     const sh = (s.spent / max) * (hgt - 24);
-    g.fillStyle = "#2f6f62";
+    g.fillStyle = income;
     g.fillRect(x, hgt - 16 - ih, bw, ih);
-    g.fillStyle = "#a33b32";
+    g.fillStyle = spend;
     g.fillRect(x + bw + 2, hgt - 16 - sh, bw, sh);
   });
-  g.strokeStyle = "#c4a574";
+  const anyNeg = series.some((s) => s.free < -0.005);
+  const base = anyNeg ? hgt * 0.62 : hgt - 16;
+  const span = anyNeg ? hgt * 0.45 : hgt - 24;
+  g.strokeStyle = free;
   g.lineWidth = 2;
   g.beginPath();
   series.forEach((s, i) => {
     const x = i * slot + slot * 0.5;
-    const y = hgt - 16 - (Math.max(0, s.free) / max) * (hgt - 24);
+    const y = Math.max(6, Math.min(hgt - 6, base - (s.free / max) * span));
     if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
   });
   g.stroke();
 }
 
 void uid;
+
+export function openInbox(ctx) {
+  const notes = collectReminders(ctx.budget(), ctx.month);
+  openSheet({
+    title: notes.length ? `${notes.length} notice${notes.length === 1 ? "" : "s"}` : "Notices",
+    body: (host) => {
+      if (!notes.length) host.append(h("p", { class: "empty", text: "Nothing needs you right now." }));
+      for (const n of notes) {
+        host.append(h("button", { class: "notice", type: "button", onclick: () => {
+          const hash = String(n.url || "").replace(/^\.\//, "");
+          if (hash) location.hash = hash.startsWith("#") ? hash : `#${hash}`;
+          document.querySelector(".scrim .icon-btn")?.click();
+        } }, h("strong", { text: n.title }), h("span", { text: n.body || "" })));
+      }
+    },
+  });
+}
+
+function openLog(ctx) {
+  const log = [...(ctx.budget().moneyMoveLog || [])].reverse();
+  openSheet({
+    title: "Money moves",
+    body: (host) => {
+      if (!log.length) host.append(h("p", { class: "empty", text: "Moves you make will show up here." }));
+      for (const entry of log.slice(0, 40)) {
+        const bits = (entry.entries || []).map((e) => `${fmt(e.amount)}`).join(", ");
+        host.append(h("div", { class: "line" }, h("span", {}, h("strong", { text: entry.type || "move" }), h("span", { class: "muted", text: ` ${entry.month || ""}` })), h("span", { text: bits })));
+      }
+    },
+  });
+}
+
+function openGroup(ctx, group) {
+  const budget = ctx.budget();
+  let name = group.name;
+  const locked = group.name === "Credit Card Payments";
+  const sheet = openSheet({
+    title: "Group",
+    body: (host) => {
+      const input = textInput({ value: name });
+      input.addEventListener("input", () => { name = input.value; });
+      host.append(field("Name", input));
+      host.append(h("div", { class: "row gap wrap" },
+        btn("Up", { kind: "ghost", onClick: () => { ctx.updateBudget((b) => moveGroup(b, group.id, -1)); sheet.close(); } }),
+        btn("Down", { kind: "ghost", onClick: () => { ctx.updateBudget((b) => moveGroup(b, group.id, 1)); sheet.close(); } }),
+      ));
+      const cats = (budget.categories || []).filter((c) => c.groupId === group.id && !c.archived);
+      for (const c of cats) {
+        host.append(h("div", { class: "line" }, h("span", { text: c.name }),
+          h("button", { class: "quiet-link", type: "button", text: "Up", onclick: () => { ctx.updateBudget((b) => moveCategory(b, c.id, -1)); sheet.close(); openGroup(ctx, ctx.budget().categoryGroups.find((g) => g.id === group.id)); } }),
+          h("button", { class: "quiet-link", type: "button", text: "Down", onclick: () => { ctx.updateBudget((b) => moveCategory(b, c.id, 1)); sheet.close(); openGroup(ctx, ctx.budget().categoryGroups.find((g) => g.id === group.id)); } }),
+        ));
+      }
+      host.append(btn("Save", { block: true, disabled: locked, onClick: () => {
+        ctx.updateBudget((b) => renameGroup(b, group.id, name));
+        sheet.close();
+      }}));
+      if (!locked) host.append(btn("Delete group", { kind: "danger", block: true, onClick: () => {
+        confirmDialog({
+          title: `Delete ${group.name}?`,
+          message: "Categories in this group move to Uncategorized.",
+          confirm: "Delete",
+          danger: true,
+          onConfirm: () => { ctx.updateBudget((b) => deleteGroup(b, group.id)); sheet.close(); toast("Group deleted", { label: "Undo", action: () => ctx.undo() }); },
+        });
+      }}));
+      host.append(btn("New group", { kind: "ghost", block: true, onClick: () => {
+        const nm = textInput({ placeholder: "New group" });
+        openSheet({ title: "New group", body: (h2) => {
+          h2.append(field("Name", nm), btn("Add", { block: true, onClick: () => { ctx.updateBudget((b) => addGroup(b, nm.value)); toast("Group added"); } }));
+        }});
+      }}));
+    },
+  });
+}
+
+function openAllGoals(ctx) {
+  const budget = ctx.budget();
+  const cats = (budget.categories || []).filter((c) => !c.archived && !c.creditCardId);
+  const local = {};
+  for (const c of cats) local[c.id] = { type: c.goal?.type || "", target: c.goal?.target || 0, targetDate: c.goal?.targetDate || "" };
+  const sheet = openSheet({
+    title: "All goals",
+    body: (host) => {
+      host.append(h("p", { class: "lede", text: "Set a goal on any category. Nothing is saved until you tap Save all." }));
+      for (const c of cats) {
+        const g = local[c.id];
+        const type = h("select", { class: "input" },
+          h("option", { value: "", text: "No goal" }),
+          h("option", { value: "monthly", text: "Monthly" }),
+          h("option", { value: "date", text: "By date" }),
+          h("option", { value: "savings", text: "Savings" }),
+        );
+        type.value = g.type;
+        const extra = h("div");
+        const paint = () => {
+          extra.replaceChildren();
+          if (!g.type) return;
+          extra.append(field("Target", moneyButton(g.target, (n) => { g.target = n; })));
+          if (g.type === "date") extra.append(field("Month", h("input", { class: "input", type: "month", value: g.targetDate, onchange: (e) => { g.targetDate = e.target.value; } })));
+        };
+        type.addEventListener("change", () => { g.type = type.value; paint(); });
+        paint();
+        host.append(h("div", { class: "pair" }, h("strong", { text: c.name }), type, extra));
+      }
+      host.append(btn("Save all", { block: true, onClick: () => {
+        ctx.updateBudget((b) => ({
+          ...b,
+          categories: b.categories.map((c) => {
+            const g = local[c.id];
+            if (!g) return c;
+            const goal = g.type ? { type: g.type, target: g.target || 0, ...(g.type === "date" ? { targetDate: g.targetDate } : {}) } : null;
+            return { ...c, goal };
+          }),
+        }));
+        sheet.close();
+        toast("Goals saved");
+      }}));
+    },
+  });
+}

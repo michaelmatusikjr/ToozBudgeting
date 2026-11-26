@@ -1,5 +1,5 @@
 /** DOM helpers, toasts, sheets, and the amount pad. User text always goes through textContent. */
-import { evalMath, fmt, hasOp, round2 } from "./util.js";
+import { evalMath, fmt, hasOp, round2 } from "./util.js?v=120";
 
 export function h(tag, attrs, ...kids) {
   const el = document.createElement(tag);
@@ -42,6 +42,7 @@ export function icon(name) {
     search: '<circle cx="11" cy="11" r="6"/><path d="m20 20-3.5-3.5"/>',
     check: '<path d="m5 12 5 5L20 7"/>',
     undo: '<path d="M8 8H4v4"/><path d="M4 8a8 8 0 1 1-1 6"/>',
+    redo: '<path d="M16 8h4v4"/><path d="M20 8a8 8 0 1 0 1 6"/>',
     chev: '<path d="m9 6 6 6-6 6"/>',
   };
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -66,22 +67,31 @@ export function toast(message, { action, label, ms = 4200 } = {}) {
 }
 
 const stack = [];
-export function closeModal() {
-  const top = stack.pop();
-  top?.remove();
+function dismiss(scrim) {
+  if (!scrim) return;
+  const i = stack.indexOf(scrim);
+  if (i >= 0) stack.splice(i, 1);
+  const fn = scrim._onClose;
+  scrim._onClose = null;
+  scrim.remove();
+  fn?.();
   if (!stack.length) document.body.classList.remove("modal-open");
 }
+export function closeModal() {
+  dismiss(stack[stack.length - 1]);
+}
 export function closeAllModals() {
-  while (stack.length) closeModal();
+  while (stack.length) dismiss(stack[stack.length - 1]);
 }
 
 export function openSheet({ title, body, onClose }) {
   document.body.classList.add("modal-open");
-  const scrim = h("div", { class: "scrim", onclick: (e) => { if (e.target === scrim) { closeModal(); onClose?.(); } } });
+  const scrim = h("div", { class: "scrim", onclick: (e) => { if (e.target === scrim) dismiss(scrim); } });
+  scrim._onClose = onClose;
   const sheet = h("div", { class: "sheet", role: "dialog", "aria-modal": "true" });
   const head = h("div", { class: "sheet-head" },
     h("h2", { class: "sheet-title", text: title || "" }),
-    h("button", { class: "icon-btn", type: "button", "aria-label": "Close", onclick: () => { closeModal(); onClose?.(); } }, icon("close")),
+    h("button", { class: "icon-btn", type: "button", "aria-label": "Close", onclick: () => dismiss(scrim) }, icon("close")),
   );
   const content = h("div", { class: "sheet-body" });
   if (typeof body === "function") body(content);
@@ -90,9 +100,8 @@ export function openSheet({ title, body, onClose }) {
   scrim.append(sheet);
   document.body.append(scrim);
   stack.push(scrim);
-  const focusable = sheet.querySelector("input, select, textarea, button");
-  focusable?.focus?.();
-  return { content, close: () => { if (stack.includes(scrim)) { stack.splice(stack.indexOf(scrim), 1); scrim.remove(); if (!stack.length) document.body.classList.remove("modal-open"); } } };
+  sheet.querySelector(".icon-btn")?.focus?.();
+  return { content, close: () => dismiss(scrim) };
 }
 
 export function field(label, control) {
@@ -100,7 +109,7 @@ export function field(label, control) {
 }
 
 export function textInput(opts = {}) {
-  return h("input", { class: "input", type: opts.type || "text", placeholder: opts.placeholder || "", value: opts.value || "", autocomplete: "off" });
+  return h("input", { class: "input", type: opts.type || "text", placeholder: opts.placeholder || "", value: opts.value || "", autocomplete: opts.autocomplete || "off", inputmode: opts.inputmode || null });
 }
 
 export function btn(label, opts = {}) {
@@ -111,6 +120,7 @@ let padState = null;
 export function openAmountPad({ title = "Amount", value = 0, onCommit, allowNegative = false }) {
   let expr = value ? String(round2(value)) : "";
   let negative = Number(value) < 0;
+  let replace = expr.length > 0;
   const display = h("div", { class: "pad-display", text: expr || "0" });
   const preview = h("div", { class: "pad-preview", text: "" });
   const paint = () => {
@@ -119,6 +129,8 @@ export function openAmountPad({ title = "Amount", value = 0, onCommit, allowNega
   };
   const signed = (n) => (negative ? -Math.abs(n) : n);
   const push = (ch) => {
+    if (replace && /[0-9.]/.test(ch)) { expr = ""; negative = false; }
+    replace = false;
     if (ch === "." && expr.split(/[-+*/]/).pop().includes(".")) return;
     expr += ch;
     paint();
@@ -129,22 +141,38 @@ export function openAmountPad({ title = "Amount", value = 0, onCommit, allowNega
     grid.append(h("button", {
       type: "button", class: `pad-key ${"+-*/".includes(k) ? "op" : ""}`, text: k,
       onclick: () => {
-        if (k === "⌫") { expr = expr.slice(0, -1); paint(); return; }
+        if (k === "⌫") { replace = false; expr = expr.slice(0, -1); paint(); return; }
         push(k);
       },
     }));
   }
+  const commit = () => {
+    window.removeEventListener("keydown", onKey, true);
+    const n = signed(evalMath(expr || "0"));
+    sheet.close();
+    onCommit?.(round2(n));
+  };
+  const onKey = (e) => {
+    if (e.key === "Escape" || e.metaKey || e.ctrlKey || e.altKey) return;
+    const tag = e.target?.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+    if (/^[0-9]$/.test(e.key) || e.key === "." || "+-*/".includes(e.key)) { e.preventDefault(); e.stopPropagation(); push(e.key); }
+    else if (e.key === "Backspace") { e.preventDefault(); e.stopPropagation(); replace = false; expr = expr.slice(0, -1); paint(); }
+    else if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); commit(); }
+  };
   const sheet = openSheet({
     title,
+    onClose: () => window.removeEventListener("keydown", onKey, true),
     body: (root) => {
       root.append(display, preview, grid);
       const row = h("div", { class: "row gap" });
       if (allowNegative) row.append(btn(negative ? "Spending" : "Refund", { kind: "ghost", onClick: () => { negative = !negative; paint(); } }));
-      row.append(btn("Done", { block: true, onClick: () => { const n = signed(evalMath(expr || "0")); sheet.close(); onCommit?.(round2(n)); } }));
+      row.append(btn("Done", { block: true, onClick: commit }));
       root.append(row);
       paint();
     },
   });
+  window.addEventListener("keydown", onKey, true);
   padState = sheet;
   return sheet;
 }
@@ -156,11 +184,12 @@ export function moneyButton(value, onCommit, { allowNegative = false, label } = 
   return b;
 }
 
-export function confirmDialog({ title, message, confirm = "Confirm", danger = false, onConfirm }) {
+export function confirmDialog({ title, message, confirm = "Confirm", danger = false, onConfirm, extra }) {
   const sheet = openSheet({
     title,
     body: (root) => {
       root.append(h("p", { class: "lede", text: message }));
+      extra?.(root, sheet);
       const row = h("div", { class: "row gap" },
         btn("Cancel", { kind: "ghost", onClick: () => sheet.close() }),
         btn(confirm, { kind: danger ? "danger" : "primary", onClick: () => { sheet.close(); onConfirm?.(); } }),
@@ -170,6 +199,30 @@ export function confirmDialog({ title, message, confirm = "Confirm", danger = fa
   });
 }
 
+export function keepFocus(el) {
+  queueMicrotask(() => {
+    el?.focus?.({ preventScroll: true });
+    try {
+      const n = el.value?.length ?? 0;
+      el.setSelectionRange(n, n);
+    } catch { /* date and number inputs */ }
+  });
+}
+
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && stack.length) { e.preventDefault(); closeModal(); }
 });
+
+function bindKeyboard() {
+  const apply = () => {
+    const vv = window.visualViewport;
+    const kb = vv ? Math.max(0, window.innerHeight - vv.height - vv.offsetTop) : 0;
+    document.documentElement.style.setProperty("--kb", `${Math.round(kb)}px`);
+  };
+  apply();
+  window.visualViewport?.addEventListener("resize", apply);
+  window.visualViewport?.addEventListener("scroll", apply);
+  window.addEventListener("resize", apply);
+}
+if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", bindKeyboard);
+else bindKeyboard();

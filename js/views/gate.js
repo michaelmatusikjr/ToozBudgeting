@@ -1,7 +1,7 @@
-import { h, field, textInput, btn, toast, moneyButton } from "../ui.js";
-import { genUserId, guestSuffix, toTitleCase, uid } from "../util.js";
-import { DEFAULT_GROUPS, DEFAULT_CATS, finishWizard } from "../mutate.js";
-import { importData } from "../store.js";
+import { h, field, textInput, btn, toast, moneyButton } from "../ui.js?v=120";
+import { genUserId, guestSuffix, toTitleCase, uid } from "../util.js?v=120";
+import { DEFAULT_GROUPS, DEFAULT_CATS, finishWizard } from "../mutate.js?v=120";
+import { importData } from "../store.js?v=120";
 
 export function renderIdentity(root, ctx) {
   root.append(h("main", { class: "gate" },
@@ -31,9 +31,9 @@ function showChoice(host, ctx) {
 }
 
 function showSignup(host, ctx) {
-  const name = textInput({ placeholder: "Display name" });
-  const email = textInput({ type: "email", placeholder: "you@example.com" });
-  const pass = textInput({ type: "password", placeholder: "At least 6 characters" });
+  const name = textInput({ placeholder: "Display name", autocomplete: "name" });
+  const email = textInput({ type: "email", placeholder: "you@example.com", autocomplete: "email" });
+  const pass = textInput({ type: "password", placeholder: "At least 6 characters", autocomplete: "new-password" });
   const err = h("p", { class: "error", text: "" });
   host.replaceChildren(
     field("Display name", name),
@@ -61,8 +61,8 @@ function showSignup(host, ctx) {
 }
 
 function showLogin(host, ctx) {
-  const email = textInput({ type: "email", placeholder: "you@example.com" });
-  const pass = textInput({ type: "password", placeholder: "Password" });
+  const email = textInput({ type: "email", placeholder: "you@example.com", autocomplete: "username" });
+  const pass = textInput({ type: "password", placeholder: "Password", autocomplete: "current-password" });
   const err = h("p", { class: "error", text: "" });
   host.replaceChildren(
     field("Email", email),
@@ -111,6 +111,7 @@ export function renderWizard(root, ctx) {
     else if (draft.step === 2) cards(body);
     else if (draft.step === 3) categories(body);
     else done(body);
+    requestAnimationFrame(() => shell.querySelector(".steps .on")?.scrollIntoView({ inline: "center", block: "nearest" }));
   };
 
   const welcome = (body) => {

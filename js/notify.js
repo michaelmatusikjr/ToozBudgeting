@@ -1,7 +1,7 @@
 /** Local reminders while the app is open. Closed-app delivery is js/push.js. */
-import { deviceGet, deviceSet } from "./store.js";
-import { monthKey, todayKey, timeZone } from "./util.js";
-import { overspentMonths, staleReconcile, ccMismatches, readyToAssign, getGoalMetrics, available } from "./calc.js";
+import { deviceGet, deviceSet } from "./store.js?v=120";
+import { monthKey, todayKey, timeZone } from "./util.js?v=120";
+import { overspentMonths, staleReconcile, ccMismatches, readyToAssign, getGoalMetrics, available } from "./calc.js?v=120";
 
 const timers = new Set();
 

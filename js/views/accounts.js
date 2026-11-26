@@ -1,7 +1,7 @@
-import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog } from "../ui.js";
-import { fmt, todayKey, toTitleCase, isCard } from "../util.js";
-import { accountBalances, ccMismatches, staleReconcile } from "../calc.js";
-import { addAccount, addCreditCard, renameAccount, archiveAccount, deleteAccount, reconcileAccount, addTransaction, isLocked } from "../mutate.js";
+import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog } from "../ui.js?v=120";
+import { fmt, todayKey, toTitleCase, isCard } from "../util.js?v=120";
+import { accountBalances, ccMismatches, staleReconcile, findUnclearedSuggestion, txBalanceEffect } from "../calc.js?v=120";
+import { addAccount, addCreditCard, renameAccount, archiveAccount, deleteAccount, reconcileAccount, addTransaction, isLocked, zeroAccountByUnassign } from "../mutate.js?v=120";
 
 export function renderAccounts(root, ctx) {
   const budget = ctx.budget();
@@ -42,7 +42,7 @@ export function renderAccounts(root, ctx) {
 function accountLine(ctx, a, balance, card) {
   return h("button", { class: "line account", type: "button", onclick: () => openAccount(ctx, a, card) },
     h("span", {}, h("strong", { text: a.name }), h("span", { class: "muted", text: card ? "Credit card" : a.type })),
-    h("span", { class: balance < -0.005 ? "bad" : "", text: card ? `${fmt(balance)} owed` : fmt(balance) }),
+    h("span", { class: balance < -0.005 ? "neg" : balance > 0.005 ? "pos" : "", text: card ? `${fmt(balance)} owed` : fmt(balance) }),
   );
 }
 
@@ -69,6 +69,15 @@ function openAccount(ctx, a, card) {
         }});
       }}));
       host.append(btn(a.archived ? "Restore" : "Archive", { block: true, kind: "ghost", onClick: () => { sheet.close(); requestArchive(ctx, a, card); } }));
+      host.append(btn("Delete", { kind: "danger", block: true, onClick: () => {
+        const txs = (budget.transactions || []).filter((t) => t.accountId === a.id && t.subtype !== "starting_balance");
+        if (txs.length) { toast("Delete isn’t available while this account has transactions. Archive it instead."); return; }
+        confirmDialog({ title: `Delete ${a.name}?`, message: "The starting balance goes with it.", confirm: "Delete", danger: true, onConfirm: () => {
+          ctx.updateBudget((b) => deleteAccount(b, a.id, card));
+          sheet.close();
+          toast("Deleted", { label: "Undo", action: () => ctx.undo() });
+        } });
+      }}));
     },
   });
 }
@@ -106,6 +115,7 @@ function openBalanceResolution(ctx, a, card, bal) {
     body: (host) => {
       host.append(h("p", { class: "lede", text: `${a.name} still has ${fmt(bal)}. Move it before archiving, or delete the account only if it has no spending.` }));
       host.append(btn("Transfer out", { block: true, onClick: () => { sheet.close(); openTransfer(ctx, a.id); } }));
+      host.append(btn("Unassign categories to zero it", { kind: "ghost", block: true, onClick: () => { sheet.close(); openClawbackClose(ctx, a, bal); } }));
       host.append(btn("Archive anyway", { kind: "danger", block: true, onClick: () => { ctx.updateBudget((b) => archiveAccount(b, a.id, card)); sheet.close(); } }));
     },
   });
@@ -138,65 +148,88 @@ function openReconcile(ctx, a, card, computed, after) {
   const txs = (budget.transactions || []).filter((t) => t.accountId === a.id);
   const uncat = txs.filter((t) => t.type === "expense" && !t.splits && (!t.categoryId || t.categoryConfirmed === false));
   if (uncat.length) {
-    confirmDialog({ title: "Can’t reconcile yet", message: `${uncat.length} transaction${uncat.length === 1 ? "" : "s"} need a category first.`, confirm: "Review", onConfirm: () => ctx.go("transactions", { accountId: a.id }) });
+    confirmDialog({ title: "Can’t reconcile yet", message: `${uncat.length} transaction${uncat.length === 1 ? "" : "s"} need a category first.`, confirm: "Review", onConfirm: () => ctx.go("transactions", { accountId: a.id, attention: true }) });
     return;
   }
   const unlocked = txs.filter((t) => !isLocked(budget, t));
+  const effect = (tx) => txBalanceEffect(tx, card);
   const checked = new Set(unlocked.map((t) => t.id));
   let date = todayKey();
-  let real = Math.abs(computed);
+  let real = computed;
   const sheet = openSheet({
     title: `Reconcile ${a.name}`,
     body: (host) => {
       const dateEl = h("input", { class: "input", type: "date", value: date, max: todayKey() });
       dateEl.addEventListener("change", () => { date = dateEl.value; });
       const diffEl = h("p", { class: "lede" });
+      const note = h("p", { class: "hint", text: "" });
       const list = h("div", { class: "tx-list" });
+      const figures = () => {
+        const uncheckedSum = unlocked.filter((t) => !checked.has(t.id)).reduce((s, t) => s + effect(t), 0);
+        const adjusted = computed - uncheckedSum;
+        const diff = real - adjusted;
+        return { uncheckedSum, adjusted, diff, matches: Math.abs(diff) < 0.005 };
+      };
       const paint = () => {
-        const unchecked = unlocked.filter((t) => !checked.has(t.id)).reduce((s, t) => s + Number(t.amount), 0);
-        const adjusted = computed - unchecked;
-        const diff = real - (card ? Math.abs(adjusted) : adjusted);
-        const matches = Math.abs(diff) < 0.005;
+        const { adjusted, diff, matches, uncheckedSum } = figures();
         diffEl.textContent = matches ? "Matches." : `Difference ${fmt(diff)}`;
+        if (note.dataset.suggest) note.textContent = note.dataset.suggest;
+        else if (Math.abs(uncheckedSum) > 0.005) note.textContent = `Cleared balance ${fmt(adjusted)}.`;
+        else note.textContent = "";
         list.replaceChildren();
         for (const tx of [...unlocked].sort((x, y) => y.date.localeCompare(x.date))) {
           list.append(h("label", { class: "line" },
-            h("input", { type: "checkbox", checked: checked.has(tx.id), onchange: (e) => { if (e.target.checked) checked.add(tx.id); else checked.delete(tx.id); paint(); } }),
-            h("span", { text: `${tx.date} ${tx.payee || ""}` }),
-            h("span", { text: fmt(tx.amount) }),
+            h("input", { type: "checkbox", checked: checked.has(tx.id), onchange: (e) => { if (e.target.checked) checked.add(tx.id); else checked.delete(tx.id); note.dataset.suggest = ""; paint(); } }),
+            h("span", { class: "grow", text: `${tx.payee || "—"} · ${tx.date}` }),
+            h("span", { class: effect(tx) < -0.005 ? "neg" : effect(tx) > 0.005 ? "pos" : "", text: fmt(effect(tx)) }),
           ));
         }
         host.querySelector("[data-finish]")?.toggleAttribute("disabled", !matches);
+        host.querySelector("[data-adjust]")?.toggleAttribute("disabled", matches);
       };
-      host.append(
-        h("p", { class: "hint", text: `ToozBudgeting shows ${fmt(computed)}${card ? " owed" : ""}.` }),
-        field("Statement date", dateEl),
-        field(card ? "Actual balance owed" : "Actual balance", moneyButton(real, (n) => { real = n; paint(); })),
-        diffEl,
-        h("p", { class: "kicker", text: "Uncheck anything that hasn’t cleared" }),
-        list,
-      );
+      const onReal = (n) => {
+        real = n;
+        const gap = real - computed;
+        checked.clear();
+        unlocked.forEach((t) => checked.add(t.id));
+        note.dataset.suggest = "";
+        if (Math.abs(gap) >= 0.005) {
+          const suggestion = findUnclearedSuggestion(unlocked.map((t) => ({ ...t, amount: effect(t) })), gap);
+          if (suggestion?.length) {
+            suggestion.forEach((id) => checked.delete(id));
+            note.dataset.suggest = `${suggestion.length} transaction${suggestion.length === 1 ? "" : "s"} unchecked to match that balance. Check them again if that’s wrong.`;
+          }
+        }
+        paint();
+      };
       const finish = btn("Finish reconciliation", { block: true, onClick: () => {
-        const unchecked = unlocked.filter((t) => !checked.has(t.id)).reduce((s, t) => s + Number(t.amount), 0);
-        const adjusted = computed - unchecked;
-        const diff = real - (card ? Math.abs(adjusted) : adjusted);
-        if (Math.abs(diff) > 0.005) { toast("Uncheck transactions or add an adjustment"); return; }
-        ctx.updateBudget((b) => reconcileAccount(b, a.id, date, 0, null));
+        const { matches } = figures();
+        if (!matches) { toast("Uncheck transactions that haven’t cleared, or add an adjustment"); return; }
+        ctx.updateBudget((b) => reconcileAccount(b, a.id, date, 0, [...checked]));
         sheet.close();
         toast("Reconciled");
         after?.();
       }});
-      finish.dataset.finish = "1";
       const adjust = btn("Add adjustment and reconcile", { kind: "ghost", block: true, onClick: () => {
-        const unchecked = unlocked.filter((t) => !checked.has(t.id)).reduce((s, t) => s + Number(t.amount), 0);
-        const adjusted = computed - unchecked;
-        const diff = real - (card ? Math.abs(adjusted) : adjusted);
+        const { diff } = figures();
         ctx.updateBudget((b) => reconcileAccount(b, a.id, date, diff, [...checked]));
         sheet.close();
         toast("Reconciled with adjustment", { label: "Undo", action: () => ctx.undo() });
         after?.();
       }});
-      host.append(finish, adjust);
+      finish.dataset.finish = "1";
+      adjust.dataset.adjust = "1";
+      host.append(
+        h("p", { class: "hint", text: `ToozBudgeting shows ${fmt(computed)}${card ? " owed" : ""}. Uncheck anything that hasn’t cleared.` }),
+        field("Statement date", dateEl),
+        field(card ? "Actual balance owed" : "Actual balance", moneyButton(real, (n) => onReal(n), { allowNegative: !card, label: "Statement balance" })),
+        diffEl,
+        note,
+        finish,
+        adjust,
+        h("p", { class: "kicker", text: "Not yet cleared" }),
+        list,
+      );
       paint();
     },
   });
@@ -242,4 +275,32 @@ function openNewAccount(ctx, card) {
   });
 }
 
-void deleteAccount;
+function openClawbackClose(ctx, account, bal) {
+  const budget = ctx.budget();
+  const month = ctx.month;
+  const pulls = {};
+  const sheet = openSheet({
+    title: "Zero the account",
+    body: (host) => {
+      host.append(h("p", { class: "lede", text: `${account.name} has ${fmt(bal)}. Unassign that much from categories, then the account is adjusted to zero and archived.` }));
+      for (const c of budget.categories) {
+        if (c.archived || c.creditCardId) continue;
+        const av = accountBalances ? (budget.monthlyBudgets?.[month]?.[c.id] || 0) : 0;
+        if (av <= 0.005 && (budget.monthlyBudgets?.[month]?.[c.id] || 0) <= 0) continue;
+        const assigned = Number((budget.monthlyBudgets?.[month] || {})[c.id] || 0);
+        if (assigned <= 0.005) continue;
+        host.append(h("div", { class: "line" }, h("span", { text: `${c.name} (${fmt(assigned)})` }), moneyButton(0, (n) => { pulls[c.id] = Math.min(n, assigned); })));
+      }
+      host.append(btn("Zero and archive", { block: true, onClick: () => {
+        const list = Object.entries(pulls).filter(([, n]) => n > 0).map(([id, amount]) => ({ id, amount }));
+        const sum = list.reduce((s, p) => s + p.amount, 0);
+        if (Math.abs(sum - bal) > 0.05) { toast(`Unassign ${fmt(bal)} in total. That’s ${fmt(sum)} so far.`); return; }
+        ctx.updateBudget((b) => archiveAccount(zeroAccountByUnassign(b, account.id, month, list), account.id, false));
+        sheet.close();
+        toast("Account archived", { label: "Undo", action: () => ctx.undo() });
+      }}));
+    },
+  });
+}
+
+void isCard;

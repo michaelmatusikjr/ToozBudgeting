@@ -1,7 +1,7 @@
 /** Closed-app Web Push. Rules are encrypted on device; the server only stores ciphertext. */
-import { deviceGet, deviceSet } from "./store.js";
-import { b64url, b64urlToBytes, timeZone } from "./util.js";
-import { isIOS, isStandalone } from "./pwa.js";
+import { deviceGet, deviceSet } from "./store.js?v=120";
+import { b64url, b64urlToBytes, timeZone } from "./util.js?v=120";
+import { isIOS, isStandalone } from "./pwa.js?v=120";
 
 export const DEFAULTS = {
   serverUrl: "https://toozbudgeting-push.michael-matusik-jr.workers.dev",

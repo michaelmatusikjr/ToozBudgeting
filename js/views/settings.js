@@ -1,11 +1,11 @@
-import { h, btn, openSheet, field, textInput, toast, confirmDialog } from "../ui.js";
-import { APP_VERSION, toTitleCase, uid } from "../util.js";
-import { exportData, deviceGet, deviceSet } from "../store.js";
-import { freshBudgetShell, copyCategories, addAccount, addCreditCard } from "../mutate.js";
-import { pushConfig, setPushConfig, pushStatus, enablePush, disablePush, DEFAULTS, syncSchedule } from "../push.js";
-import { requestPermission, scheduleLocal } from "../notify.js";
-import { isIOS, isStandalone, canInstall, promptInstall } from "../pwa.js";
-import { monthKey } from "../util.js";
+import { h, btn, openSheet, field, textInput, toast, confirmDialog } from "../ui.js?v=120";
+import { APP_VERSION, toTitleCase, uid } from "../util.js?v=120";
+import { exportData, deviceGet, deviceSet, importData } from "../store.js?v=120";
+import { freshBudgetShell, copyCategories, addAccount, addCreditCard } from "../mutate.js?v=120";
+import { pushConfig, setPushConfig, pushStatus, enablePush, disablePush, DEFAULTS, syncSchedule } from "../push.js?v=120";
+import { requestPermission, scheduleLocal } from "../notify.js?v=120";
+import { isIOS, isStandalone, canInstall, promptInstall } from "../pwa.js?v=120";
+import { openWhatsNew } from "../whatsnew.js?v=122";
 
 export async function renderSettings(root, ctx) {
   const budget = ctx.budget();
@@ -16,6 +16,32 @@ export async function renderSettings(root, ctx) {
   const cfg = await pushConfig();
 
   root.append(h("header", { class: "view-head" }, h("h1", { text: "Settings" })));
+  const budgets = (ctx.state.budgets || []).filter((b) => !b.archived);
+  const others = (ctx.state.budgets || []).filter((b) => b.archived);
+  root.append(section("Budgets", [
+    ...budgets.map((b) => h("div", { class: "line" },
+      h("span", {}, h("strong", { text: b.name }), b.id === ctx.state.activeBudgetId ? h("span", { class: "muted", text: " · current" }) : null),
+      h("span", { class: "row gap" },
+        b.id === ctx.state.activeBudgetId ? null : btn("Open", { kind: "quiet", onClick: () => ctx.commit({ ...ctx.state, activeBudgetId: b.id, setupComplete: true }) }),
+        btn(b.archived ? "Restore" : "Archive", { kind: "quiet", onClick: () => {
+          const next = ctx.state.budgets.map((x) => x.id === b.id ? { ...x, archived: !x.archived } : x);
+          const active = next.find((x) => !x.archived) || next[0];
+          ctx.commit({ ...ctx.state, budgets: next, activeBudgetId: b.id === ctx.state.activeBudgetId ? active?.id || null : ctx.state.activeBudgetId, setupComplete: !!active && !active.archived });
+        }}),
+        btn("Delete", { kind: "quiet", onClick: () => confirmDialog({
+          title: `Delete ${b.name}?`,
+          message: "This removes the budget from this device. Export a backup first if you might want it back.",
+          confirm: "Delete",
+          danger: true,
+          onConfirm: () => {
+            const next = ctx.state.budgets.filter((x) => x.id !== b.id);
+            ctx.commit({ ...ctx.state, budgets: next, activeBudgetId: ctx.state.activeBudgetId === b.id ? (next.find((x) => !x.archived)?.id || null) : ctx.state.activeBudgetId, setupComplete: next.some((x) => !x.archived) });
+          },
+        }) }),
+      ),
+    )),
+    others.length ? h("p", { class: "hint", text: `${others.length} archived.` }) : null,
+  ]));
   root.append(section("Budget", [
     line(budget?.name || "Budget", "Rename", () => renameBudget(ctx)),
     line("New budget", "Create", () => newBudget(ctx)),
@@ -23,6 +49,8 @@ export async function renderSettings(root, ctx) {
   ]));
   root.append(section("Backup", [
     line("Export JSON", "Download", () => download(ctx)),
+    line("Copy backup", "Copy", () => copyBackup(ctx)),
+    line("Paste backup", "Paste", () => pasteBackup(ctx)),
     line("Import JSON", "Choose file", () => importFile(ctx)),
     line("Reset this device", "Reset", () => confirmDialog({
       title: "Erase local data?",
@@ -63,6 +91,7 @@ export async function renderSettings(root, ctx) {
     })}),
   ]));
   root.append(h("p", { class: "hint", text: `ToozBudgeting ${APP_VERSION}` }));
+  root.append(btn("What's new", { kind: "quiet", block: true, onClick: () => openWhatsNew() }));
   if (canInstall() || (isIOS() && !isStandalone())) {
     root.append(btn("Install app", { block: true, kind: "ghost", onClick: async () => {
       const res = await promptInstall();
@@ -74,8 +103,9 @@ export async function renderSettings(root, ctx) {
 function section(title, kids) {
   return h("section", { class: "group settings-block" }, h("h2", { text: title }), ...kids);
 }
-function line(label, action, onClick) {
-  return h("div", { class: "line" }, h("span", { text: label }), btn(action, { kind: "quiet", onClick }));
+function line(label, action, onClick, kind = "quiet") {
+  const tone = label.startsWith("Reset") ? "danger" : kind;
+  return h("div", { class: "line" }, h("span", { text: label }), btn(action, { kind: tone, onClick }));
 }
 
 function renameBudget(ctx) {
@@ -93,14 +123,18 @@ function renameBudget(ctx) {
 
 function newBudget(ctx) {
   const input = textInput({ value: "New budget" });
-  let copy = true;
+  let copyFrom = ctx.budget()?.id || "";
   const sheet = openSheet({ title: "New budget", body: (host) => {
-    const box = h("label", { class: "choice" }, h("input", { type: "checkbox", checked: true, onchange: (e) => { copy = e.target.checked; } }), h("span", { text: "Copy categories from the current budget" }));
-    host.append(field("Name", input), box, btn("Create", { block: true, onClick: () => {
+    const sel = h("select", { class: "input" }, h("option", { value: "", text: "Start empty" }));
+    for (const b of ctx.state.budgets || []) sel.append(h("option", { value: b.id, text: `Copy categories from ${b.name}` }));
+    sel.value = copyFrom;
+    sel.addEventListener("change", () => { copyFrom = sel.value; });
+    host.append(field("Name", input), field("Categories", sel), btn("Create", { block: true, onClick: () => {
       const name = toTitleCase(input.value.trim() || "New budget");
       let b = freshBudgetShell(name, ctx.state.activeUserId);
-      if (copy) {
-        const copied = copyCategories(ctx.budget());
+      const source = (ctx.state.budgets || []).find((x) => x.id === copyFrom);
+      if (source) {
+        const copied = copyCategories(source);
         b = { ...b, categoryGroups: copied.groups, categories: copied.categories };
       }
       ctx.addBudget(b);
@@ -116,6 +150,18 @@ function download(ctx) {
   a.click();
   toast("Backup downloaded");
 }
+async function copyBackup(ctx) {
+  try {
+    await navigator.clipboard.writeText(JSON.stringify(exportData(ctx.state), null, 2));
+    toast("Backup copied");
+  } catch { toast("Couldn’t copy. Download the file instead."); }
+}
+async function pasteBackup(ctx) {
+  try {
+    ctx.restore(importData(JSON.parse(await navigator.clipboard.readText())));
+    toast("Backup restored");
+  } catch { toast("Clipboard doesn’t contain a valid backup"); }
+}
 function todayStamp() {
   const d = new Date();
   return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
@@ -126,7 +172,7 @@ function importFile(ctx) {
     const f = input.files?.[0]; if (!f) return;
     try {
       const parsed = JSON.parse(await f.text());
-      ctx.restore(parsed.budgets ? (await import("../store.js")).importData(parsed) : parsed);
+      ctx.restore(parsed.budgets ? (await import("../store.js?v=120")).importData(parsed) : parsed);
       toast("Imported");
     } catch (e) { toast(e.message || "Couldn’t import that file"); }
   });
@@ -164,7 +210,10 @@ function editReminders(ctx) {
       const remember = () => pending.set(cat.id, { dueDay: day.value ? Number(day.value) : null, leadDays: Number(lead.value) || 0 });
       day.addEventListener("change", remember);
       lead.addEventListener("change", remember);
-      host.append(h("div", { class: "line" }, h("span", { text: cat.name }), day, lead));
+      host.append(h("div", { class: "remind-row" },
+        h("strong", { text: cat.name }),
+        h("div", { class: "pair-inputs" }, field("Day of month", day), field("Days before", lead)),
+      ));
     }
     host.append(btn("Custom reminder", { kind: "ghost", onClick: () => {
       const title = textInput({ placeholder: "Title" });
@@ -189,7 +238,7 @@ function editReminders(ctx) {
       }}),
     );
   }});
-  void monthKey;
+  void uid;
 }
 
 function upgrade(ctx, user) {

@@ -2,12 +2,12 @@
 import {
   uid, toTitleCase, monthKey, todayKey, nextMonth, prevMonth, isCard, isBank, ccPayCat,
   isPayFrom, payFromId, round2, deepClone,
-} from "./util.js";
-import { available, readyToAssign, getGoalMetrics, globalFree, furthestMonth } from "./calc.js";
+} from "./util.js?v=120";
+import { available, readyToAssign, getGoalMetrics, globalFree, furthestMonth, accountBalances } from "./calc.js?v=120";
 import {
   ensurePayee, prunePayees, findFuzzyDuplicates, runPaymentMatchScan, displayName,
   originalsForCanonical, payeeDefaultCategory, payeeSuggestedCategory,
-} from "./payees.js";
+} from "./payees.js?v=120";
 
 const stamp = () => new Date().toISOString();
 
@@ -96,7 +96,12 @@ export function planClawback(budget, month, catId, newVal) {
   while (mk > month && remaining > 1e-6) {
     const cats = (budget.categories || [])
       .filter((c) => !c.archived && ((working[mk] || {})[c.id] || 0) > 1e-6)
-      .sort((a, b) => unassignPriority(a) - unassignPriority(b));
+      .sort((a, b) => {
+        const p = unassignPriority(a) - unassignPriority(b);
+        if (p) return p;
+        if (a.goal?.type === "date" && b.goal?.type === "date") return String(b.goal.targetDate || "").localeCompare(String(a.goal.targetDate || ""));
+        return 0;
+      });
     for (const c of cats) {
       if (remaining <= 1e-6) break;
       const before = working[mk][c.id];
@@ -196,6 +201,19 @@ function addInflow(inf, month, delta, onBank) {
   return { ...inf, [month]: round2((inf[month] || 0) + delta) };
 }
 
+function applyDelta(budget, tx, dir) {
+  if (!tx) return budget;
+  const ghost = { ...tx, amount: dir * (Number(tx.amount) || 0) };
+  const mk = (ghost.date || todayKey()).slice(0, 7);
+  let mb = budget.monthlyBudgets || {};
+  let inf = { ...(budget.inflows || {}) };
+  if (ghost.type === "expense" && isCard(budget, ghost.accountId)) mb = bumpCC(budget, ghost.accountId, mk, Number(ghost.amount) || 0, mb);
+  if ((ghost.type === "income" || ghost.type === "adjustment") && isBank(budget, ghost.accountId)) {
+    inf[mk] = round2((inf[mk] || 0) + (Number(ghost.amount) || 0));
+  }
+  return { ...budget, monthlyBudgets: mb, inflows: inf };
+}
+
 function withDupes(budget, tx, existing) {
   const pairs = findFuzzyDuplicates(tx, existing);
   if (!pairs.length) return budget.pendingDuplicates || [];
@@ -215,7 +233,7 @@ export function addTransaction(budget, form) {
   const card = isCard(budget, form.accountId);
   const bank = isBank(budget, form.accountId);
   const originalPayee = toTitleCase((form.payee || "").trim());
-  const id = uid();
+  const id = form.id || uid();
   const existing = budget.transactions || [];
   const base = {
     id, date: form.date || todayKey(), payee: originalPayee, originalPayee,
@@ -225,12 +243,12 @@ export function addTransaction(budget, form) {
   if (form.type === "transfer" || form.transferAccountId) {
     const toId = form.transferAccountId;
     if (!toId || toId === form.accountId) return { budget, error: "Pick a different account to transfer to." };
-    const link = uid();
+    const link = form.transferLinkId || uid();
     const outAmt = card ? amountAbs : -amountAbs;
     const inAmt = isCard(budget, toId) ? -amountAbs : amountAbs;
     const a = { ...base, type: "transfer", amount: outAmt, transferAccountId: toId, transferLinkId: link, payee: originalPayee || "Transfer", originalPayee: originalPayee || "Transfer" };
     const b = {
-      id: uid(), date: base.date, type: "transfer", accountId: toId, amount: inAmt,
+      id: form.partnerId || uid(), date: base.date, type: "transfer", accountId: toId, amount: inAmt,
       transferAccountId: form.accountId, transferLinkId: link,
       payee: originalPayee || "Transfer", originalPayee: originalPayee || "Transfer", note: base.note, reconciled: false,
     };
@@ -271,7 +289,7 @@ export function addTransaction(budget, form) {
   const suggested = !splits && form.categoryId && !payeeDefaultCategory(budget, displayed) && !payeeSuggestedCategory(budget, displayed);
   const tx = {
     ...base, type: "expense", amount: signed,
-    ...(splits ? { splits } : form.categoryId ? { categoryId: form.categoryId, categoryConfirmed: true } : {}),
+    ...(splits ? { splits } : form.categoryId ? { categoryId: form.categoryId, categoryConfirmed: form.categoryConfirmed !== false } : {}),
   };
   const updates = { transactions: [...existing, tx] };
   if (card) updates.monthlyBudgets = bumpCC(budget, form.accountId, tx.date.slice(0, 7), signed, budget.monthlyBudgets || {});
@@ -312,6 +330,16 @@ export function deleteTransactions(budget, ids) {
   return touch(budget, { transactions: txs, monthlyBudgets: mb, inflows: inf, payees: prunePayees(budget.payees || [], txs) });
 }
 
+export function replaceTransaction(budget, id, form) {
+  const old = (budget.transactions || []).find((t) => t.id === id);
+  if (!old || old.subtype === "starting_balance") return { budget, error: "That transaction can’t be edited." };
+  const partner = old.transferLinkId
+    ? (budget.transactions || []).find((t) => t.transferLinkId === old.transferLinkId && t.id !== old.id)
+    : null;
+  const cleared = deleteTransactions(budget, [id]);
+  return addTransaction(cleared, { ...form, id, transferLinkId: old.transferLinkId, partnerId: partner?.id });
+}
+
 export function isLocked(budget, tx) {
   if (!tx) return false;
   if (tx.subtype === "starting_balance") return true;
@@ -324,20 +352,23 @@ export function isLocked(budget, tx) {
 export function updateTransaction(budget, txId, patch) {
   const tx = (budget.transactions || []).find((t) => t.id === txId);
   if (!tx || tx.subtype === "starting_balance") return budget;
-  const next = { ...tx, ...patch };
+  if (isLocked(budget, tx)) {
+    const note = patch.note != null ? String(patch.note) : tx.note;
+    return touch(budget, { transactions: budget.transactions.map((t) => t.id === txId ? { ...t, note } : t) });
+  }
+  let next = { ...tx, ...patch, id: tx.id };
   if (patch.payee != null) {
     next.payee = toTitleCase(String(patch.payee).trim());
     if (!tx.originalPayee || tx.originalPayee === tx.payee) next.originalPayee = next.payee;
   }
-  let txs = (budget.transactions || []).map((t) => t.id === txId ? next : t);
-  let mb = budget.monthlyBudgets || {};
-  if (tx.type === "expense" && isCard(budget, tx.accountId) && Number(patch.amount) !== Number(tx.amount) && patch.amount != null) {
-    mb = bumpCC(budget, tx.accountId, tx.date.slice(0, 7), Number(patch.amount) - Number(tx.amount), mb);
-  }
+  if (patch.splits === undefined && Object.prototype.hasOwnProperty.call(patch, "splits")) delete next.splits;
+  let b = applyDelta(budget, tx, -1);
+  b = applyDelta(b, next, 1);
+  let txs = (b.transactions || []).map((t) => t.id === txId ? next : t);
   if (next.type === "payment" || tx.type === "payment") txs = runPaymentMatchScan(txs, budget.creditCards, budget.accounts);
-  let payees = budget.payees || [];
+  let payees = b.payees || [];
   if (next.originalPayee) payees = ensurePayee(payees, next.originalPayee, "");
-  return touch(budget, { transactions: txs, monthlyBudgets: mb, payees: prunePayees(payees, txs) });
+  return touch(b, { transactions: txs, payees: prunePayees(payees, txs) });
 }
 
 export function setTxCategory(budget, txId, categoryId) {
@@ -345,19 +376,19 @@ export function setTxCategory(budget, txId, categoryId) {
   if (!tx || isLocked(budget, tx) || tx.subtype === "starting_balance") return budget;
   if (isCard(budget, tx.accountId) && isPayFrom(categoryId)) {
     return updateTransaction(budget, txId, {
-      type: "payment", categoryId: undefined, categoryConfirmed: undefined,
-      paymentLinkStatus: "broken", paymentFromAccountId: payFromId(categoryId), splits: undefined,
+      type: "payment", categoryId: null, categoryConfirmed: true,
+      paymentLinkStatus: "broken", paymentFromAccountId: payFromId(categoryId), splits: undefined, amount: Math.abs(tx.amount),
     });
   }
   const cc = (budget.categories || []).find((c) => c.id === categoryId && c.creditCardId);
   if (isBank(budget, tx.accountId) && cc) {
-    return updateTransaction(budget, txId, { type: "payment", categoryId, categoryConfirmed: undefined, paymentLinkStatus: "broken", splits: undefined });
+    return updateTransaction(budget, txId, { type: "payment", categoryId, categoryConfirmed: true, paymentLinkStatus: "broken", splits: undefined, amount: Math.abs(tx.amount) });
   }
-  const updated = { ...tx, categoryId, categoryConfirmed: true, type: tx.type === "payment" ? "expense" : tx.type };
-  delete updated.splits;
-  let txs = (budget.transactions || []).map((t) => t.id === txId ? updated : t);
-  txs = runPaymentMatchScan(txs, budget.creditCards, budget.accounts);
-  return touch(budget, { transactions: txs });
+  if (categoryId === "__rta__") {
+    return updateTransaction(budget, txId, { type: "income", categoryId: null, splits: undefined, amount: Math.abs(tx.amount), paymentLinkStatus: undefined, paymentFromAccountId: undefined });
+  }
+  const type = tx.type === "income" || tx.type === "payment" ? "expense" : (tx.type || "expense");
+  return updateTransaction(budget, txId, { type, categoryId, categoryConfirmed: true, splits: undefined, paymentLinkStatus: undefined, paymentFromAccountId: undefined });
 }
 
 export function reconcileAccount(budget, accId, date, diff, txIdsToLock) {
@@ -570,8 +601,8 @@ export function setPayeeCategory(budget, canonical, categoryId, which) {
     if (existing) {
       payees = payees.map((p) => p.name === name ? {
         ...p,
-        defaultCategoryId: which === "default" ? categoryId : "",
-        suggestedCategoryId: which === "suggested" ? categoryId : "",
+        defaultCategoryId: which === "default" ? categoryId : (p.defaultCategoryId || ""),
+        suggestedCategoryId: which === "suggested" ? categoryId : (p.suggestedCategoryId || ""),
       } : p);
     } else {
       payees.push({
@@ -607,6 +638,97 @@ export const DEFAULT_CATS = [
   { id: "cat-emerg", groupId: "grp-savings", name: "Emergency Fund", rollover: "rollover" },
   { id: "cat-vac", groupId: "grp-savings", name: "Vacation", rollover: "rollover" },
 ];
+
+export function clearPayeeCategories(budget) {
+  return touch(budget, {
+    payees: (budget.payees || []).map((p) => ({ ...p, defaultCategoryId: "", suggestedCategoryId: "" })),
+  });
+}
+
+export function confirmCategories(budget, ids) {
+  const set = new Set(ids);
+  return touch(budget, {
+    transactions: (budget.transactions || []).map((t) => set.has(t.id) ? { ...t, categoryConfirmed: true } : t),
+  });
+}
+
+function moveInList(list, index, dir) {
+  const j = index + dir;
+  if (index < 0 || j < 0 || j >= list.length) return list;
+  const next = list.slice();
+  const [item] = next.splice(index, 1);
+  next.splice(j, 0, item);
+  return next;
+}
+
+export function addGroup(budget, name) {
+  const titled = toTitleCase((name || "").trim());
+  if (!titled) return budget;
+  if ((budget.categoryGroups || []).some((g) => g.name.toLowerCase() === titled.toLowerCase())) return budget;
+  return touch(budget, { categoryGroups: [...(budget.categoryGroups || []), { id: uid(), name: titled }] });
+}
+
+export function renameGroup(budget, id, name) {
+  const titled = toTitleCase((name || "").trim());
+  if (!titled) return budget;
+  if ((budget.categoryGroups || []).some((g) => g.id !== id && g.name.toLowerCase() === titled.toLowerCase())) return budget;
+  return touch(budget, { categoryGroups: budget.categoryGroups.map((g) => g.id === id ? { ...g, name: titled } : g) });
+}
+
+export function deleteGroup(budget, id) {
+  const group = (budget.categoryGroups || []).find((g) => g.id === id);
+  if (!group || group.name === "Credit Card Payments" || group.name === "Uncategorized") return budget;
+  let groups = budget.categoryGroups.filter((g) => g.id !== id);
+  let uc = groups.find((g) => g.name === "Uncategorized");
+  if (!uc) { uc = { id: uid(), name: "Uncategorized" }; groups = [...groups, uc]; }
+  return touch(budget, {
+    categoryGroups: groups,
+    categories: (budget.categories || []).map((c) => c.groupId === id ? { ...c, groupId: uc.id } : c),
+  });
+}
+
+export function moveGroup(budget, id, dir) {
+  const i = (budget.categoryGroups || []).findIndex((g) => g.id === id);
+  return touch(budget, { categoryGroups: moveInList(budget.categoryGroups, i, dir) });
+}
+
+export function moveCategory(budget, id, dir) {
+  const cat = (budget.categories || []).find((c) => c.id === id);
+  if (!cat) return budget;
+  const inGroup = budget.categories.filter((c) => c.groupId === cat.groupId);
+  const i = inGroup.findIndex((c) => c.id === id);
+  const j = i + dir;
+  if (i < 0 || j < 0 || j >= inGroup.length) return budget;
+  const order = inGroup.slice();
+  const [item] = order.splice(i, 1);
+  order.splice(j, 0, item);
+  const rest = budget.categories.filter((c) => c.groupId !== cat.groupId);
+  return touch(budget, { categories: [...rest, ...order] });
+}
+
+export function zeroAccountByUnassign(budget, accountId, month, pulls) {
+  let mb = deepClone(budget.monthlyBudgets || {});
+  const entries = [];
+  for (const p of pulls) {
+    if (!(p.amount > 0)) continue;
+    mb[month] = { ...(mb[month] || {}) };
+    mb[month][p.id] = round2((mb[month][p.id] || 0) - p.amount);
+    entries.push({ from: p.id, to: "rta", amount: p.amount });
+  }
+  const bal = round2(accountBalances(budget)[accountId] || 0);
+  const tx = {
+    id: uid(), date: todayKey(), payee: "Balance Adjustment", originalPayee: "Balance Adjustment",
+    note: "Closed into the budget", type: "adjustment", accountId, amount: round2(-bal), reconciled: true,
+  };
+  const mk = tx.date.slice(0, 7);
+  const inf = { ...(budget.inflows || {}), [mk]: round2((budget.inflows?.[mk] || 0) + tx.amount) };
+  return touch(budget, {
+    monthlyBudgets: mb,
+    transactions: [...(budget.transactions || []), tx],
+    inflows: inf,
+    moneyMoveLog: logMove(budget, { type: "close", month, entries }),
+  });
+}
 
 export function freshBudgetShell(name, ownerId) {
   return {

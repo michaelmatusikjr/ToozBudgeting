@@ -1,5 +1,5 @@
 /** Zero-based budget math. Matches the ClearBudget rules: rollover, return, max, date goals, RTA. */
-import { monthKey, prevMonth, nextMonth, round2 } from "./util.js";
+import { monthKey, prevMonth, nextMonth, round2 } from "./util.js?v=120";
 
 export function dataMonths(budget) {
   const set = new Set();
@@ -23,7 +23,6 @@ export function spentByMonthCat(budget) {
   const map = {};
   for (const tx of budget.transactions || []) {
     if (tx.type !== "expense" && tx.type !== "payment") continue;
-    if (tx.subtype === "starting_balance") continue;
     if (!tx.date) continue;
     const mk = tx.date.slice(0, 7);
     const bucket = (map[mk] ||= {});
@@ -39,6 +38,17 @@ export function spentByMonthCat(budget) {
   return map;
 }
 
+/** Signed effect of one transaction on its account balance. */
+export function txBalanceEffect(tx, card) {
+  const amt = Number(tx.amount) || 0;
+  if (tx.type === "income") return Math.abs(amt);
+  if (tx.type === "expense") return card ? amt : -amt;
+  if (tx.type === "transfer") return amt;
+  if (tx.type === "payment") return -Math.abs(amt);
+  if (tx.type === "adjustment") return amt;
+  return 0;
+}
+
 export function accountBalances(budget) {
   const map = {};
   for (const a of budget.accounts || []) map[a.id] = Number(a.balance) || 0;
@@ -46,12 +56,7 @@ export function accountBalances(budget) {
   const card = (id) => (budget.creditCards || []).some((c) => c.id === id);
   for (const tx of budget.transactions || []) {
     if (map[tx.accountId] === undefined) continue;
-    const amt = Number(tx.amount) || 0;
-    if (tx.type === "income") map[tx.accountId] += Math.abs(amt);
-    else if (tx.type === "expense") map[tx.accountId] += card(tx.accountId) ? amt : -amt;
-    else if (tx.type === "transfer") map[tx.accountId] += amt;
-    else if (tx.type === "payment") map[tx.accountId] -= Math.abs(amt);
-    else if (tx.type === "adjustment") map[tx.accountId] += amt;
+    map[tx.accountId] += txBalanceEffect(tx, card(tx.accountId));
   }
   return map;
 }
@@ -213,7 +218,7 @@ export function monthHasActivity(budget, mk) {
   return (budget.transactions || []).some((tx) => tx.date?.startsWith(mk));
 }
 export function monthAccessible(budget, mk, today = monthKey()) {
-  if (mk <= today) return mk === today || monthHasActivity(budget, mk) || monthHasAssigned(budget, mk);
+  if (mk <= today) return true;
   if (mk === nextMonth(today)) return true;
   return monthHasAssigned(budget, prevMonth(mk));
 }
@@ -309,3 +314,32 @@ export function ccMismatches(budget, month) {
 }
 
 void rtaCache;
+
+/** Subset of transactions whose signed amounts sum to -target. Newest first. */
+export function findUnclearedSuggestion(txList, target) {
+  const need = Math.round(-target * 100);
+  if (need === 0 || !txList?.length) return null;
+  const sorted = [...txList].sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  const cents = sorted.map((tx) => Math.round(round2(Number(tx.amount)) * 100));
+  if (sorted.length > 22) return null;
+  let reach = new Map([[0, null]]);
+  for (let i = 0; i < sorted.length; i++) {
+    const additions = [];
+    for (const [sum] of reach) {
+      const next = sum + cents[i];
+      if (!reach.has(next)) additions.push([next, { idx: i, prev: sum }]);
+    }
+    for (const [s, info] of additions) reach.set(s, info);
+    if (reach.has(need)) break;
+  }
+  if (!reach.has(need)) return null;
+  const ids = [];
+  let cur = need;
+  while (cur !== 0) {
+    const info = reach.get(cur);
+    if (!info) break;
+    ids.push(sorted[info.idx].id);
+    cur = info.prev;
+  }
+  return ids.length ? ids : null;
+}

@@ -1,7 +1,7 @@
-import { h, btn, openSheet, field, textInput, toast } from "../ui.js";
-import { toTitleCase } from "../util.js";
-import { canonicalNames, displayName, originalsForCanonical, buildMergeGroups, getSharedWordsDefault, payeeDefaultCategory, payeeSuggestedCategory } from "../payees.js";
-import { setCanonical, unmergeOriginal, unmergeAll, setPayeeCategory, rejectMerge } from "../mutate.js";
+import { h, btn, openSheet, field, textInput, toast, keepFocus } from "../ui.js?v=120";
+import { toTitleCase } from "../util.js?v=120";
+import { canonicalNames, displayName, originalsForCanonical, buildMergeGroups, getSharedWordsDefault, payeeDefaultCategory, payeeSuggestedCategory } from "../payees.js?v=120";
+import { setCanonical, unmergeOriginal, unmergeAll, setPayeeCategory, rejectMerge, clearPayeeCategories } from "../mutate.js?v=120";
 
 export function renderPayees(root, ctx) {
   const budget = ctx.budget();
@@ -16,10 +16,12 @@ export function renderPayees(root, ctx) {
   }
   const shown = names.filter((n) => counts[n]);
   const groups = buildMergeGroups(shown, budget.rejectedMerges || [], budget.mergeExcludeWords || ["TST*"]);
-  const search = h("input", { class: "input", type: "search", placeholder: "Search payees", value: ctx.ui.payeeQuery || "" });
-  search.addEventListener("input", () => { ctx.ui.payeeQuery = search.value; ctx.render(); });
+  const search = h("input", { class: "input", type: "search", placeholder: "Search payees", value: ctx.ui.payeeQuery || "", "aria-label": "Search payees" });
+  const typing = ctx.ui.payeeTyping;
+  search.addEventListener("input", () => { ctx.ui.payeeQuery = search.value; ctx.ui.payeeTyping = true; ctx.render(); });
   root.append(h("header", { class: "view-head" }, h("h1", { text: "Payees" }), btn("Merge", { kind: "ghost", onClick: () => openMerge(ctx, null) })));
   root.append(search);
+  if (typing) { ctx.ui.payeeTyping = false; keepFocus(search); }
   if (groups.length) {
     root.append(h("button", { class: "notice", type: "button", onclick: () => openSuggestions(ctx, groups) },
       h("strong", { text: `${groups.length} merge suggestion${groups.length === 1 ? "" : "s"}` }),
@@ -38,6 +40,7 @@ export function renderPayees(root, ctx) {
   root.append(list);
   root.append(h("div", { class: "row gap wrap" },
     btn("Exclude words", { kind: "quiet", onClick: () => openExclude(ctx) }),
+    btn("Clear defaults", { kind: "quiet", onClick: () => { ctx.updateBudget((b) => clearPayeeCategories(b)); toast("Payee categories cleared"); } }),
     btn("Unmerge all", { kind: "quiet", onClick: () => { ctx.updateBudget((b) => unmergeAll(b)); toast("All payees show their original names"); } }),
   ));
 }

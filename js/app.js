@@ -1,16 +1,17 @@
-import { APP_VERSION, monthKey, prevMonth, nextMonth, deepClone } from "./util.js";
-import { loadState, saveState, subscribe, exportData, importData, deviceGet, deviceSet } from "./store.js";
-import { h, clear, icon, toast, closeAllModals } from "./ui.js";
-import { renderIdentity, renderWizard } from "./views/gate.js";
-import { renderBudget } from "./views/budget.js";
-import { renderTransactions, openTx } from "./views/transactions.js";
-import { renderAccounts } from "./views/accounts.js";
-import { renderPayees } from "./views/payees.js";
-import { renderSettings } from "./views/settings.js";
-import { registerSW, activateWaiting } from "./pwa.js";
-import { scheduleLocal } from "./notify.js";
-import { pushOnOpen } from "./push.js";
-import { normalizeBudget } from "./mutate.js";
+import { APP_VERSION, monthKey, prevMonth, nextMonth, deepClone } from "./util.js?v=120";
+import { loadState, saveState, subscribe, exportData, importData, deviceGet, deviceSet } from "./store.js?v=120";
+import { h, clear, icon, toast, closeAllModals } from "./ui.js?v=120";
+import { renderIdentity, renderWizard } from "./views/gate.js?v=120";
+import { renderBudget, openInbox } from "./views/budget.js?v=120";
+import { renderTransactions, openTx } from "./views/transactions.js?v=120";
+import { renderAccounts } from "./views/accounts.js?v=120";
+import { renderPayees } from "./views/payees.js?v=120";
+import { renderSettings } from "./views/settings.js?v=122";
+import { registerSW, activateWaiting } from "./pwa.js?v=120";
+import { scheduleLocal, collectReminders } from "./notify.js?v=120";
+import { pushOnOpen } from "./push.js?v=120";
+import { normalizeBudget } from "./mutate.js?v=120";
+import { announceIfUpdated } from "./whatsnew.js?v=122";
 
 const root = document.getElementById("app");
 const undoStack = [];
@@ -46,7 +47,7 @@ const ctx = {
   },
   signIn(user, { create }) {
     const users = create ? [...(ctx.state.users || []).filter((u) => u.userId !== user.userId), user] : ctx.state.users;
-    ctx.commit({ ...ctx.state, users, activeUserId: user.userId }, { undo: false });
+    ctx.commit({ ...ctx.state, users, activeUserId: user.userId }, { undo: false }).then(() => announceIfUpdated(ctx));
   },
   saveUser(user) {
     const users = (ctx.state.users || []).map((u) => u.userId === user.userId ? user : u);
@@ -97,9 +98,11 @@ const ctx = {
   },
   applyTheme(theme) {
     const t = theme || "system";
-    document.documentElement.dataset.theme = t;
     if (t === "system") document.documentElement.removeAttribute("data-theme");
     else document.documentElement.dataset.theme = t;
+    const dark = t === "dark" || (t === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
+    const color = dark ? "#14181c" : "#2f6f62";
+    document.querySelectorAll('meta[name="theme-color"]').forEach((m) => m.setAttribute("content", color));
   },
   render() { paint(); },
   toast,
@@ -127,11 +130,13 @@ async function paint() {
   const shell = h("div", { class: "shell" });
   const side = h("nav", { class: "side", "aria-label": "Primary" });
   const main = h("div", { class: "main" });
+  const notes = ctx.budget() ? collectReminders(ctx.budget(), ctx.month) : [];
   const top = h("header", { class: "topbar" },
     h("div", { class: "brand" }, h("span", { class: "brand-mark", text: "Tooz" }), h("span", { class: "brand-name", text: ctx.budget().name })),
     h("div", { class: "top-actions" },
       h("button", { class: "icon-btn", type: "button", "aria-label": "Undo", disabled: !undoStack.length, onclick: () => ctx.undo() }, icon("undo")),
-      h("button", { class: "icon-btn", type: "button", "aria-label": "Notices", onclick: () => ctx.go("budget") }, icon("bell")),
+      h("button", { class: "icon-btn", type: "button", "aria-label": "Redo", disabled: !redoStack.length, onclick: () => ctx.redo() }, icon("redo")),
+      h("button", { class: "icon-btn", type: "button", "aria-label": notes.length ? `${notes.length} notices` : "Notices", onclick: () => openInbox(ctx) }, icon("bell"), notes.length ? h("span", { class: "badge", text: notes.length > 9 ? "9+" : String(notes.length) }) : null),
     ),
   );
   const view = h("div", { class: "view", id: "view" });
@@ -164,6 +169,7 @@ let gTimer = null;
 window.addEventListener("keydown", (e) => {
   const tag = document.activeElement?.tagName;
   if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || document.activeElement?.isContentEditable) return;
+  if (document.querySelector(".scrim")) return;
   const meta = e.metaKey || e.ctrlKey;
   if (meta && e.key.toLowerCase() === "z") { e.preventDefault(); if (e.shiftKey) ctx.redo(); else ctx.undo(); return; }
   if (e.key === "?" ) { e.preventDefault(); toast("g then b/t/a/p/s jumps views. Arrows change month. n adds a transaction. / searches."); return; }
@@ -194,6 +200,8 @@ async function boot() {
   subscribe(() => {});
   ctx.render();
   registerSW((reg) => {
+    const existing = document.getElementById("toasts")?.textContent || "";
+    if (existing.includes("App updated to version")) return;
     toast("An update is ready", { label: "Reload", ms: 8000, action: () => activateWaiting(reg) });
   });
   if (ctx.budget()) {
@@ -201,6 +209,7 @@ async function boot() {
     pushOnOpen(ctx.budget());
   }
   document.title = `ToozBudgeting ${APP_VERSION}`;
+  if (ctx.state?.setupComplete) setTimeout(() => announceIfUpdated(ctx), 700);
 }
 
 boot().catch((e) => {
