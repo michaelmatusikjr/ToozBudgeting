@@ -1,17 +1,17 @@
-import { APP_VERSION, monthKey, prevMonth, nextMonth, deepClone } from "./util.js?v=132";
-import { loadState, saveState, subscribe, exportData, importData, deviceGet, deviceSet } from "./store.js?v=132";
-import { h, clear, icon, toast, closeAllModals } from "./ui.js?v=132";
-import { renderIdentity, renderWizard } from "./views/gate.js?v=132";
-import { renderBudget, openInbox } from "./views/budget.js?v=132";
-import { renderTransactions, openTx } from "./views/transactions.js?v=132";
-import { renderAccounts } from "./views/accounts.js?v=132";
-import { renderPayees } from "./views/payees.js?v=132";
-import { renderSettings } from "./views/settings.js?v=132";
-import { registerSW, activateWaiting } from "./pwa.js?v=132";
-import { scheduleLocal, collectReminders } from "./notify.js?v=132";
-import { pushOnOpen } from "./push.js?v=132";
-import { normalizeBudget } from "./mutate.js?v=132";
-import { announceIfUpdated } from "./whatsnew.js?v=132";
+import { APP_VERSION, monthKey, prevMonth, nextMonth, deepClone } from "./util.js?v=133";
+import { loadState, saveState, subscribe, exportData, importData, deviceGet, deviceSet } from "./store.js?v=133";
+import { h, clear, icon, toast, closeAllModals, btn } from "./ui.js?v=133";
+import { renderIdentity, renderWizard } from "./views/gate.js?v=133";
+import { renderBudget, openInbox } from "./views/budget.js?v=133";
+import { renderTransactions, openTx } from "./views/transactions.js?v=133";
+import { renderAccounts } from "./views/accounts.js?v=133";
+import { renderPayees } from "./views/payees.js?v=133";
+import { renderSettings } from "./views/settings.js?v=133";
+import { registerSW, activateWaiting } from "./pwa.js?v=133";
+import { scheduleLocal, collectReminders } from "./notify.js?v=133";
+import { pushOnOpen } from "./push.js?v=133";
+import { normalizeBudget } from "./mutate.js?v=133";
+import { announceIfUpdated } from "./whatsnew.js?v=133";
 
 const root = document.getElementById("app");
 const undoStack = [];
@@ -122,6 +122,25 @@ function applyHash() {
 }
 
 async function paint() {
+  try {
+    await paintInner();
+  } catch (err) {
+    console.error(err);
+    showRescue(err);
+  }
+}
+
+function showRescue(err) {
+  clear(root);
+  root.append(h("main", { class: "gate" },
+    h("h1", { text: "Couldn’t open" }),
+    h("p", { class: "lede", text: "This budget made the app quit. Reset removes it from this device only." }),
+    h("p", { class: "hint", text: err?.message || "Something in the saved budget failed." }),
+    btn("Reset this device", { block: true, onClick: () => ctx.reset() }),
+  ));
+}
+
+async function paintInner() {
   clear(root);
   const user = (ctx.state.users || []).find((u) => u.userId === ctx.state.activeUserId);
   if (!user) { renderIdentity(root, ctx); return; }
@@ -198,12 +217,12 @@ async function boot() {
   if (theme) ctx.applyTheme(theme);
   applyHash();
   subscribe(() => {});
-  ctx.render();
   registerSW((reg) => {
     const existing = document.getElementById("toasts")?.textContent || "";
     if (existing.includes("App updated to version")) return;
     toast("An update is ready", { label: "Reload", ms: 8000, action: () => activateWaiting(reg) });
   });
+  ctx.render();
   if (ctx.budget()) {
     scheduleLocal(ctx.budget(), ctx.month);
     pushOnOpen(ctx.budget());

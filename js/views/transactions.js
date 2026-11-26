@@ -1,8 +1,8 @@
-import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, keepFocus } from "../ui.js?v=132";
-import { fmt, todayKey, toTitleCase, isCard, ccPayCat, makePayFrom, RTA } from "../util.js?v=132";
-import { displayName, payeeDefaultCategory, payeeSuggestedCategory, findFuzzyDuplicates } from "../payees.js?v=132";
-import { addTransaction, deleteTransactions, isLocked, setTxCategory, updateTransaction, replaceTransaction, confirmCategories } from "../mutate.js?v=132";
-import { parseCSV, guessColumnMapping, applyMapping } from "../csv.js?v=132";
+import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, keepFocus } from "../ui.js?v=133";
+import { fmt, todayKey, toTitleCase, isCard, ccPayCat, makePayFrom, RTA } from "../util.js?v=133";
+import { displayName, payeeDefaultCategory, payeeSuggestedCategory, findFuzzyDuplicates } from "../payees.js?v=133";
+import { addTransaction, deleteTransactions, isLocked, setTxCategory, updateTransaction, replaceTransaction, confirmCategories } from "../mutate.js?v=133";
+import { parseCSV, guessColumnMapping, applyMapping } from "../csv.js?v=133";
 
 export function renderTransactions(root, ctx) {
   const budget = ctx.budget();
@@ -97,8 +97,20 @@ export function renderTransactions(root, ctx) {
   }
   const list = h("div", { class: "tx-list" });
   if (!rows.length) list.append(h("p", { class: "empty", text: (q || f.accountId || f.categoryId || f.type || f.month || f.groupId || f.attention || f.hideReconciled) ? "No transactions match." : "Nothing here yet. Add a transaction when money moves." }));
-  for (const tx of rows) list.append(txRow(ctx, tx, selected));
+  const PAGE = 80;
+  const filterKey = JSON.stringify({ f, q });
+  if (ctx.ui.txFilterKey !== filterKey) {
+    ctx.ui.txFilterKey = filterKey;
+    ctx.ui.txLimit = PAGE;
+  }
+  const limit = ctx.ui.txLimit || PAGE;
+  const shown = rows.slice(0, limit);
+  for (const tx of shown) list.append(txRow(ctx, tx, selected));
   root.append(list);
+  if (rows.length > shown.length) {
+    root.append(h("p", { class: "hint", text: `Showing ${shown.length} of ${rows.length}` }),
+      h("button", { class: "text-link", type: "button", text: "Show more", onclick: () => { ctx.ui.txLimit = limit + PAGE; ctx.render(); } }));
+  }
   ctx.ui.searchEl = search;
   if (typing) { ctx.ui.txTyping = false; keepFocus(search); }
 }

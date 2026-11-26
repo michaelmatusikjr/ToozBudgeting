@@ -1,7 +1,7 @@
 /** What's new: toast on a real version change, then a carousel of short animated recreations. */
-import { h, openSheet, btn, icon, toast } from "./ui.js?v=132";
-import { APP_VERSION } from "./util.js?v=132";
-import { deviceGet, deviceSet } from "./store.js?v=132";
+import { h, openSheet, btn, icon, toast } from "./ui.js?v=133";
+import { APP_VERSION } from "./util.js?v=133";
+import { deviceGet, deviceSet } from "./store.js?v=133";
 
 const RELEASES = [
   {
@@ -56,6 +56,16 @@ const RELEASES = [
         demo: "lists",
         title: "One list, not a stack of cards.",
         body: "Activity, accounts, payees, and settings share one surface. The filled button on a screen is the thing you came to do.",
+      },
+    ],
+  },
+  {
+    version: "1.3.1",
+    slides: [
+      {
+        demo: "activity",
+        title: "A full budget can open.",
+        body: "Thousands of transactions no longer freeze the plan. Activity shows the latest ones first, and you can show more.",
       },
     ],
   },

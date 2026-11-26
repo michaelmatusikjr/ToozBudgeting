@@ -1,4 +1,4 @@
-import { normalizeMerge, uid } from "./util.js?v=132";
+import { normalizeMerge, uid } from "./util.js?v=133";
 
 export const wordsMatch = (a, b) => {
   if (!a || !b || a.length < 3 || b.length < 3) return false;
@@ -51,9 +51,20 @@ export function buildMergeGroups(canonicals, rejected = [], excludeWords = []) {
   return groups;
 }
 
+const payeeByName = new WeakMap();
+
+function payeeMap(budget) {
+  let map = payeeByName.get(budget);
+  if (map) return map;
+  map = new Map();
+  for (const p of budget?.payees || []) if (p?.name) map.set(p.name, p);
+  payeeByName.set(budget, map);
+  return map;
+}
+
 export function displayName(budget, original) {
   if (!original) return original || "";
-  const rec = (budget.payees || []).find((p) => p.name === original);
+  const rec = budget ? payeeMap(budget).get(original) : null;
   return rec?.canonicalName || original;
 }
 
@@ -75,17 +86,17 @@ export function originalsForCanonical(budget, canonical) {
 }
 
 export function payeeDefaultCategory(budget, canonical) {
-  for (const name of originalsForCanonical(budget, canonical)) {
-    const rec = (budget.payees || []).find((p) => p.name === name);
-    if (rec?.defaultCategoryId) return rec.defaultCategoryId;
+  if (!canonical) return "";
+  for (const p of budget?.payees || []) {
+    if ((p.canonicalName || p.name) === canonical && p.defaultCategoryId) return p.defaultCategoryId;
   }
   return "";
 }
 
 export function payeeSuggestedCategory(budget, canonical) {
-  for (const name of originalsForCanonical(budget, canonical)) {
-    const rec = (budget.payees || []).find((p) => p.name === name);
-    if (rec?.suggestedCategoryId) return rec.suggestedCategoryId;
+  if (!canonical) return "";
+  for (const p of budget?.payees || []) {
+    if ((p.canonicalName || p.name) === canonical && p.suggestedCategoryId) return p.suggestedCategoryId;
   }
   return "";
 }

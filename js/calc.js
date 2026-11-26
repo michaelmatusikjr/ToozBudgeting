@@ -1,12 +1,20 @@
 /** Zero-based budget math. Matches the ClearBudget rules: rollover, return, max, date goals, RTA. */
-import { monthKey, prevMonth, nextMonth, round2 } from "./util.js?v=132";
+import { monthKey, prevMonth, nextMonth, round2 } from "./util.js?v=133";
+
+const spentCache = new WeakMap();
+const monthsCache = new WeakMap();
 
 export function dataMonths(budget) {
+  if (!budget) return [];
+  const hit = monthsCache.get(budget);
+  if (hit) return hit;
   const set = new Set();
   for (const k of Object.keys(budget.monthlyBudgets || {})) set.add(k);
   for (const k of Object.keys(budget.inflows || {})) set.add(k);
   for (const tx of budget.transactions || []) if (tx.date) set.add(tx.date.slice(0, 7));
-  return [...set].sort();
+  const out = [...set].sort();
+  monthsCache.set(budget, out);
+  return out;
 }
 
 export function budgetStart(budget) {
@@ -20,6 +28,9 @@ export const hasPriorData = (budget, mk) => {
 };
 
 export function spentByMonthCat(budget) {
+  if (!budget) return {};
+  const hit = spentCache.get(budget);
+  if (hit) return hit;
   const map = {};
   for (const tx of budget.transactions || []) {
     if (tx.type !== "expense" && tx.type !== "payment") continue;
@@ -35,6 +46,7 @@ export function spentByMonthCat(budget) {
       bucket[tx.categoryId] = (bucket[tx.categoryId] || 0) + Number(tx.amount);
     }
   }
+  spentCache.set(budget, map);
   return map;
 }
 
@@ -69,8 +81,29 @@ export function effectiveRollover(cat, mk) {
   return applicable[0]?.type || cat.rollover || "rollover";
 }
 
+function earliestKey(obj) {
+  let min = null;
+  if (!obj) return min;
+  for (const k of Object.keys(obj)) if (!min || k < min) min = k;
+  return min;
+}
+
+/** First month, including any preview assignment maps that start earlier than the saved budget. */
+function rangeStart(budget, mb, inf) {
+  let start = budgetStart(budget);
+  if (mb && mb !== budget.monthlyBudgets) {
+    const k = earliestKey(mb);
+    if (k && (!start || k < start)) start = k;
+  }
+  if (inf && inf !== budget.inflows) {
+    const k = earliestKey(inf);
+    if (k && (!start || k < start)) start = k;
+  }
+  return start;
+}
+
 function monthsThrough(budget, mk, mb, inf) {
-  const start = budgetStart({ ...budget, monthlyBudgets: mb, inflows: inf }) || mk;
+  const start = rangeStart(budget, mb, inf) || mk;
   const out = [];
   let k = start;
   let guard = 0;
@@ -114,8 +147,13 @@ export function available(budget, catId, mk, mb = budget.monthlyBudgets || {}, i
 }
 
 export function catReturned(budget, cat, mk, mb, inf) {
-  if (!hasPriorData({ ...budget, monthlyBudgets: mb, inflows: inf }, mk)) return 0;
+  const start = rangeStart(budget, mb, inf);
+  if (!start || prevMonth(mk) < start) return 0;
   const pk = prevMonth(mk);
+  if (cat?.goal?.type !== "date") {
+    const s = effectiveRollover(cat, pk);
+    if (s !== "return" && s !== "max") return 0;
+  }
   const pv = available(budget, cat.id, pk, mb, inf);
   if (pv <= 0) return 0;
   if (cat.goal?.type === "date") return Math.max(0, pv - Math.min(pv, cat.goal.target || 0));
@@ -126,8 +164,8 @@ export function catReturned(budget, cat, mk, mb, inf) {
 }
 
 export function returnedToRTA(budget, mk, mb = budget.monthlyBudgets || {}, inf = budget.inflows || {}, today = monthKey()) {
-  const probe = { ...budget, monthlyBudgets: mb, inflows: inf };
-  if (!hasPriorData(probe, mk)) return 0;
+  const start = rangeStart(budget, mb, inf);
+  if (!start || prevMonth(mk) < start) return 0;
   if (prevMonth(mk) >= today) return 0;
   return (budget.categories || []).reduce((t, cat) => t + catReturned(budget, cat, mk, mb, inf), 0);
 }
@@ -135,8 +173,7 @@ export function returnedToRTA(budget, mk, mb = budget.monthlyBudgets || {}, inf 
 const rtaCache = new WeakMap();
 
 export function readyToAssign(budget, mk, mb = budget.monthlyBudgets || {}, inf = budget.inflows || {}, today = monthKey()) {
-  const probe = { ...budget, monthlyBudgets: mb, inflows: inf };
-  const start = budgetStart(probe);
+  const start = rangeStart(budget, mb, inf);
   if (!start || mk < start) {
     const budgeted = Object.values(mb[mk] || {}).reduce((s, v) => s + Number(v), 0);
     return Number(inf[mk] || 0) - budgeted;
@@ -266,12 +303,38 @@ export function historySeries(budget, today = monthKey()) {
 export function overspentMonths(budget, today = monthKey()) {
   const start = budgetStart(budget);
   if (!start) return [];
+  const spent = spentByMonthCat(budget);
+  const cats = (budget.categories || []).filter((c) => !c.archived && !c.creditCardId);
+  const prev = new Map();
   const out = [];
   let mk = start;
   let guard = 0;
+  let first = true;
   while (mk <= today && guard < 240) {
-    const bad = (budget.categories || []).filter((c) => !c.archived && !c.creditCardId && available(budget, c.id, mk) < -0.005);
+    const bad = [];
+    for (const cat of cats) {
+      const budgeted = Number((budget.monthlyBudgets?.[mk] || {})[cat.id] || 0);
+      const sp = spent[mk]?.[cat.id] || 0;
+      let avail;
+      if (first) avail = budgeted - sp;
+      else {
+        const p = prev.get(cat.id) || 0;
+        let roll;
+        if (p < 0) roll = p;
+        else if (cat.goal?.type === "date") roll = Math.min(p, cat.goal.target || 0);
+        else {
+          const s = effectiveRollover(cat, prevMonth(mk));
+          if (s === "return") roll = 0;
+          else if (s === "max") roll = Math.min(p, cat.rolloverMax || 0);
+          else roll = p;
+        }
+        avail = budgeted - sp + roll;
+      }
+      prev.set(cat.id, avail);
+      if (avail < -0.005) bad.push(cat);
+    }
     if (bad.length) out.push({ month: mk, cats: bad });
+    first = false;
     mk = nextMonth(mk);
     guard++;
   }
