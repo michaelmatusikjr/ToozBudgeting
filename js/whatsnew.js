@@ -1,7 +1,7 @@
 /** What's new: toast on a real version change, then a carousel of short animated recreations. */
-import { h, openSheet, btn, icon, toast } from "./ui.js?v=120";
-import { APP_VERSION } from "./util.js?v=120";
-import { deviceGet, deviceSet } from "./store.js?v=120";
+import { h, openSheet, btn, icon, toast } from "./ui.js?v=132";
+import { APP_VERSION } from "./util.js?v=132";
+import { deviceGet, deviceSet } from "./store.js?v=132";
 
 const RELEASES = [
   {
@@ -24,18 +24,38 @@ const RELEASES = [
       },
       {
         demo: "activity",
-        title: "Activity, one card at a time.",
+        title: "Search stays put.",
         body: "Name and amount sit together. Date and category sit underneath. Search keeps your place while the list narrows.",
       },
       {
         demo: "plan",
-        title: "The plan stays in one glance.",
-        body: "The month stays on one line. Ready to Assign stays put as you scroll. Cover appears only when something is overspent.",
+        title: "Cover only when it’s needed.",
+        body: "The month stays on one line. Cover shows up when a category is overspent, and it leaves when the month is whole.",
       },
       {
         demo: "inbox",
         title: "Notices, groups, and goals.",
         body: "The bell opens what needs you. Groups can be renamed and reordered. Goals sets every target in one place.",
+      },
+    ],
+  },
+  {
+    version: "1.3.0",
+    slides: [
+      {
+        demo: "zoom",
+        title: "Fast taps stay put.",
+        body: "A quick double tap no longer zooms the page. Pinch with two fingers when you actually want a closer look.",
+      },
+      {
+        demo: "ledger",
+        title: "The plan is a ledger.",
+        body: "Each category is a name and what’s left. Assigned and activity sit under it as words, not buttons. Ready to Assign is type, not a card.",
+      },
+      {
+        demo: "lists",
+        title: "One list, not a stack of cards.",
+        body: "Activity, accounts, payees, and settings share one surface. The filled button on a screen is the thing you came to do.",
       },
     ],
   },
@@ -184,6 +204,41 @@ const demos = {
       { t: 220, run: () => notes[1].classList.add("on") },
       { t: 220, run: () => notes[2].classList.add("on") },
     ], 3800);
+  },
+  zoom(host) {
+    const dot = h("span", { class: "wn-tap" });
+    const label = h("p", { class: "wn-k", text: "Tap" });
+    host.append(stageBar(), h("div", { class: "wn-stack wn-center" }, dot, label));
+    return play([
+      { t: 0, run: () => { dot.className = "wn-tap"; label.textContent = "Tap"; } },
+      { t: 420, run: () => { dot.classList.add("on"); label.textContent = "Tap"; } },
+      { t: 160, run: () => { dot.classList.remove("on"); } },
+      { t: 140, run: () => { dot.classList.add("on"); label.textContent = "Tap again"; } },
+      { t: 280, run: () => { dot.classList.add("hold"); label.textContent = "Same size"; } },
+    ], 2800);
+  },
+  ledger(host) {
+    const left = h("span", { class: "wn-amt", text: "$0.00" });
+    const sub = h("p", { class: "wn-meta", text: "Assigned $0.00" });
+    host.append(stageBar(), h("div", { class: "wn-stack" },
+      h("p", { class: "wn-k", text: "Ready to Assign" }),
+      h("p", { class: "wn-diff ok", text: "$800.00" }),
+      h("div", { class: "wn-row" }, h("span", { text: "Groceries" }), left),
+      sub,
+    ));
+    return play([
+      { t: 500, run: () => { left.textContent = "−$25.00"; left.className = "wn-amt on out"; sub.textContent = "Assigned $0.00 · Activity −$25.00"; } },
+      { t: 900, run: () => { left.textContent = "$95.00"; left.className = "wn-amt on in"; sub.textContent = "Assigned $120.00 · Activity −$25.00"; } },
+    ], 3200);
+  },
+  lists(host) {
+    const rows = ["Kroger  −$25.00", "Checking  $975.00", "Electric  due on the 12th"].map((t) => h("div", { class: "wn-line", text: t }));
+    host.append(stageBar(), h("div", { class: "wn-stack wn-lines" }, ...rows));
+    return play([
+      { t: 180, run: () => rows[0].classList.add("on") },
+      { t: 260, run: () => rows[1].classList.add("on") },
+      { t: 260, run: () => rows[2].classList.add("on") },
+    ], 2600);
   },
 };
 

@@ -1,7 +1,7 @@
-import { h, btn, openSheet, field, textInput, toast, keepFocus } from "../ui.js?v=120";
-import { toTitleCase } from "../util.js?v=120";
-import { canonicalNames, displayName, originalsForCanonical, buildMergeGroups, getSharedWordsDefault, payeeDefaultCategory, payeeSuggestedCategory } from "../payees.js?v=120";
-import { setCanonical, unmergeOriginal, unmergeAll, setPayeeCategory, rejectMerge, clearPayeeCategories } from "../mutate.js?v=120";
+import { h, btn, openSheet, field, textInput, toast, keepFocus } from "../ui.js?v=132";
+import { toTitleCase } from "../util.js?v=132";
+import { canonicalNames, displayName, originalsForCanonical, buildMergeGroups, getSharedWordsDefault, payeeDefaultCategory, payeeSuggestedCategory } from "../payees.js?v=132";
+import { setCanonical, unmergeOriginal, unmergeAll, setPayeeCategory, rejectMerge, clearPayeeCategories } from "../mutate.js?v=132";
 
 export function renderPayees(root, ctx) {
   const budget = ctx.budget();
@@ -19,13 +19,19 @@ export function renderPayees(root, ctx) {
   const search = h("input", { class: "input", type: "search", placeholder: "Search payees", value: ctx.ui.payeeQuery || "", "aria-label": "Search payees" });
   const typing = ctx.ui.payeeTyping;
   search.addEventListener("input", () => { ctx.ui.payeeQuery = search.value; ctx.ui.payeeTyping = true; ctx.render(); });
-  root.append(h("header", { class: "view-head" }, h("h1", { text: "Payees" }), btn("Merge", { kind: "ghost", onClick: () => openMerge(ctx, null) })));
-  root.append(search);
+  root.append(h("header", { class: "view-head" }, h("h1", { text: "Payees" })));
+  root.append(h("div", { class: "search-row" }, search));
+  root.append(h("nav", { class: "link-row", "aria-label": "Payee tools" },
+    h("button", { class: "text-link", type: "button", text: "Merge", onclick: () => openMerge(ctx, null) }),
+    h("button", { class: "text-link", type: "button", text: "Exclude words", onclick: () => openExclude(ctx) }),
+    h("button", { class: "text-link", type: "button", text: "Clear defaults", onclick: () => { ctx.updateBudget((b) => clearPayeeCategories(b)); toast("Payee categories cleared"); } }),
+    h("button", { class: "text-link", type: "button", text: "Unmerge all", onclick: () => { ctx.updateBudget((b) => unmergeAll(b)); toast("All payees show their original names"); } }),
+  ));
   if (typing) { ctx.ui.payeeTyping = false; keepFocus(search); }
   if (groups.length) {
     root.append(h("button", { class: "notice", type: "button", onclick: () => openSuggestions(ctx, groups) },
       h("strong", { text: `${groups.length} merge suggestion${groups.length === 1 ? "" : "s"}` }),
-      h("span", { text: "Similar names. Words in the exclude list are ignored." }),
+      h("span", { class: "notice-go", text: "Review" }),
     ));
   }
   const list = h("div", { class: "tx-list" });
@@ -38,11 +44,6 @@ export function renderPayees(root, ctx) {
   }
   if (!shown.length) list.append(h("p", { class: "empty", text: "Payees appear as you add transactions." }));
   root.append(list);
-  root.append(h("div", { class: "row gap wrap" },
-    btn("Exclude words", { kind: "quiet", onClick: () => openExclude(ctx) }),
-    btn("Clear defaults", { kind: "quiet", onClick: () => { ctx.updateBudget((b) => clearPayeeCategories(b)); toast("Payee categories cleared"); } }),
-    btn("Unmerge all", { kind: "quiet", onClick: () => { ctx.updateBudget((b) => unmergeAll(b)); toast("All payees show their original names"); } }),
-  ));
 }
 
 function openPayee(ctx, name) {

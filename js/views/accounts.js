@@ -1,7 +1,7 @@
-import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog } from "../ui.js?v=120";
-import { fmt, todayKey, toTitleCase, isCard } from "../util.js?v=120";
-import { accountBalances, ccMismatches, staleReconcile, findUnclearedSuggestion, txBalanceEffect } from "../calc.js?v=120";
-import { addAccount, addCreditCard, renameAccount, archiveAccount, deleteAccount, reconcileAccount, addTransaction, isLocked, zeroAccountByUnassign } from "../mutate.js?v=120";
+import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog } from "../ui.js?v=132";
+import { fmt, todayKey, toTitleCase, isCard } from "../util.js?v=132";
+import { accountBalances, ccMismatches, staleReconcile, findUnclearedSuggestion, txBalanceEffect } from "../calc.js?v=132";
+import { addAccount, addCreditCard, renameAccount, archiveAccount, deleteAccount, reconcileAccount, addTransaction, isLocked, zeroAccountByUnassign } from "../mutate.js?v=132";
 
 export function renderAccounts(root, ctx) {
   const budget = ctx.budget();
@@ -14,7 +14,8 @@ export function renderAccounts(root, ctx) {
   for (const m of mism) {
     root.append(h("button", { class: "notice", type: "button", onclick: () => ctx.go("budget") },
       h("strong", { text: m.card.name }),
-      h("span", { text: `Owes ${fmt(m.owed)} but only ${fmt(m.setAside)} is set aside.` }),
+      h("span", { text: `Owes ${fmt(m.owed)} · ${fmt(m.setAside)} set aside` }),
+      h("span", { class: "notice-go", text: "Plan" }),
     ));
   }
   const banks = h("section", { class: "group" }, h("h2", { text: "Cash and banks" }));
@@ -30,7 +31,10 @@ export function renderAccounts(root, ctx) {
     if (c.archived && !ctx.ui.showArchived) continue;
     cards.append(accountLine(ctx, c, bal[c.id] || 0, true));
   }
-  root.append(banks, cards, btn(ctx.ui.showArchived ? "Hide archived" : "Show archived", { kind: "quiet", onClick: () => { ctx.ui.showArchived = !ctx.ui.showArchived; ctx.render(); } }));
+  root.append(banks, cards);
+  root.append(h("nav", { class: "link-row" },
+    h("button", { class: "text-link", type: "button", text: ctx.ui.showArchived ? "Hide archived" : "Archived", onclick: () => { ctx.ui.showArchived = !ctx.ui.showArchived; ctx.render(); } }),
+  ));
   if (ctx.ui.focusAccount) {
     const id = ctx.ui.focusAccount;
     ctx.ui.focusAccount = null;

@@ -1,15 +1,15 @@
-import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, openAmountPad } from "../ui.js?v=120";
-import { fmt, monthLabel, monthKey, prevMonth, nextMonth, todayKey, toTitleCase, uid } from "../util.js?v=120";
+import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, openAmountPad } from "../ui.js?v=132";
+import { fmt, monthLabel, monthKey, prevMonth, nextMonth, todayKey, toTitleCase, uid } from "../util.js?v=132";
 import {
   budgetSnapshot, getGoalMetrics, trailingAvg, monthAccessible, historySeries,
   overspentMonths, available, globalFree,
-} from "../calc.js?v=120";
+} from "../calc.js?v=132";
 import {
   setAssigned, moveMoney, coverOverspending, planClawback, applyClawback,
   computeMonthAssignments, applyAssignments, setCategory, addCategory, archiveCategory,
   deleteCategory, setMonthNote, addGroup, renameGroup, deleteGroup, moveGroup, moveCategory,
-} from "../mutate.js?v=120";
-import { collectReminders } from "../notify.js?v=120";
+} from "../mutate.js?v=132";
+import { collectReminders } from "../notify.js?v=132";
 
 function noteOf(budget, month, cat) {
   return budget.categoryNotes?.[month]?.[cat.id] || "";
@@ -23,21 +23,23 @@ export function renderBudget(root, ctx) {
   const snap = budgetSnapshot(budget, month, today);
   const collapsed = ctx.ui.collapsed;
 
-  const head = h("header", { class: "view-head" },
-    h("div", { class: "month-nav" },
-      h("button", { class: "icon-btn", type: "button", "aria-label": "Previous month", text: "‹", onclick: () => ctx.setMonth(prevMonth(month)) }),
-      h("button", { class: "month-label", type: "button", text: monthLabel(month), onclick: () => ctx.setMonth(today) }),
-      h("button", { class: "icon-btn", type: "button", "aria-label": "Next month", text: "›", onclick: () => {
-        const n = nextMonth(month);
-        if (!monthAccessible(budget, n, today) && n > nextMonth(today)) { toast("Assign money in the previous month first"); return; }
-        ctx.setMonth(n);
-      } }),
-    ),
-    h("div", { class: "head-actions" },
-      h("button", { class: "icon-btn", type: "button", "aria-label": "History", text: "History", onclick: () => openHistory(ctx) }),
-      h("button", { class: "icon-btn", type: "button", "aria-label": "Move money", text: "Move", onclick: () => openMove(ctx, null, null) }),
-      h("button", { class: "icon-btn", type: "button", "aria-label": "Money moves", text: "Log", onclick: () => openLog(ctx) }),
-    ),
+  const head = h("div", { class: "month-nav" },
+    h("button", { class: "icon-btn", type: "button", "aria-label": "Previous month", text: "‹", onclick: () => ctx.setMonth(prevMonth(month)) }),
+    h("button", { class: "month-label", type: "button", text: monthLabel(month), onclick: () => ctx.setMonth(today) }),
+    h("button", { class: "icon-btn", type: "button", "aria-label": "Next month", text: "›", onclick: () => {
+      const n = nextMonth(month);
+      if (!monthAccessible(budget, n, today) && n > nextMonth(today)) { toast("Assign money in the previous month first"); return; }
+      ctx.setMonth(n);
+    } }),
+  );
+  const planLinks = h("nav", { class: "link-row", "aria-label": "Plan" },
+    h("button", { class: "text-link", type: "button", text: "Auto-assign", onclick: () => openAuto(ctx) }),
+    h("button", { class: "text-link", type: "button", text: "Move", onclick: () => openMove(ctx, null, null) }),
+    h("button", { class: "text-link", type: "button", text: "Add", onclick: () => openAddCategory(ctx) }),
+    h("button", { class: "text-link", type: "button", text: "Goals", onclick: () => openAllGoals(ctx) }),
+    h("button", { class: "text-link", type: "button", text: "History", onclick: () => openHistory(ctx) }),
+    h("button", { class: "text-link", type: "button", text: "Log", onclick: () => openLog(ctx) }),
+    h("button", { class: "text-link", type: "button", text: ctx.ui.showArchived ? "Hide archived" : "Archived", onclick: () => { ctx.ui.showArchived = !ctx.ui.showArchived; ctx.render(); } }),
   );
 
   const rtaClass = snap.free < -0.005 ? "rta bad" : snap.free < 0.005 ? "rta zero" : "rta";
@@ -53,8 +55,8 @@ export function renderBudget(root, ctx) {
   if (overs.length) {
     const oldest = overs[0];
     notices.append(h("button", { class: "notice", type: "button", onclick: () => { ctx.setMonth(oldest.month); openCover(ctx, oldest.month); } },
-      h("strong", { text: "Overspending" }),
-      h("span", { text: oldest.month === month ? "Cover it in this month." : `Start with ${monthLabel(oldest.month)}.` }),
+      h("strong", { text: oldest.month === month ? "Overspent this month" : `Overspent in ${monthLabel(oldest.month)}` }),
+      h("span", { class: "notice-go", text: "Cover" }),
     ));
   }
   for (const cat of budget.categories || []) {
@@ -63,18 +65,10 @@ export function renderBudget(root, ctx) {
     if (m?.expired && !m.complete) {
       notices.append(h("button", { class: "notice warn", type: "button", onclick: () => openCategory(ctx, cat) },
         h("strong", { text: cat.name }),
-        h("span", { text: "Date goal has passed." }),
+        h("span", { class: "notice-go", text: "Edit" }),
       ));
     }
   }
-
-  const tools = h("div", { class: "tool-row" },
-    btn("Auto-assign", { kind: "ghost", onClick: () => openAuto(ctx) }),
-    overs.length ? btn("Cover overspending", { kind: "ghost", onClick: () => openCover(ctx, month) }) : null,
-    btn("Goals", { kind: "quiet", onClick: () => openAllGoals(ctx) }),
-    btn("Add category", { kind: "quiet", onClick: () => openAddCategory(ctx) }),
-    btn(ctx.ui.showArchived ? "Hide archived" : "Archived", { kind: "quiet", onClick: () => { ctx.ui.showArchived = !ctx.ui.showArchived; ctx.render(); } }),
-  );
 
   const under = (budget.categories || []).filter((c) => {
     if (c.archived || c.creditCardId || !c.goal) return false;
@@ -83,22 +77,19 @@ export function renderBudget(root, ctx) {
   });
   if (under.length) {
     notices.append(h("button", { class: "notice warn", type: "button", onclick: () => openAllGoals(ctx) },
-      h("strong", { text: "Underfunded goals" }),
-      h("span", { text: under.slice(0, 3).map((c) => c.name).join(", ") + (under.length > 3 ? "…" : "") }),
+      h("strong", { text: under.slice(0, 2).map((c) => c.name).join(", ") + (under.length > 2 ? "…" : "") }),
+      h("span", { class: "notice-go", text: "Goals" }),
     ));
   }
 
-  const cols = h("div", { class: "cols" }, h("span", { text: "Budgeted" }), h("span", { text: "Activity" }), h("span", { text: "Available" }));
   const groups = h("div", { class: "groups" });
   for (const g of budget.categoryGroups || []) {
     const cats = (budget.categories || []).filter((c) => c.groupId === g.id && (ctx.ui.showArchived || !c.archived));
     if (!cats.length && g.name === "Uncategorized") continue;
     const open = !collapsed[g.id];
-    const gBudgeted = cats.reduce((s, c) => s + Number(snap.budgeted[c.id] || 0), 0);
-    const gActivity = cats.reduce((s, c) => s + Number(snap.activity[c.id] || 0), 0);
     const gAvail = cats.reduce((s, c) => s + Number(snap.available[c.id] || 0), 0);
     const sec = h("section", { class: "group" });
-    const gCls = gAvail < -0.005 ? "neg" : gAvail > 0.005 ? "pos" : "";
+    const gCls = gAvail < -0.005 ? "neg" : gAvail > 0.005 ? "pos" : "zero";
     sec.append(h("button", { class: "group-h", type: "button", onclick: () => { collapsed[g.id] = !collapsed[g.id]; ctx.render(); } },
       h("span", { class: "chev", text: open ? "▾" : "▸" }),
       h("span", { class: "grow", text: g.name }),
@@ -107,16 +98,14 @@ export function renderBudget(root, ctx) {
     if (open) {
       for (const cat of cats) sec.append(categoryRow(ctx, cat, snap, month, today));
       sec.append(h("div", { class: "group-foot" },
-        h("span", { class: "muted", text: `${fmt(gBudgeted)} budgeted` }),
-        h("button", { class: "quiet-link", type: "button", text: `${fmt(-gActivity)} activity`, onclick: (e) => { e.stopPropagation(); ctx.go("transactions", { groupId: g.id, month }); } }),
-        g.name === "Credit Card Payments" ? null : h("button", { class: "quiet-link", type: "button", text: "Edit group", onclick: (e) => { e.stopPropagation(); openGroup(ctx, g); } }),
+        h("button", { class: "quiet-link", type: "button", text: "Activity", onclick: (e) => { e.stopPropagation(); ctx.go("transactions", { groupId: g.id, month }); } }),
+        g.name === "Credit Card Payments" ? null : h("button", { class: "quiet-link", type: "button", text: "Edit", onclick: (e) => { e.stopPropagation(); openGroup(ctx, g); } }),
       ));
     }
     groups.append(sec);
   }
 
-  const stick = h("div", { class: "plan-stick" }, head, rta);
-  root.append(stick, notices, tools, cols, groups);
+  root.append(head, h("div", { class: "plan-stick" }, rta, planLinks), notices, groups);
   if (ctx.ui.focusCat) {
     const id = ctx.ui.focusCat;
     ctx.ui.focusCat = null;
@@ -134,19 +123,23 @@ function categoryRow(ctx, cat, snap, month, today) {
   const note = noteOf(ctx.budget(), month, cat);
   const row = h("article", { class: `cat ${avail < -0.005 ? "over" : ""} ${cat.archived ? "archived" : ""}` });
   const title = h("button", { class: "cat-name", type: "button", text: cat.name, onclick: () => openCategory(ctx, cat) });
-  const meta = h("div", { class: "cat-meta" });
+  const subBits = [];
   if (metrics) {
-    const label = metrics.type === "monthly"
-      ? (metrics.underfunded ? `Underfunded ${fmt(metrics.needed)}` : "Funded")
+    subBits.push(metrics.type === "monthly"
+      ? (metrics.underfunded ? `Needs ${fmt(metrics.needed)}` : "Funded")
       : metrics.type === "date"
-        ? (metrics.complete ? "Goal reached" : metrics.expired ? "Goal date passed" : `${fmt(metrics.monthlyNeeded)} / mo · ${metrics.monthsLeft} mo`)
-        : `${Math.round(metrics.progress)}% of ${fmt(metrics.target)}`;
-    meta.append(h("span", { class: "pill", text: label }));
+        ? (metrics.complete ? "Goal reached" : metrics.expired ? "Date passed" : `${fmt(metrics.monthlyNeeded)} a month`)
+        : `${Math.round(metrics.progress || 0)}% saved`);
   }
-  if (note || cat.note) meta.append(h("button", { class: "pill", type: "button", text: "Note", onclick: () => openNote(ctx, cat) }));
-  if (avg) meta.append(h("span", { class: "pill", text: `Avg ${fmt(avg.avg)}` }));
+  if (avg) subBits.push(`avg ${fmt(avg.avg)}`);
+  const sub = (subBits.length || note || cat.note)
+    ? h("div", { class: "cat-sub" },
+      subBits.length ? h("span", { text: subBits.join(" · ") }) : null,
+      (note || cat.note) ? h("button", { class: "text-link note-link", type: "button", text: "Note", onclick: () => openNote(ctx, cat) }) : null,
+    )
+    : null;
 
-  const bBtn = h("button", { class: `num-btn ${budgeted ? "" : "zero"}`, type: "button", text: fmt(budgeted), onclick: () => {
+  const bBtn = h("button", { class: `num-btn fig ${budgeted ? "" : "zero"}`, type: "button", onclick: () => {
     openAmountPad({
       title: cat.name,
       value: budgeted,
@@ -169,8 +162,9 @@ function categoryRow(ctx, cat, snap, month, today) {
       },
     });
   }});
+  bBtn.append(h("span", { class: "fig-k", text: "Assigned" }), h("span", { class: "fig-n", text: fmt(budgeted) }));
 
-  const actCls = activity > 0.005 ? "num-btn neg" : activity < -0.005 ? "num-btn pos" : "num-btn zero";
+  const actCls = activity > 0.005 ? "num-btn fig neg" : activity < -0.005 ? "num-btn fig pos" : "num-btn fig zero";
   const actText = activity > 0.005 || activity < -0.005 ? fmt(-activity) : fmt(0);
   const avCls = avail < -0.005 ? "num-btn avail neg" : avail > 0.005 ? "num-btn avail pos" : "num-btn avail zero";
   const bar = metrics && (metrics.type === "savings" || metrics.type === "date")
@@ -178,15 +172,17 @@ function categoryRow(ctx, cat, snap, month, today) {
     : null;
 
   row.append(
-    h("div", { class: "cat-top" }, title),
-    meta,
-    h("div", { class: "cat-nums" },
+    h("div", { class: "cat-id" }, title, sub),
+    h("button", { class: avCls, type: "button", onclick: () => {
+      if (avail < -0.005) openCover(ctx, month, cat.id);
+      else openMove(ctx, cat.id, null);
+    } }, h("span", { class: "fig-n", text: fmt(avail) })),
+    h("div", { class: "cat-figs" },
       bBtn,
-      h("button", { class: actCls, type: "button", text: actText, onclick: () => ctx.go("transactions", { categoryId: cat.id, month }) }),
-      h("button", { class: avCls, type: "button", text: fmt(avail), onclick: () => {
-        if (avail < -0.005) openCover(ctx, month, cat.id);
-        else openMove(ctx, cat.id, null);
-      }}),
+      h("button", { class: actCls, type: "button", onclick: () => ctx.go("transactions", { categoryId: cat.id, month }) },
+        h("span", { class: "fig-k", text: "Activity" }),
+        h("span", { class: "fig-n", text: actText }),
+      ),
     ),
   );
   if (bar) row.append(bar);

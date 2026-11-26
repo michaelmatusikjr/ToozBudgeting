@@ -1,8 +1,8 @@
-import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, keepFocus } from "../ui.js?v=120";
-import { fmt, todayKey, toTitleCase, isCard, ccPayCat, makePayFrom, RTA } from "../util.js?v=120";
-import { displayName, payeeDefaultCategory, payeeSuggestedCategory, findFuzzyDuplicates } from "../payees.js?v=120";
-import { addTransaction, deleteTransactions, isLocked, setTxCategory, updateTransaction, replaceTransaction, confirmCategories } from "../mutate.js?v=120";
-import { parseCSV, guessColumnMapping, applyMapping } from "../csv.js?v=120";
+import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, keepFocus } from "../ui.js?v=132";
+import { fmt, todayKey, toTitleCase, isCard, ccPayCat, makePayFrom, RTA } from "../util.js?v=132";
+import { displayName, payeeDefaultCategory, payeeSuggestedCategory, findFuzzyDuplicates } from "../payees.js?v=132";
+import { addTransaction, deleteTransactions, isLocked, setTxCategory, updateTransaction, replaceTransaction, confirmCategories } from "../mutate.js?v=132";
+import { parseCSV, guessColumnMapping, applyMapping } from "../csv.js?v=132";
 
 export function renderTransactions(root, ctx) {
   const budget = ctx.budget();
@@ -50,10 +50,15 @@ export function renderTransactions(root, ctx) {
   const dups = (budget.pendingDuplicates || []).filter((p) => budget.transactions.some((t) => t.id === p.newTxId) && budget.transactions.some((t) => t.id === p.existingTxId));
 
   root.append(h("header", { class: "view-head" },
-    h("h1", { text: "Transactions" }),
+    h("h1", { text: "Activity" }),
     btn("Add", { onClick: () => openTx(ctx, null) }),
   ));
-  root.append(h("div", { class: "toolbar" }, search, btn("Filter", { kind: "ghost", onClick: () => openFilters(ctx) }), btn("Import", { kind: "ghost", onClick: () => openImport(ctx) }), btn("Select", { kind: "quiet", onClick: () => { rows.forEach((t) => selected.add(t.id)); ctx.render(); } })));
+  root.append(h("div", { class: "search-row" }, search));
+  root.append(h("nav", { class: "link-row", "aria-label": "Activity tools" },
+    h("button", { class: "text-link", type: "button", text: "Filter", onclick: () => openFilters(ctx) }),
+    h("button", { class: "text-link", type: "button", text: "Import", onclick: () => openImport(ctx) }),
+    h("button", { class: "text-link", type: "button", text: "Select", onclick: () => { rows.forEach((t) => selected.add(t.id)); ctx.render(); } }),
+  ));
   const chips = h("div", { class: "chip-row" });
   const chip = (label, key) => chips.append(h("button", { class: "pill", type: "button", text: `${label} ×`, onclick: () => { const next = { ...ctx.ui.txFilter }; delete next[key]; if (key === "amount") delete next.amountOp; ctx.ui.txFilter = next; ctx.render(); } }));
   if (f.accountId) chip("Account", "accountId");
@@ -73,7 +78,7 @@ export function renderTransactions(root, ctx) {
   if (dups.length) {
     root.append(h("button", { class: "notice", type: "button", onclick: () => openDupes(ctx) },
       h("strong", { text: `${dups.length} possible duplicate${dups.length === 1 ? "" : "s"}` }),
-      h("span", { text: "Same account, amount within $0.05, date within 2 days." }),
+      h("span", { class: "notice-go", text: "Review" }),
     ));
   }
   if (selected.size) {

@@ -1,5 +1,5 @@
 /** DOM helpers, toasts, sheets, and the amount pad. User text always goes through textContent. */
-import { evalMath, fmt, hasOp, round2 } from "./util.js?v=120";
+import { evalMath, fmt, hasOp, round2 } from "./util.js?v=132";
 
 export function h(tag, attrs, ...kids) {
   const el = document.createElement(tag);
