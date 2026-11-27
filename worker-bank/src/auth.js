@@ -7,7 +7,7 @@
  */
 import { randomToken, sha256Hex, safeEqual, verifyRs256, jwtHeader, sealToken, openToken } from "./crypto.js";
 import { HttpError, now, readJson, meta, setMeta } from "./http.js";
-import { ROLES, can, parseScopes, legacyRole } from "./roles.js";
+import { ROLES, BUDGET_ROLES, can, parseScopes, legacyRole, budgetRole, householdRole } from "./roles.js";
 
 export const GOOGLE_CERTS_URL = "https://www.googleapis.com/oauth2/v3/certs";
 const GOOGLE_ISS = new Set(["accounts.google.com", "https://accounts.google.com"]);
@@ -170,11 +170,20 @@ async function resolveMembership(env, user) {
   if (mem) return { membership: mem, joined: null };
   const inv = await env.DB.prepare("SELECT * FROM invites WHERE email = ? AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > ? ORDER BY created_at DESC LIMIT 1").bind(user.email, now()).first();
   if (inv) {
-    await env.DB.batch([
+    const at = now();
+    const grantRole = householdRoleFromInvite(inv.role);
+    const grants = parseBudgetRoles(inv.budget_roles, { loose: true });
+    const stmts = [
       env.DB.prepare("INSERT INTO memberships (household_id, user_id, role, scopes, display_name, access_rev, created_at, invited_by) VALUES (?, ?, ?, ?, ?, 1, ?, ?)")
-        .bind(inv.household_id, user.id, inv.role, inv.scopes, user.name, now(), inv.invited_by),
-      env.DB.prepare("UPDATE invites SET accepted_at = ?, accepted_by = ? WHERE id = ?").bind(now(), user.id, inv.id),
-    ]);
+        .bind(inv.household_id, user.id, grantRole, inv.scopes, user.name, at, inv.invited_by),
+      env.DB.prepare("UPDATE invites SET accepted_at = ?, accepted_by = ? WHERE id = ?").bind(at, user.id, inv.id),
+    ];
+    for (const [budgetId, role] of Object.entries(grants)) {
+      stmts.push(env.DB.prepare(
+        "INSERT OR REPLACE INTO budget_access (household_id, budget_id, user_id, role, granted_by, granted_at) VALUES (?, ?, ?, ?, ?, ?)"
+      ).bind(inv.household_id, budgetId, user.id, role, inv.invited_by, at));
+    }
+    await env.DB.batch(stmts);
     return { membership: await env.DB.prepare("SELECT * FROM memberships WHERE household_id = ? AND user_id = ?").bind(inv.household_id, user.id).first(), joined: "invite" };
   }
   if (ownerEmails(env).includes(user.email)) {
@@ -402,7 +411,11 @@ function memberView(row) {
 }
 
 function inviteView(row) {
-  return { id: row.id, email: row.email, role: row.role, scopes: parseScopes(row.scopes), createdAt: row.created_at, expiresAt: row.expires_at, invitedBy: row.invited_by || null };
+  return {
+    id: row.id, email: row.email, role: householdRoleFromInvite(row.role), householdRole: householdRoleFromInvite(row.role),
+    budgetRoles: parseBudgetRoles(row.budget_roles, { loose: true }),
+    scopes: parseScopes(row.scopes), createdAt: row.created_at, expiresAt: row.expires_at, invitedBy: row.invited_by || null,
+  };
 }
 
 export async function meView(env, session) {
@@ -442,9 +455,45 @@ export async function listMembers(env, session) {
   return out;
 }
 
-function checkRole(role) {
-  if (!ROLES.includes(role)) throw new HttpError(400, "Role must be owner, member, or viewer");
-  return role;
+
+/** Household roles are owner or member. A leftover "viewer" invite is stored as member. */
+export function householdRoleFromInvite(role) {
+  if (role === "owner") return "owner";
+  return "member";
+}
+
+function checkHouseholdRole(role) {
+  const r = String(role || "member");
+  if (r === "admin") throw new HttpError(400, "Household role must be owner or member");
+  if (r === "viewer") return "member";
+  if (r !== "owner" && r !== "member") throw new HttpError(400, "Household role must be owner or member");
+  return r;
+}
+
+function parseBudgetRoles(raw, { loose = false } = {}) {
+  if (!raw) return {};
+  let s = raw;
+  if (typeof raw === "string") { try { s = JSON.parse(raw); } catch { if (loose) return {}; throw new HttpError(400, "budgetRoles must be an object"); } }
+  if (!s || typeof s !== "object" || Array.isArray(s)) {
+    if (loose) return {};
+    throw new HttpError(400, "budgetRoles must be an object");
+  }
+  const out = {};
+  for (const [id, role] of Object.entries(s)) {
+    if (role == null || role === "" || role === "none") continue;
+    const r = String(role) === "view only" ? "viewer" : String(role);
+    if (!BUDGET_ROLES.includes(r)) throw new HttpError(400, "Budget role must be owner, member, or view only");
+    out[String(id)] = r;
+  }
+  return out;
+}
+
+async function writeHouseholdLog(env, session, { action, targetUser = null, budgetId = null, before = null, after = null }) {
+  await env.DB.prepare(
+    "INSERT INTO household_log (household_id, at, user_id, action, target_user, budget_id, before, after) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+  ).bind(session.householdId, now(), session.user.id, action, targetUser, budgetId,
+    before == null ? null : JSON.stringify(before),
+    after == null ? null : JSON.stringify(after)).run();
 }
 
 export async function createInvite(env, req, session) {
@@ -452,16 +501,23 @@ export async function createInvite(env, req, session) {
   const body = await readJson(req);
   const email = lc(body.email);
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new HttpError(400, "Enter a valid email");
-  const role = checkRole(String(body.role || "member"));
-  const scopes = parseScopes(body.scopes);
+  const role = checkHouseholdRole(body.householdRole || body.role || "member");
+  const budgetRoles = parseBudgetRoles(body.budgetRoles || body.budget_roles);
+  for (const budgetId of Object.keys(budgetRoles)) {
+    if (budgetRole(session, budgetId) !== "owner") {
+      throw new HttpError(403, "You can only grant access to budgets you own", { code: "FORBIDDEN" });
+    }
+  }
   const already = await env.DB.prepare("SELECT 1 AS x FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.household_id = ? AND u.email = ?").bind(session.householdId, email).first();
   if (already) throw new HttpError(409, "That person is already in the household. Change their role instead.");
   const id = "i_" + randomToken(10);
+  const at = now();
   await env.DB.batch([
-    env.DB.prepare("UPDATE invites SET revoked_at = ? WHERE household_id = ? AND email = ? AND accepted_at IS NULL AND revoked_at IS NULL").bind(now(), session.householdId, email),
-    env.DB.prepare("INSERT INTO invites (id, household_id, email, role, scopes, invited_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-      .bind(id, session.householdId, email, role, scopes ? JSON.stringify(scopes) : null, session.user.id, now(), now() + INVITE_DAYS * 86400000),
+    env.DB.prepare("UPDATE invites SET revoked_at = ? WHERE household_id = ? AND email = ? AND accepted_at IS NULL AND revoked_at IS NULL").bind(at, session.householdId, email),
+    env.DB.prepare("INSERT INTO invites (id, household_id, email, role, scopes, budget_roles, invited_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(id, session.householdId, email, role, null, Object.keys(budgetRoles).length ? JSON.stringify(budgetRoles) : null, session.user.id, at, at + INVITE_DAYS * 86400000),
   ]);
+  await writeHouseholdLog(env, session, { action: "invite.create", targetUser: email, after: { role, budgetRoles } });
   return { invite: inviteView(await env.DB.prepare("SELECT * FROM invites WHERE id = ?").bind(id).first()) };
 }
 
@@ -480,12 +536,16 @@ export async function updateMember(env, req, session, userId) {
   const body = await readJson(req);
   const row = await env.DB.prepare("SELECT * FROM memberships WHERE household_id = ? AND user_id = ?").bind(session.householdId, userId).first();
   if (!row) throw new HttpError(404, "That person isn’t in the household");
-  const role = body.role === undefined ? row.role : checkRole(String(body.role));
+  const requested = body.householdRole !== undefined ? body.householdRole : body.role;
+  const role = requested === undefined ? (row.role === "owner" ? "owner" : "member") : checkHouseholdRole(requested);
+  if (userId === session.user.id && row.role !== "owner" && role === "owner") {
+    throw new HttpError(403, "A member can’t raise their own role", { code: "FORBIDDEN" });
+  }
   if (row.role === "owner" && role !== "owner" && (await ownerCount(env, session.householdId)) <= 1) throw new HttpError(409, "The household needs at least one owner");
-  const scopes = body.scopes === undefined ? row.scopes : (parseScopes(body.scopes) ? JSON.stringify(parseScopes(body.scopes)) : null);
   const name = body.displayName === undefined ? row.display_name : String(body.displayName || "").trim().slice(0, 60) || row.display_name;
-  await env.DB.prepare("UPDATE memberships SET role = ?, scopes = ?, display_name = ?, access_rev = access_rev + 1 WHERE household_id = ? AND user_id = ?")
-    .bind(role, scopes, name, session.householdId, userId).run();
+  await env.DB.prepare("UPDATE memberships SET role = ?, display_name = ?, access_rev = access_rev + 1 WHERE household_id = ? AND user_id = ?")
+    .bind(role, name, session.householdId, userId).run();
+  if (role !== row.role) await writeHouseholdLog(env, session, { action: "member.role", targetUser: userId, before: { role: row.role }, after: { role } });
   return listMembers(env, session);
 }
 
@@ -498,7 +558,9 @@ export async function removeMember(env, session, userId) {
   await env.DB.batch([
     env.DB.prepare("DELETE FROM memberships WHERE household_id = ? AND user_id = ?").bind(session.householdId, userId),
     env.DB.prepare("DELETE FROM sessions WHERE household_id = ? AND user_id = ?").bind(session.householdId, userId),
+    env.DB.prepare("DELETE FROM budget_access WHERE household_id = ? AND user_id = ?").bind(session.householdId, userId),
   ]);
+  await writeHouseholdLog(env, session, { action: "member.remove", targetUser: userId, before: { role: row.role } });
   return self ? { ok: true } : listMembers(env, session);
 }
 
@@ -509,4 +571,98 @@ export async function renameHousehold(env, req, session) {
   if (!name) throw new HttpError(400, "Enter a name");
   await env.DB.prepare("UPDATE households SET name = ? WHERE id = ?").bind(name, session.householdId).run();
   return meView(env, session);
+}
+
+
+/* ---------- per-budget access (WU-43) ---------- */
+
+async function liveBudget(env, householdId, id) {
+  const key = String(id || "");
+  if (!key) return null;
+  const row = await env.DB.prepare(
+    "SELECT id, budget_id, body FROM records WHERE household_id = ? AND kind = 'budget' AND deleted = 0 AND (id = ? OR budget_id = ? OR id = ?)"
+  ).bind(householdId, key, key, "budget:" + key).first();
+  if (!row) return null;
+  let name = key;
+  try { name = JSON.parse(row.body || "null")?.name || row.budget_id || key; } catch { /* keep */ }
+  return { id: row.budget_id || (String(row.id).startsWith("budget:") ? row.id.slice(7) : row.id), name };
+}
+
+function unknownBudget() {
+  return new HttpError(404, "Not found", { code: "NOT_FOUND" });
+}
+
+function mayManageBudgetAccess(session, budgetId) {
+  return budgetRole(session, budgetId) === "owner";
+}
+
+export async function listBudgetAccess(env, session, budgetId) {
+  const budget = await liveBudget(env, session.householdId, budgetId);
+  if (!budget) throw unknownBudget();
+  if (!mayManageBudgetAccess(session, budget.id)) throw unknownBudget();
+  const members = (await env.DB.prepare(`SELECT m.user_id, m.role AS household_role, m.display_name, u.email, u.name
+    FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.household_id = ? ORDER BY m.created_at`)
+    .bind(session.householdId).all()).results || [];
+  const rows = (await env.DB.prepare("SELECT user_id, role FROM budget_access WHERE household_id = ? AND budget_id = ?")
+    .bind(session.householdId, budget.id).all()).results || [];
+  const map = Object.fromEntries(rows.map((r) => [r.user_id, r.role]));
+  return {
+    budget: { id: budget.id, name: budget.name },
+    members: members.map((m) => {
+      const household = m.household_role === "owner" ? "owner" : "member";
+      const locked = household === "owner";
+      const role = locked ? "owner" : (map[m.user_id] || null);
+      return {
+        userId: m.user_id,
+        email: m.email,
+        name: m.display_name || m.name,
+        householdRole: household,
+        role,
+        locked,
+      };
+    }),
+  };
+}
+
+export async function setBudgetAccess(env, req, session, budgetId) {
+  const budget = await liveBudget(env, session.householdId, budgetId);
+  if (!budget) throw unknownBudget();
+  if (!mayManageBudgetAccess(session, budget.id)) throw unknownBudget();
+  const body = await readJson(req);
+  const incoming = body.access && typeof body.access === "object" ? body.access
+    : Object.fromEntries((Array.isArray(body.members) ? body.members : []).map((m) => [m.userId, m.role]));
+  const current = await listBudgetAccess(env, session, budget.id);
+  const byId = Object.fromEntries(current.members.map((m) => [m.userId, m]));
+  const at = now();
+  const stmts = [];
+  const changed = [];
+  for (const [userId, raw] of Object.entries(incoming)) {
+    const person = byId[userId];
+    if (!person) throw new HttpError(404, "That person isn’t in the household");
+    if (person.locked) continue;
+    const next = (raw == null || raw === "" || raw === "none") ? null
+      : (String(raw) === "view only" ? "viewer" : String(raw));
+    if (next != null && !BUDGET_ROLES.includes(next)) throw new HttpError(400, "Budget role must be owner, member, view only, or no access");
+    if ((person.role || null) === next) continue;
+    changed.push({ userId, before: person.role, after: next });
+    if (next == null) {
+      stmts.push(env.DB.prepare("DELETE FROM budget_access WHERE household_id = ? AND budget_id = ? AND user_id = ?")
+        .bind(session.householdId, budget.id, userId));
+    } else {
+      stmts.push(env.DB.prepare("INSERT OR REPLACE INTO budget_access (household_id, budget_id, user_id, role, granted_by, granted_at) VALUES (?, ?, ?, ?, ?, ?)")
+        .bind(session.householdId, budget.id, userId, next, session.user.id, at));
+    }
+    stmts.push(env.DB.prepare("UPDATE memberships SET access_rev = access_rev + 1 WHERE household_id = ? AND user_id = ?")
+      .bind(session.householdId, userId));
+  }
+  // Every budget keeps at least one Owner (household Owners count).
+  const nextMap = Object.fromEntries(current.members.map((m) => [m.userId, m.role]));
+  for (const c of changed) nextMap[c.userId] = c.after;
+  const hasOwner = current.members.some((m) => m.householdRole === "owner" || nextMap[m.userId] === "owner");
+  if (!hasOwner) throw new HttpError(409, "This budget needs at least one owner");
+  if (stmts.length) await env.DB.batch(stmts);
+  for (const c of changed) {
+    await writeHouseholdLog(env, session, { action: "budget.access", targetUser: c.userId, budgetId: budget.id, before: { role: c.before }, after: { role: c.after } });
+  }
+  return listBudgetAccess(env, session, budget.id);
 }

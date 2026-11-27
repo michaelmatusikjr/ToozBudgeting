@@ -16,6 +16,7 @@ import { HttpError, now, corsHeaders, json, readJson, meta, setMeta } from "./ht
 import {
   authSession, requireAction, signInGoogle, signInRedirect, redeemCode, signOut, meView, updateMe,
   listMembers, createInvite, revokeInvite, updateMember, removeMember, renameHousehold, signInReady, ownerEmailCount, signInStart, lastSignInError, inviteInfo,
+  listBudgetAccess, setBudgetAccess,
 } from "./auth.js";
 import { push, pull } from "./sync.js";
 import { householdRole, budgetRole, canTakeBankBatch } from "./roles.js";
@@ -622,6 +623,8 @@ export function makeHandler({ fetchImpl } = {}) {
       else if (/^\/household\/members\/[^/]+$/.test(path) && m === "DELETE") out = await removeMember(env, s, decodeURIComponent(path.split("/")[3]));
       else if (path === "/household/invites" && m === "POST") out = await createInvite(env, req, s);
       else if (/^\/household\/invites\/[^/]+$/.test(path) && m === "DELETE") out = await revokeInvite(env, s, decodeURIComponent(path.split("/")[3]));
+      else if (/^\/budgets\/[^/]+\/access$/.test(path) && m === "GET") out = await listBudgetAccess(env, s, decodeURIComponent(path.split("/")[2]));
+      else if (/^\/budgets\/[^/]+\/access$/.test(path) && m === "PUT") out = await setBudgetAccess(env, req, s, decodeURIComponent(path.split("/")[2]));
       else if (path === "/sync/pull" && m === "GET") out = await pull(env, url, s);
       else if (path === "/sync/push" && m === "POST") out = await push(env, req, s);
       else if (path === "/bank/link-token" && m === "POST") out = await linkToken(env, req, plaid, s);
