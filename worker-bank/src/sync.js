@@ -15,6 +15,7 @@
 import { HttpError, now, readJson } from "./http.js";
 import { requireAction } from "./auth.js";
 import { SYNC_KINDS, canReadRecord, canWriteRecord, canCreateBudget, recordBudgetId, OWNER_ONLY_BUDGET_FIELDS } from "./roles.js";
+import { cleanOp, insertActivity } from "./activity.js";
 
 const MAX_PUSH_BYTES = 1500 * 1024;
 const MAX_PUSH_RECORDS = 1000;
@@ -38,6 +39,7 @@ function cleanRecord(r) {
     t: Math.min(Math.floor(t), now() + FUTURE_SKEW_MS),
     sentT: t,
     dev: String(r.dev || "").slice(0, 64),
+    op: cleanOp(r.op),
   };
 }
 
@@ -121,6 +123,13 @@ export async function push(env, req, session) {
     }
   }
 
+  const previousById = new Map();
+  if (list.length) {
+    const prev = (await env.DB.prepare("SELECT id, kind, budget_id, body, deleted FROM records WHERE household_id = ? AND id IN (SELECT value FROM json_each(?))")
+      .bind(hid, JSON.stringify(list.map((r) => r.id))).all()).results || [];
+    for (const row of prev) previousById.set(row.id, row);
+  }
+
   if (list.length) {
     const stmts = [
       env.DB.prepare(`INSERT INTO records (household_id, id, kind, budget_id, body, deleted, t, dev, seq, updated_by, updated_at)
@@ -132,7 +141,7 @@ export async function push(env, req, session) {
           kind = excluded.kind, budget_id = excluded.budget_id, body = excluded.body, deleted = excluded.deleted,
           t = excluded.t, dev = excluded.dev, seq = excluded.seq, updated_by = excluded.updated_by, updated_at = excluded.updated_at
         WHERE excluded.t > records.t OR (excluded.t = records.t AND excluded.dev > records.dev)`)
-        .bind(hid, session.user.id, now(), JSON.stringify(list.map(({ sentT, overridden, ...r }) => r))),
+        .bind(hid, session.user.id, now(), JSON.stringify(list.map(({ sentT, overridden, op, ...r }) => r))),
       env.DB.prepare("UPDATE households SET seq = seq + ? WHERE id = ?").bind(list.length, hid),
     ];
     const created = [...creates];
@@ -164,11 +173,13 @@ export async function push(env, req, session) {
     : [];
   const differs = [...denied];
   let applied = 0;
+  const landed = [];
   for (const row of brief) {
     const s = sent.get(row.id);
-    if (row.t === s.sentT && row.dev === s.dev && !s.overridden) applied++;
+    if (row.t === s.sentT && row.dev === s.dev && !s.overridden) { applied++; landed.push(s); }
     else differs.push(row.id);
   }
+  if (landed.length) await insertActivity(env, session, landed, previousById);
   const current = [];
   if (differs.length) {
     const rows = (await env.DB.prepare("SELECT * FROM records WHERE household_id = ? AND id IN (SELECT value FROM json_each(?))").bind(hid, JSON.stringify(differs.slice(0, 2000))).all()).results || [];

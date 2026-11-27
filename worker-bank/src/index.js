@@ -19,6 +19,7 @@ import {
   listBudgetAccess, setBudgetAccess,
 } from "./auth.js";
 import { push, pull } from "./sync.js";
+import { purgeDeletedBudgets } from "./activity.js";
 import { householdRole, budgetRole, canTakeBankBatch } from "./roles.js";
 
 const VERSION = "2.0.3";
@@ -582,6 +583,7 @@ export async function runScheduled(env, plaid) {
     await env.DB.prepare("DELETE FROM sessions WHERE expires_at < ?").bind(now()).run();
     await env.DB.prepare("DELETE FROM login_codes WHERE expires_at < ?").bind(now()).run();
     await env.DB.prepare("DELETE FROM link_sessions WHERE expires_at < ?").bind(now() - 86400000).run();
+    await purgeDeletedBudgets(env);
     await setMeta(env, "last_cron_at", now());
     await setMeta(env, "last_cron_error", null);
   } catch (e) {
