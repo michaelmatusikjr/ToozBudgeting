@@ -1,7 +1,7 @@
 /** What's new: toast on a real version change, then a carousel of short animated recreations. */
-import { h, openSheet, btn, icon, toast } from "./ui.js?v=135";
-import { APP_VERSION } from "./util.js?v=135";
-import { deviceGet, deviceSet } from "./store.js?v=135";
+import { h, openSheet, btn, icon, toast } from "./ui.js?v=136";
+import { APP_VERSION } from "./util.js?v=136";
+import { deviceGet, deviceSet } from "./store.js?v=136";
 
 const RELEASES = [
   {
@@ -86,6 +86,16 @@ const RELEASES = [
         demo: "lists",
         title: "Closing an account pulls the money first.",
         body: "A leftover balance comes out of Ready to Assign and unspent categories, or you transfer what is left. A new category can roll over, return, or cap. Goal changes are written on the category note.",
+      },
+    ],
+  },
+  {
+    version: "1.4.0",
+    slides: [
+      {
+        demo: "colors",
+        title: "A theme, and a place for your eye.",
+        body: "Paper, Ink, and Dusk are built in. Custom is the background, the cards, the text, and one accent. Section titles sit on a band. Actions are buttons.",
       },
     ],
   },

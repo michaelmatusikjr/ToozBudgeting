@@ -1,11 +1,12 @@
-import { h, btn, openSheet, field, textInput, toast, confirmDialog } from "../ui.js?v=135";
-import { APP_VERSION, toTitleCase, uid } from "../util.js?v=135";
-import { exportData, deviceGet, deviceSet, importData } from "../store.js?v=135";
-import { freshBudgetShell, copyCategories, addAccount, addCreditCard } from "../mutate.js?v=135";
-import { pushConfig, setPushConfig, pushStatus, enablePush, disablePush, DEFAULTS, syncSchedule } from "../push.js?v=135";
-import { requestPermission, scheduleLocal } from "../notify.js?v=135";
-import { isIOS, isStandalone, canInstall, promptInstall } from "../pwa.js?v=135";
-import { openWhatsNew } from "../whatsnew.js?v=135";
+import { h, btn, openSheet, field, textInput, toast, confirmDialog } from "../ui.js?v=136";
+import { APP_VERSION, toTitleCase, uid } from "../util.js?v=136";
+import { exportData, deviceGet, deviceSet, importData } from "../store.js?v=136";
+import { freshBudgetShell, copyCategories, addAccount, addCreditCard } from "../mutate.js?v=136";
+import { pushConfig, setPushConfig, pushStatus, enablePush, disablePush, DEFAULTS, syncSchedule } from "../push.js?v=136";
+import { requestPermission, scheduleLocal } from "../notify.js?v=136";
+import { isIOS, isStandalone, canInstall, promptInstall } from "../pwa.js?v=136";
+import { openWhatsNew } from "../whatsnew.js?v=136";
+import { THEMES, paintTheme, deriveCustom, resolveTheme, customFrom } from "../theme.js?v=136";
 
 export async function renderSettings(root, ctx) {
   const budget = ctx.budget();
@@ -58,11 +59,34 @@ export async function renderSettings(root, ctx) {
       confirm: "Erase", danger: true, onConfirm: () => ctx.reset(),
     })),
   ]));
-  root.append(section("Appearance", [
-    h("div", { class: "row gap wrap" },
-      ...["system", "light", "dark"].map((t) => btn(t[0].toUpperCase() + t.slice(1), { kind: theme === t ? "primary" : "ghost", onClick: async () => { await deviceSet("theme", t); ctx.applyTheme(t); ctx.render(); } })),
-    ),
-  ]));
+  const stored = resolveTheme(theme);
+  const customSaved = await deviceGet("customTheme");
+  const phoneDark = matchMedia("(prefers-color-scheme: dark)").matches;
+  const grid = h("div", { class: "theme-grid" });
+  for (const id of ["paper", "ink", "dusk"]) {
+    const t = THEMES[id];
+    const on = stored === id || (stored === "system" && ((phoneDark && id === "ink") || (!phoneDark && id === "paper")));
+    grid.append(themeSwatch(t, on, async () => {
+      await deviceSet("theme", id);
+      paintTheme(id);
+      ctx.render();
+    }));
+  }
+  const customFace = deriveCustom(customSaved || {});
+  grid.append(themeSwatch({
+    name: "Custom", hint: "Your colors",
+    bg: customFace.bg, surface: customFace.surface, ink: customFace.ink, accent: customFace.accent, band: customFace.band,
+  }, stored === "custom", async () => {
+    const saved = await deviceGet("customTheme");
+    if (!saved) { openCustomTheme(ctx, null); return; }
+    await deviceSet("theme", "custom");
+    paintTheme("custom", saved);
+    ctx.render();
+  }));
+  const appearance = [grid];
+  if (stored === "system") appearance.push(h("p", { class: "hint theme-note", text: "Following this phone until you pick a theme." }));
+  if (stored === "custom") appearance.push(btn("Edit colors", { kind: "ghost", block: true, onClick: () => openCustomTheme(ctx, customSaved) }));
+  root.append(section("Appearance", appearance));
   const notif = section("Notifications", [
     h("p", { class: "hint", text: `Permission: ${perm}. ${status.text}` }),
     isIOS() && !isStandalone() ? h("p", { class: "hint", text: "On iPhone, add ToozBudgeting to the Home Screen before notifications can fire while the app is closed. iOS 16.4 or later." }) : null,
@@ -103,6 +127,65 @@ export async function renderSettings(root, ctx) {
 function section(title, kids) {
   return h("section", { class: "group settings-block" }, h("h2", { text: title }), ...kids);
 }
+
+function themeSwatch(theme, on, onClick) {
+  return h("button", {
+    type: "button",
+    class: `theme-swatch${on ? " on" : ""}`,
+    style: `--sw-bg:${theme.bg};--sw-surface:${theme.surface};--sw-ink:${theme.ink};--sw-accent:${theme.accent};--sw-band:${theme.band}`,
+    onclick: onClick,
+  },
+    h("span", { class: "swatch-face", "aria-hidden": "true" }),
+    h("span", { class: "swatch-name", text: theme.name }),
+    h("span", { class: "swatch-hint", text: theme.hint }),
+  );
+}
+
+function openCustomTheme(ctx, saved) {
+  const draft = customFrom(saved || {});
+  const sheet = openSheet({
+    title: "Custom theme",
+    body: (host) => {
+      const preview = h("div", { class: "theme-preview" });
+      const paint = () => {
+        const d = deriveCustom(draft);
+        preview.replaceChildren(
+          h("div", { class: "theme-preview-band", text: "Bills", style: `background:${d.band};color:${d.ink}` }),
+          h("div", { class: "theme-preview-row", style: `background:${d.surface};color:${d.ink}` },
+            h("span", { text: "Groceries" }),
+            h("strong", { text: "$120.00", style: `color:${d.vars["--good"]}` }),
+          ),
+          h("div", { style: `background:${d.surface};padding:0 12px 12px` },
+            h("div", { text: "Button", style: `display:inline-flex;align-items:center;min-height:40px;padding:0 14px;border-radius:12px;background:${d.accent};color:${d.vars["--accent-ink"]};font-weight:600` }),
+          ),
+        );
+      };
+      const picker = (label, key) => {
+        const input = h("input", { class: "input", type: "color", value: draft[key], "aria-label": label });
+        input.addEventListener("input", () => { draft[key] = input.value; paint(); });
+        return field(label, input);
+      };
+      host.append(
+        h("p", { class: "hint", text: "Set the background, the cards, the text, and one accent. Everything else follows from those." }),
+        preview,
+        picker("Background", "bg"),
+        picker("Cards", "surface"),
+        picker("Text", "ink"),
+        picker("Accent", "accent"),
+        btn("Use this theme", { block: true, onClick: async () => {
+          const next = customFrom(draft);
+          await deviceSet("customTheme", next);
+          await deviceSet("theme", "custom");
+          paintTheme("custom", next);
+          sheet.close();
+          ctx.render();
+        }}),
+      );
+      paint();
+    },
+  });
+}
+
 function line(label, action, onClick, kind = "quiet") {
   const tone = label.startsWith("Reset") ? "danger" : kind;
   return h("div", { class: "line" }, h("span", { text: label }), btn(action, { kind: tone, onClick }));
@@ -172,7 +255,7 @@ function importFile(ctx) {
     const f = input.files?.[0]; if (!f) return;
     try {
       const parsed = JSON.parse(await f.text());
-      ctx.restore(parsed.budgets ? (await import("../store.js?v=135")).importData(parsed) : parsed);
+      ctx.restore(parsed.budgets ? (await import("../store.js?v=136")).importData(parsed) : parsed);
       toast("Imported");
     } catch (e) { toast(e.message || "Couldn’t import that file"); }
   });

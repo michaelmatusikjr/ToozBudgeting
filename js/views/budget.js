@@ -1,16 +1,16 @@
-import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, openAmountPad } from "../ui.js?v=135";
-import { fmt, monthLabel, monthKey, prevMonth, nextMonth, todayKey, toTitleCase, uid, round2 } from "../util.js?v=135";
+import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, openAmountPad } from "../ui.js?v=136";
+import { fmt, monthLabel, monthKey, prevMonth, nextMonth, todayKey, toTitleCase, uid, round2 } from "../util.js?v=136";
 import {
   budgetSnapshot, getGoalMetrics, trailingAvg, monthAccessible, historySeries,
   overspentMonths, available, globalFree, ccMismatches,
-} from "../calc.js?v=135";
+} from "../calc.js?v=136";
 import {
   setAssigned, moveMoney, coverOverspending, planClawback, applyClawback,
   computeMonthAssignments, applyAssignments, setCategory, addCategory, archiveCategory,
   deleteCategory, setMonthNote, addGroup, renameGroup, deleteGroup, moveGroup, moveCategory,
-} from "../mutate.js?v=135";
-import { collectReminders } from "../notify.js?v=135";
-import { openMissingSide } from "./transactions.js?v=135";
+} from "../mutate.js?v=136";
+import { collectReminders } from "../notify.js?v=136";
+import { openMissingSide } from "./transactions.js?v=136";
 
 function noteOf(budget, month, cat) {
   return budget.categoryNotes?.[month]?.[cat.id] || "";
@@ -69,7 +69,7 @@ export function renderBudget(root, ctx) {
       ctx.setMonth(nextMk);
     } }),
   );
-  const planLinks = h("nav", { class: "link-row", "aria-label": "Plan" },
+  const planLinks = h("nav", { class: "link-row plan-actions", "aria-label": "Plan" },
     h("button", { class: "text-link", type: "button", text: "Auto-assign", onclick: () => openAuto(ctx) }),
     h("button", { class: "text-link", type: "button", text: "Move", onclick: () => openMove(ctx, null, null) }),
     h("button", { class: "text-link", type: "button", text: "Add", onclick: () => openAddCategory(ctx) }),

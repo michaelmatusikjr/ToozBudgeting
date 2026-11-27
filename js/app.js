@@ -1,18 +1,19 @@
-import { APP_VERSION, monthKey, prevMonth, nextMonth, deepClone } from "./util.js?v=135";
-import { loadState, saveState, subscribe, exportData, importData, deviceGet, deviceSet } from "./store.js?v=135";
-import { h, clear, icon, toast, closeAllModals, btn } from "./ui.js?v=135";
-import { renderIdentity, renderWizard } from "./views/gate.js?v=135";
-import { renderBudget, openInbox } from "./views/budget.js?v=135";
-import { renderTransactions, openTx } from "./views/transactions.js?v=135";
-import { renderAccounts } from "./views/accounts.js?v=135";
-import { renderPayees } from "./views/payees.js?v=135";
-import { renderSettings } from "./views/settings.js?v=135";
-import { registerSW, activateWaiting } from "./pwa.js?v=135";
-import { scheduleLocal, collectReminders } from "./notify.js?v=135";
-import { pushOnOpen } from "./push.js?v=135";
-import { normalizeBudget } from "./mutate.js?v=135";
-import { announceIfUpdated } from "./whatsnew.js?v=135";
-import { monthAccessible } from "./calc.js?v=135";
+import { APP_VERSION, monthKey, prevMonth, nextMonth, deepClone } from "./util.js?v=136";
+import { loadState, saveState, subscribe, exportData, importData, deviceGet, deviceSet } from "./store.js?v=136";
+import { h, clear, icon, toast, closeAllModals, btn } from "./ui.js?v=136";
+import { renderIdentity, renderWizard } from "./views/gate.js?v=136";
+import { renderBudget, openInbox } from "./views/budget.js?v=136";
+import { renderTransactions, openTx } from "./views/transactions.js?v=136";
+import { renderAccounts } from "./views/accounts.js?v=136";
+import { renderPayees } from "./views/payees.js?v=136";
+import { renderSettings } from "./views/settings.js?v=136";
+import { registerSW, activateWaiting } from "./pwa.js?v=136";
+import { scheduleLocal, collectReminders } from "./notify.js?v=136";
+import { pushOnOpen } from "./push.js?v=136";
+import { normalizeBudget } from "./mutate.js?v=136";
+import { announceIfUpdated } from "./whatsnew.js?v=136";
+import { paintTheme, resolveTheme } from "./theme.js?v=136";
+import { monthAccessible } from "./calc.js?v=136";
 
 const root = document.getElementById("app");
 const undoStack = [];
@@ -97,14 +98,7 @@ const ctx = {
     if (location.hash !== hash) history.replaceState(null, "", hash);
     ctx.render();
   },
-  applyTheme(theme) {
-    const t = theme || "system";
-    if (t === "system") document.documentElement.removeAttribute("data-theme");
-    else document.documentElement.dataset.theme = t;
-    const dark = t === "dark" || (t === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
-    const color = dark ? "#14181c" : "#2f6f62";
-    document.querySelectorAll('meta[name="theme-color"]').forEach((m) => m.setAttribute("content", color));
-  },
+  applyTheme(theme, custom) { paintTheme(theme, custom); },
   render() { paint(); },
   toast,
 };
@@ -224,7 +218,12 @@ window.addEventListener("hashchange", () => { closeAllModals(); applyHash(); ctx
 async function boot() {
   ctx.state = await loadState();
   const theme = await deviceGet("theme");
-  if (theme) ctx.applyTheme(theme);
+  const custom = await deviceGet("customTheme");
+  ctx.applyTheme(theme || "system", custom);
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", async () => {
+    const current = await deviceGet("theme");
+    if (!current || resolveTheme(current) === "system") ctx.applyTheme("system", await deviceGet("customTheme"));
+  });
   applyHash();
   subscribe(() => {});
   registerSW((reg) => {

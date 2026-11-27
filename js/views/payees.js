@@ -1,7 +1,7 @@
-import { h, btn, openSheet, field, textInput, toast, keepFocus } from "../ui.js?v=135";
-import { toTitleCase } from "../util.js?v=135";
-import { canonicalNames, displayName, originalsForCanonical, buildMergeGroups, getSharedWordsDefault, payeeDefaultCategory, payeeSuggestedCategory } from "../payees.js?v=135";
-import { setCanonical, unmergeOriginal, unmergeAll, setPayeeCategory, rejectMerge, clearPayeeCategories } from "../mutate.js?v=135";
+import { h, btn, openSheet, field, textInput, toast, keepFocus } from "../ui.js?v=136";
+import { toTitleCase } from "../util.js?v=136";
+import { canonicalNames, displayName, originalsForCanonical, buildMergeGroups, getSharedWordsDefault, payeeDefaultCategory, payeeSuggestedCategory } from "../payees.js?v=136";
+import { setCanonical, unmergeOriginal, unmergeAll, setPayeeCategory, rejectMerge, clearPayeeCategories } from "../mutate.js?v=136";
 
 export function renderPayees(root, ctx) {
   const budget = ctx.budget();
