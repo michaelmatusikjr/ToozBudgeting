@@ -1,4 +1,4 @@
-import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, bindContextMenu } from "../ui.js?v=154";
+import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, bindContextMenu, amountInput, btnRow, searchableSel, append, clear } from "../ui.js?v=154";
 import { fmt, todayKey, toTitleCase, isCard, monthKey, monthLabel, ccPayCat, round2 } from "../util.js?v=154";
 import { accountBalances, available, globalFree, spentByMonthCat, findUnclearedSuggestion, txBalanceEffect, lastReconciledDate, daysSince } from "../calc.js?v=154";
 import { addAccount, addCreditCard, renameAccount, archiveAccount, deleteAccount, reconcileAccount, addTransaction, isLocked, closeAccountBalance, finishAccountClose } from "../mutate.js?v=154";
@@ -136,17 +136,32 @@ function archivedRow(ctx, item, last) {
 function openRename(ctx, a, card) {
   const budget = ctx.budget();
   const input = textInput({ value: a.name });
+  input.setAttribute("autofocus", "");
+  const err = h("div", { class: "acc-form-err" });
+  const save = () => {
+    const name = input.value.trim();
+    err.textContent = "";
+    if (!name) { err.textContent = "Name is required."; return; }
+    const list = card ? budget.creditCards : budget.accounts;
+    if (list.some((x) => x.id !== a.id && x.name.toLowerCase() === name.toLowerCase())) {
+      err.textContent = `"${name}" already exists.`;
+      return;
+    }
+    ctx.updateBudget((b) => renameAccount(b, a.id, card, name));
+    sheet.close();
+  };
+  input.addEventListener("input", () => { err.textContent = ""; });
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") save(); });
   const sheet = openSheet({
-    title: "Rename",
+    title: `Rename ${card ? "Card" : "Account"}`,
+    closeLabel: "Discard",
     body: (host) => {
-      host.append(field("Name", input), btn("Save", { block: true, onClick: () => {
-        const name = toTitleCase(input.value.trim());
-        if (!name) { toast("Name is required"); return; }
-        const list = card ? budget.creditCards : budget.accounts;
-        if (list.some((x) => x.id !== a.id && x.name.toLowerCase() === name.toLowerCase())) { toast("That name is already used"); return; }
-        ctx.updateBudget((b) => renameAccount(b, a.id, card, name));
-        sheet.close();
-      }}));
+      host.append(
+        field("Name", input),
+        err,
+        btnRow({ label: "Cancel", kind: "ghost", onClick: () => sheet.close() }, { label: "Save", onClick: save }),
+      );
+      input.focus();
     },
   });
 }
@@ -163,11 +178,23 @@ function requestAccountAction(ctx, account, card, action, skipReconcile) {
   const uncat = txs.filter((t) => t.type === "expense" && !t.splits && (!t.categoryId || t.categoryConfirmed === false));
   if (uncat.length) {
     const verb = action === "delete" ? "delete" : "archive";
-    confirmDialog({
-      title: `Cannot ${verb} ${a.name}`,
-      message: `${uncat.length} transaction${uncat.length === 1 ? "" : "s"} ${uncat.length === 1 ? "is" : "are"} missing a category or still unconfirmed. Categorize them before you ${verb} it.`,
-      confirm: "Review",
-      onConfirm: () => ctx.go("transactions", { accountId: a.id, attention: true }),
+    const actionLabel = action === "delete" ? "Delete" : "Archive";
+    const count = uncat.length;
+    const sheet = openSheet({
+      title: `Cannot ${actionLabel} "${a.name}"`,
+      body: (host) => {
+        const who = count !== 1 ? "are" : "is";
+        host.append(
+          h("p", { class: "acc-modal-lede" },
+            h("strong", { text: `${count} transaction${count !== 1 ? "s" : ""}` }),
+            h("span", { text: ` on this account ${who} missing a category or have an unconfirmed category. All transactions must be categorized and confirmed before you can ${actionLabel.toLowerCase()} it.` }),
+          ),
+          btnRow(
+            { label: "Cancel", kind: "ghost", onClick: () => sheet.close() },
+            { label: "Review Transactions", onClick: () => { sheet.close(); ctx.go("transactions", { accountId: a.id, attention: true }); } },
+          ),
+        );
+      },
     });
     return;
   }
@@ -187,12 +214,7 @@ function requestAccountAction(ctx, account, card, action, skipReconcile) {
   if (action === "archive" && !skipReconcile) {
     const openTxs = txs.filter((t) => !t.reconciled);
     if (openTxs.length) {
-      confirmDialog({
-        title: "Reconcile first",
-        message: `${a.name} still has unreconciled transactions. Reconcile before archiving.`,
-        confirm: "Reconcile",
-        onConfirm: () => openReconcile(ctx, a, card, accountBalances(budget)[a.id] || 0, () => requestAccountAction(ctx, a, card, action, true)),
-      });
+      openReconcile(ctx, a, card, accountBalances(budget)[a.id] || 0, () => requestAccountAction(ctx, a, card, action, true));
       return;
     }
   }
@@ -211,12 +233,29 @@ function requestAccountAction(ctx, account, card, action, skipReconcile) {
       return;
     }
     const short = balance - Math.max(0, setAside);
-    openSheet({
-      title: `Cannot ${action === "delete" ? "delete" : "archive"} ${a.name}`,
+    const actionLabel = action === "delete" ? "Delete" : "Archive";
+    const setAsideAmt = Math.max(0, setAside);
+    const sheet = openSheet({
+      title: `Cannot ${actionLabel} "${a.name}"`,
       body: (host) => {
-        host.append(h("p", { class: "lede", text: `${a.name} still has ${fmt(balance)} owed, but the payment category only has ${fmt(Math.max(0, setAside))} set aside. That’s ${fmt(short)} short.` }));
-        host.append(h("p", { class: "hint", text: `Budget another ${fmt(short)} to the ${a.name} payment category, then pay the card off before you ${action === "delete" ? "delete" : "archive"} it.` }));
-        host.append(btn("OK", { block: true, onClick: () => host.closest(".scrim")?.querySelector(".icon-btn")?.click() }));
+        host.append(
+          h("p", { class: "acc-modal-lede" },
+            h("strong", { text: a.name }),
+            h("span", { text: " still has " }),
+            h("strong", { class: "acc-err-amt", text: fmt(balance) }),
+            h("span", { text: " owed, but your payment category only has " }),
+            h("strong", { class: "acc-err-amt", text: fmt(setAsideAmt) }),
+            h("span", { text: " set aside — a shortfall of " }),
+            h("strong", { class: "acc-err-amt", text: fmt(short) }),
+            h("span", { text: "." }),
+          ),
+          h("p", { class: "acc-modal-lede" },
+            h("span", { text: "Budget an additional " }),
+            h("strong", { text: fmt(short) }),
+            h("span", { text: ` to the ${a.name} payment category, then pay off the card balance before attempting to ${actionLabel.toLowerCase()} it.` }),
+          ),
+          btn("OK", { block: true, onClick: () => sheet.close() }),
+        );
       },
     });
     return;
@@ -400,33 +439,61 @@ function openTransfer(ctx, fromId, onDone, preset) {
   const budget = ctx.budget();
   const opts = preset && typeof preset === "object" ? preset : {};
   const watchId = opts.watchId || fromId;
+  const accounts = [...(budget.accounts || []), ...(budget.creditCards || [])];
+  const fromAcc = accounts.find((a) => a.id === fromId);
   const fromBal = Math.max(0, accountBalances(budget)[fromId] || 0);
-  let to = opts.toId || "";
-  let amount = opts.amount != null ? round2(Math.min(Math.max(0, opts.amount), fromBal || opts.amount)) : (onDone ? fromBal : 0);
+  let to = opts.toId || (accounts.find((a) => !a.archived && a.id !== fromId)?.id || "");
+  let amount = opts.amount != null ? round2(Math.abs(opts.amount)) : fromBal;
+  let date = todayKey();
+  let note = "";
   const sheet = openSheet({
-    title: "Transfer",
+    title: "💸 Transfer Money",
+    closeLabel: "Discard",
     body: (host) => {
-      const sel = h("select", { class: "input" }, h("option", { value: "", text: "Select account" }));
-      for (const a of [...budget.accounts, ...budget.creditCards]) if (!a.archived && a.id !== fromId) sel.append(h("option", { value: a.id, text: a.name }));
-      if (to) sel.value = to;
-      sel.addEventListener("change", () => { to = sel.value; });
-      host.append(
-        h("p", { class: "hint", text: `From ${[...budget.accounts, ...budget.creditCards].find((a) => a.id === fromId)?.name || "account"} · ${fmt(fromBal)} available` }),
-        field("To", sel),
-        field("Amount", moneyButton(amount, (n) => { amount = Math.abs(n); }, { label: "Amount" })),
-        btn("Transfer", { block: true, onClick: () => {
-          const cap = Math.max(0, accountBalances(ctx.budget())[fromId] || 0);
-          if (!to || to === fromId) { toast("Pick a different account"); return; }
-          if (!(amount > 0)) { toast("Enter an amount"); return; }
-          if (amount > cap + 0.005) { toast(`Only ${fmt(cap)} can leave this account`); return; }
-          const res = addTransaction(ctx.budget(), { type: "transfer", accountId: fromId, transferAccountId: to, amount, date: todayKey(), payee: "Transfer" });
-          if (res.error) { toast(res.error); return; }
-          ctx.updateBudget(() => res.budget);
-          sheet.close();
-          const watched = accountBalances(ctx.budget())[watchId] || 0;
-          if (!onDone) toast("Transferred", { label: "Undo", action: () => ctx.undo() });
-          onDone?.(watched);
-        }}),
+      const over = h("div", { class: "acc-form-err" });
+      const saveBtn = btn("Transfer", { kind: "purple", onClick: () => submit() });
+      const paintOver = () => {
+        const overBalance = amount > fromBal + 0.005;
+        over.textContent = overBalance ? `Amount exceeds the available balance of ${fmt(fromBal)}.` : "";
+        saveBtn.disabled = !to || !amount || to === fromId || overBalance;
+      };
+      const submit = () => {
+        const cap = Math.max(0, accountBalances(ctx.budget())[fromId] || 0);
+        if (!to || to === fromId) { toast("Pick a different account"); return; }
+        if (!(amount > 0)) { toast("Enter an amount"); return; }
+        if (amount > cap + 0.005) { toast(`Amount exceeds the available balance of ${fmt(cap)}.`); return; }
+        const res = addTransaction(ctx.budget(), { type: "transfer", accountId: fromId, transferAccountId: to, amount, date, payee: "Transfer", note: note.trim() });
+        if (res.error) { toast(res.error); return; }
+        ctx.updateBudget(() => res.budget);
+        sheet.close();
+        const watched = accountBalances(ctx.budget())[watchId] || 0;
+        if (!onDone) toast("Transferred", { label: "Undo", action: () => ctx.undo() });
+        onDone?.(watched);
+      };
+      const toSel = searchableSel({
+        label: "To",
+        value: to,
+        placeholder: "Search accounts...",
+        options: [{ value: "", label: "Select account..." }, ...accounts.filter((a) => !a.archived && a.id !== fromId).map((a) => ({ value: a.id, label: a.name }))],
+        onChange: (v) => { to = v; paintOver(); },
+      });
+      const dateEl = h("input", { class: "input", type: "date", value: date });
+      dateEl.addEventListener("change", () => { date = dateEl.value; });
+      const noteEl = textInput({ placeholder: "e.g. Emergency fund deposit", value: note });
+      noteEl.addEventListener("input", () => { note = noteEl.value; });
+      paintOver();
+      append(host,
+        h("p", { class: "acc-transfer-lede", text: "Moves money between your checking, savings, or cash accounts. No effect on your budget." }),
+        field("From", h("div", { class: "acc-from" },
+          h("span", { class: "acc-from-name", text: fromAcc?.name || "—" }),
+          h("span", { class: "acc-from-bal", text: `Balance: ${fmt(fromBal)}` }),
+        )),
+        toSel,
+        amountInput({ label: "Amount", value: amount, placeholder: "0.00", onChange: (v) => { amount = Math.abs(v); paintOver(); }, onCommit: (v) => { amount = Math.abs(v); paintOver(); } }),
+        over,
+        field("Date", dateEl),
+        field("Note (optional)", noteEl),
+        btnRow({ label: "Cancel", kind: "ghost", onClick: () => sheet.close() }, saveBtn),
       );
     },
   });
@@ -437,61 +504,40 @@ function openReconcile(ctx, a, card, computed, after) {
   const txs = (budget.transactions || []).filter((t) => t.accountId === a.id);
   const uncat = txs.filter((t) => t.type === "expense" && !t.splits && (!t.categoryId || t.categoryConfirmed === false));
   if (uncat.length) {
-    confirmDialog({ title: "Can’t reconcile yet", message: `${uncat.length} transaction${uncat.length === 1 ? "" : "s"} need a category first.`, confirm: "Review", onConfirm: () => ctx.go("transactions", { accountId: a.id, attention: true }) });
+    const count = uncat.length;
+    const sheet = openSheet({
+      title: `Cannot Reconcile ${a.name}`,
+      body: (host) => {
+        const who = count !== 1 ? "are" : "is";
+        const have = count !== 1 ? "have" : "has";
+        host.append(
+          h("p", { class: "acc-modal-lede" },
+            h("strong", { text: `${count} transaction${count !== 1 ? "s" : ""}` }),
+            h("span", { text: ` on this account ${who} missing a category or ${have} an unconfirmed category. All transactions must be categorized and confirmed before reconciling.` }),
+          ),
+          btn("OK — I'll Fix Them First", { block: true, onClick: () => { sheet.close(); ctx.go("transactions", { accountId: a.id, attention: true }); } }),
+        );
+      },
+    });
     return;
   }
   const unlocked = txs.filter((t) => !isLocked(budget, t));
   const effect = (tx) => txBalanceEffect(tx, card);
   const checked = new Set(unlocked.map((t) => t.id));
   let date = todayKey();
-  let real = computed;
+  let real = Math.abs(computed);
+  let userEdited = false;
+  let suggestedIds = [];
   const sheet = openSheet({
     title: `Reconcile ${a.name}`,
     body: (host) => {
       const dateEl = h("input", { class: "input", type: "date", value: date, max: todayKey() });
       dateEl.addEventListener("change", () => { date = dateEl.value; });
-      const diffEl = h("p", { class: "lede" });
-      const note = h("p", { class: "hint", text: "" });
-      const list = h("div", { class: "tx-list" });
-      const figures = () => {
-        const uncheckedSum = unlocked.filter((t) => !checked.has(t.id)).reduce((s, t) => s + effect(t), 0);
-        const adjusted = computed - uncheckedSum;
-        const diff = real - adjusted;
-        return { uncheckedSum, adjusted, diff, matches: Math.abs(diff) < 0.005 };
-      };
-      const paint = () => {
-        const { adjusted, diff, matches, uncheckedSum } = figures();
-        diffEl.textContent = matches ? "Matches." : `Difference ${fmt(diff)}`;
-        if (note.dataset.suggest) note.textContent = note.dataset.suggest;
-        else if (Math.abs(uncheckedSum) > 0.005) note.textContent = `Cleared balance ${fmt(adjusted)}.`;
-        else note.textContent = "";
-        list.replaceChildren();
-        for (const tx of [...unlocked].sort((x, y) => y.date.localeCompare(x.date))) {
-          list.append(h("label", { class: "line" },
-            h("input", { type: "checkbox", checked: checked.has(tx.id), onchange: (e) => { if (e.target.checked) checked.add(tx.id); else checked.delete(tx.id); note.dataset.suggest = ""; paint(); } }),
-            h("span", { class: "grow", text: `${tx.payee || "—"} · ${tx.date}` }),
-            h("span", { class: effect(tx) < -0.005 ? "neg" : effect(tx) > 0.005 ? "pos" : "", text: fmt(effect(tx)) }),
-          ));
-        }
-        host.querySelector("[data-finish]")?.toggleAttribute("disabled", !matches);
-        host.querySelector("[data-adjust]")?.toggleAttribute("disabled", matches);
-      };
-      const onReal = (n) => {
-        real = n;
-        const gap = real - computed;
-        checked.clear();
-        unlocked.forEach((t) => checked.add(t.id));
-        note.dataset.suggest = "";
-        if (Math.abs(gap) >= 0.005) {
-          const suggestion = findUnclearedSuggestion(unlocked.map((t) => ({ ...t, amount: effect(t) })), gap);
-          if (suggestion?.length) {
-            suggestion.forEach((id) => checked.delete(id));
-            note.dataset.suggest = `${suggestion.length} transaction${suggestion.length === 1 ? "" : "s"} unchecked to match that balance. Check them again if that’s wrong.`;
-          }
-        }
-        paint();
-      };
-      const finish = btn("Finish reconciliation", { block: true, onClick: () => {
+      const diffRow = h("div", { class: "acc-rec-diff" });
+      const suggest = h("div", { class: "acc-suggest" });
+      const adjNote = h("div", { class: "acc-rec-adj" });
+      const list = h("div", { class: "acc-rec-list" });
+      const finish = btn("✅ Finish Reconciliation", { kind: "good", onClick: () => {
         const { matches } = figures();
         if (!matches) { toast("Uncheck transactions that haven’t cleared, or add an adjustment"); return; }
         ctx.updateBudget((b) => reconcileAccount(b, a.id, date, 0, [...checked]));
@@ -499,26 +545,111 @@ function openReconcile(ctx, a, card, computed, after) {
         toast("Reconciled");
         after?.();
       }});
-      const adjust = btn("Add adjustment and reconcile", { kind: "ghost", block: true, onClick: () => {
-        const { diff } = figures();
+      const adjust = btn("Add Adjustment & Reconcile", { kind: "purple", onClick: () => {
+        const { diff, matches } = figures();
+        if (matches) return;
         ctx.updateBudget((b) => reconcileAccount(b, a.id, date, diff, [...checked]));
         sheet.close();
         toast("Reconciled with adjustment", { label: "Undo", action: () => ctx.undo() });
         after?.();
       }});
-      finish.dataset.finish = "1";
-      adjust.dataset.adjust = "1";
-      host.append(
-        h("p", { class: "hint", text: `ToozBudgeting shows ${fmt(computed)}${card ? " owed" : ""}. Uncheck anything that hasn’t cleared.` }),
-        field("Statement date", dateEl),
-        field(card ? "Actual balance owed" : "Actual balance", moneyButton(real, (n) => onReal(n), { allowNegative: !card, label: "Statement balance" })),
-        diffEl,
-        note,
+      const figures = () => {
+        const uncheckedSum = unlocked.filter((t) => !checked.has(t.id)).reduce((s, t) => s + effect(t), 0);
+        const adjusted = computed - uncheckedSum;
+        const diff = real - adjusted;
+        return { uncheckedSum, adjusted, diff, matches: Math.abs(diff) < 0.005 };
+      };
+      const applySuggestion = () => {
+        suggestedIds = [];
+        checked.clear();
+        unlocked.forEach((t) => checked.add(t.id));
+        const gap = real - computed;
+        if (Math.abs(gap) >= 0.005) {
+          const suggestion = findUnclearedSuggestion(unlocked.map((t) => ({ ...t, amount: effect(t) })), gap);
+          if (suggestion?.length) {
+            suggestion.forEach((id) => checked.delete(id));
+            suggestedIds = suggestion;
+          }
+        }
+      };
+      const paint = () => {
+        const { adjusted, diff, matches, uncheckedSum } = figures();
+        clear(diffRow);
+        diffRow.append(h("span", { text: "Difference" }), h("span", { class: matches ? "ok" : "bad", text: matches ? "None — matches!" : fmt(diff) }));
+        suggest.textContent = suggestedIds.length
+          ? `💡 ${suggestedIds.length === 1 ? "1 transaction was" : `${suggestedIds.length} transactions were`} automatically unchecked to match your balance — re-check if incorrect.`
+          : "";
+        suggest.hidden = !suggestedIds.length;
+        if (Math.abs(uncheckedSum) > 0.005) {
+          clear(adjNote);
+          adjNote.hidden = false;
+          adjNote.append(
+            h("span", { text: "Adjusted balance: " }),
+            h("strong", { class: matches ? "ok" : "", text: fmt(adjusted) }),
+            h("span", { text: " · Remaining gap: " }),
+            h("strong", { class: "bad", text: fmt(diff) }),
+          );
+        } else {
+          adjNote.hidden = true;
+          adjNote.textContent = "";
+        }
+        finish.disabled = !matches;
+        adjust.disabled = matches;
+        adjust.textContent = matches ? "Add Adjustment & Reconcile" : `Add Adjustment (${fmt(diff)}) & Reconcile`;
+        clear(list);
+        for (const tx of [...unlocked].sort((x, y) => y.date.localeCompare(x.date))) {
+          const on = checked.has(tx.id);
+          const row = h("label", { class: `acc-rec-tx${on ? " on" : (suggestedIds.includes(tx.id) ? " suggested" : " off")}` });
+          const box = h("input", { type: "checkbox", checked: on });
+          box.addEventListener("change", () => {
+            if (box.checked) checked.add(tx.id);
+            else checked.delete(tx.id);
+            suggestedIds = [];
+            paint();
+          });
+          const amt = effect(tx);
+          row.append(
+            box,
+            h("div", { class: "acc-rec-tx-main" },
+              h("div", { class: "acc-rec-tx-payee", text: tx.payee || "—" }),
+              h("div", { class: "acc-rec-tx-date", text: tx.date }),
+            ),
+            h("div", { class: amt < -0.005 ? "acc-rec-tx-amt in" : "acc-rec-tx-amt", text: fmt(amt) }),
+          );
+          list.append(row);
+        }
+      };
+      const onReal = (n) => {
+        real = Math.abs(n);
+        userEdited = true;
+        applySuggestion();
+        paint();
+      };
+      append(host,
+        field("Date", dateEl),
+        h("p", { class: "acc-rec-shows", text: `ToozBudgeting shows: ${fmt(computed)}${card ? " owed" : ""}` }),
+        amountInput({
+          label: card ? "Actual balance owed, from your statement ($)" : "Actual balance, from your bank ($)",
+          value: real, placeholder: "0.00", allowNegative: !card,
+          onChange: onReal, onCommit: onReal,
+        }),
+        diffRow,
+        h("div", { class: "acc-rec-btns" },
+          btn("Cancel", { kind: "ghost", onClick: () => sheet.close() }),
+          adjust,
+        ),
         finish,
-        adjust,
-        h("p", { class: "kicker", text: "Not yet cleared" }),
-        list,
       );
+      if (unlocked.length) {
+        host.append(
+          h("div", { class: "acc-rec-block" },
+            h("div", { class: "acc-rec-kicker", text: "Unreconciled Transactions — uncheck any that haven't cleared yet" }),
+            suggest,
+            adjNote,
+            list,
+          ),
+        );
+      }
       paint();
     },
   });
@@ -539,27 +670,53 @@ function openAdd(ctx) {
 function openNewAccount(ctx, card) {
   let name = "";
   let type = "checking";
-  let balance = 0;
+  let balance = null;
+  let error = "";
   const sheet = openSheet({
-    title: card ? "New card" : "New account",
+    title: card ? "Add Credit Card" : "Add Account",
+    closeLabel: "Discard",
     body: (host) => {
-      const nm = textInput({ placeholder: card ? "Visa" : "Checking" });
-      nm.addEventListener("input", () => { name = nm.value; });
-      const typeSel = h("select", { class: "input" },
-        h("option", { value: "checking", text: "Checking" }),
-        h("option", { value: "savings", text: "Savings" }),
-        h("option", { value: "cash", text: "Cash" }),
-      );
-      typeSel.addEventListener("change", () => { type = typeSel.value; });
-      host.append(field("Name", nm));
-      if (!card) host.append(field("Type", typeSel));
-      host.append(field(card ? "Balance owed" : "Current balance", moneyButton(0, (n) => { balance = n; })));
-      host.append(btn("Add", { block: true, onClick: () => {
-        if (!name.trim()) return;
+      const err = h("div", { class: "acc-form-err" });
+      const save = btn(card ? "Add Card" : "Add Account", { kind: "good", onClick: () => submit() });
+      const paintSave = () => { save.disabled = !name.trim() || balance === null; err.textContent = error; };
+      const submit = () => {
+        error = "";
+        if (!name.trim()) { error = "Name is required."; paintSave(); return; }
+        if (balance === null) { error = "Enter a balance."; paintSave(); return; }
+        const list = card ? ctx.budget().creditCards : ctx.budget().accounts;
+        if (list.some((x) => x.name.toLowerCase() === name.trim().toLowerCase())) {
+          error = `"${name.trim()}" already exists.`;
+          paintSave();
+          return;
+        }
         ctx.updateBudget((b) => card ? addCreditCard(b, { name, balance }) : addAccount(b, { name, type, balance }));
         sheet.close();
         toast("Added. Starting balance is locked.");
-      }}));
+      };
+      const nm = textInput({ placeholder: card ? "Chase Visa, Amex Blue..." : "Chase Checking" });
+      nm.setAttribute("autofocus", "");
+      nm.addEventListener("input", () => { name = nm.value; error = ""; paintSave(); });
+      const kids = [
+        h("div", { class: "acc-add-hint", text: card ? "💡 Existing balance reserved in your budget." : "💡 Opening balance added to Ready to Assign." }),
+        field(card ? "Card Name" : "Account Name", nm),
+      ];
+      if (!card) {
+        const typeSel = h("select", { class: "input" },
+          h("option", { value: "checking", text: "Checking" }),
+          h("option", { value: "savings", text: "Savings" }),
+          h("option", { value: "cash", text: "Cash" }),
+        );
+        typeSel.addEventListener("change", () => { type = typeSel.value; });
+        kids.push(h("div", { class: "acc-add-grid" },
+          field("Type", typeSel),
+          amountInput({ label: "Balance ($)", placeholder: "e.g. 1000", onChange: (v) => { balance = v; error = ""; paintSave(); }, onCommit: (v) => { balance = v; error = ""; paintSave(); } }),
+        ));
+      } else {
+        kids.push(amountInput({ label: "Balance Owed ($)", placeholder: "e.g. 450.00", onChange: (v) => { balance = Math.abs(v); error = ""; paintSave(); }, onCommit: (v) => { balance = Math.abs(v); error = ""; paintSave(); } }));
+      }
+      paintSave();
+      append(host, ...kids, err, btnRow({ label: "Cancel", kind: "ghost", onClick: () => sheet.close() }, save));
+      nm.focus();
     },
   });
 }
