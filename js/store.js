@@ -102,7 +102,7 @@ function rec(kind, id, budgetId, body, prev) {
   };
 }
 
-function explode(state) {
+export function explode(state) {
   const out = new Map();
   const put = (r) => out.set(r.id, r);
   put(rec("app", "app", null, {
@@ -152,7 +152,7 @@ function explode(state) {
   return out;
 }
 
-function assemble(records) {
+export function assemble(records) {
   const list = [...records.values()].filter((r) => r && !r.deleted);
   const app = list.find((r) => r.id === "app")?.body || {};
   const users = list.filter((r) => r.kind === "user").map((r) => r.body);

@@ -535,6 +535,7 @@ export function addCategory(budget, { name, groupId, rollover, rolloverMax }) {
   const cat = {
     id: uid(), groupId, name: titled, rollover: roll, archived: false,
     rolloverMax: roll === "max" ? round2(rolloverMax || 0) : 0,
+    sort: nextSort(budget.categories),
   };
   return { budget: touch(budget, { categories: [...budget.categories, cat] }), cat };
 }
@@ -545,7 +546,7 @@ export function archiveCategory(budget, catId, month) {
   if (!cat.archived) {
     let groups = budget.categoryGroups;
     let uc = groups.find((g) => g.name === "Uncategorized");
-    if (!uc) { uc = { id: uid(), name: "Uncategorized" }; groups = [...groups, uc]; }
+    if (!uc) { uc = { id: uid(), name: "Uncategorized", sort: nextSort(groups) }; groups = [...groups, uc]; }
     const base = `(${dateStamp()}) ${cat.name}`;
     const name = uniqueName(base, budget.categories.filter((c) => c.id !== cat.id).map((c) => c.name));
     const avail = available(budget, cat.id, month);
@@ -674,11 +675,70 @@ function moveInList(list, index, dir) {
   return next;
 }
 
+function bySort(a, b) {
+  const as = Number.isFinite(a.sort) ? a.sort : 0;
+  const bs = Number.isFinite(b.sort) ? b.sort : 0;
+  if (as !== bs) return as - bs;
+  return String(a.id || "").localeCompare(String(b.id || ""));
+}
+
+function reindexSort(list) {
+  return list.map((item, i) => ({ ...item, sort: i }));
+}
+
+function nextSort(list) {
+  return (list || []).reduce((m, x) => Math.max(m, Number.isFinite(x.sort) ? x.sort : -1), -1) + 1;
+}
+
+function reindexIfNeeded(list) {
+  let max = list.reduce((m, x) => Math.max(m, Number.isFinite(x.sort) ? x.sort : -1), -1);
+  const filled = list.map((item) => {
+    if (Number.isFinite(item.sort)) return item;
+    max += 1;
+    return { ...item, sort: max };
+  });
+  return filled.sort(bySort);
+}
+
+
+export function placeGroup(budget, id, beforeGroupId) {
+  const groups = [...(budget.categoryGroups || [])].sort(bySort);
+  const idx = groups.findIndex((g) => g.id === id);
+  if (idx < 0 || beforeGroupId === id) return budget;
+  const [g] = groups.splice(idx, 1);
+  if (beforeGroupId) {
+    const newIdx = groups.findIndex((gg) => gg.id === beforeGroupId);
+    groups.splice(newIdx < 0 ? groups.length : newIdx, 0, g);
+  } else {
+    groups.push(g);
+  }
+  return touch(budget, { categoryGroups: reindexSort(groups) });
+}
+
+export function placeCategory(budget, id, targetGroupId, beforeCatId) {
+  const cats = [...(budget.categories || [])].sort(bySort);
+  const cat = cats.find((c) => c.id === id);
+  if (!cat || beforeCatId === id) return budget;
+  const others = cats.filter((c) => c.id !== id);
+  const updated = { ...cat, groupId: targetGroupId };
+  let newArr = [];
+  if (beforeCatId) {
+    others.forEach((c) => { if (c.id === beforeCatId) newArr.push(updated); newArr.push(c); });
+    if (!newArr.includes(updated)) newArr.push(updated);
+  } else {
+    const groupCats = others.filter((c) => c.groupId === targetGroupId);
+    const lastId = groupCats[groupCats.length - 1]?.id;
+    if (lastId) others.forEach((c) => { newArr.push(c); if (c.id === lastId) newArr.push(updated); });
+    else newArr = [...others, updated];
+  }
+  return touch(budget, { categories: reindexSort(newArr) });
+}
+
 export function addGroup(budget, name) {
   const titled = toTitleCase((name || "").trim());
   if (!titled) return budget;
   if ((budget.categoryGroups || []).some((g) => g.name.toLowerCase() === titled.toLowerCase())) return budget;
-  return touch(budget, { categoryGroups: [...(budget.categoryGroups || []), { id: uid(), name: titled }] });
+  return touch(budget, { categoryGroups: [...(budget.categoryGroups || []), { id: uid(), name: titled, sort: nextSort(budget.categoryGroups) }] });
 }
 
 export function renameGroup(budget, id, name) {
@@ -693,7 +753,7 @@ export function deleteGroup(budget, id) {
   if (!group || group.name === "Credit Card Payments" || group.name === "Uncategorized") return budget;
   let groups = budget.categoryGroups.filter((g) => g.id !== id);
   let uc = groups.find((g) => g.name === "Uncategorized");
-  if (!uc) { uc = { id: uid(), name: "Uncategorized" }; groups = [...groups, uc]; }
+  if (!uc) { uc = { id: uid(), name: "Uncategorized", sort: nextSort(groups) }; groups = [...groups, uc]; }
   return touch(budget, {
     categoryGroups: groups,
     categories: (budget.categories || []).map((c) => c.groupId === id ? { ...c, groupId: uc.id } : c),
@@ -701,22 +761,24 @@ export function deleteGroup(budget, id) {
 }
 
 export function moveGroup(budget, id, dir) {
-  const i = (budget.categoryGroups || []).findIndex((g) => g.id === id);
-  return touch(budget, { categoryGroups: moveInList(budget.categoryGroups, i, dir) });
+  const groups = [...(budget.categoryGroups || [])].sort(bySort);
+  const i = groups.findIndex((g) => g.id === id);
+  const next = moveInList(groups, i, dir);
+  if (next === groups) return budget;
+  return touch(budget, { categoryGroups: reindexSort(next) });
 }
 
 export function moveCategory(budget, id, dir) {
   const cat = (budget.categories || []).find((c) => c.id === id);
   if (!cat) return budget;
-  const inGroup = budget.categories.filter((c) => c.groupId === cat.groupId);
+  const all = [...budget.categories].sort(bySort);
+  const inGroup = all.filter((c) => c.groupId === cat.groupId);
   const i = inGroup.findIndex((c) => c.id === id);
   const j = i + dir;
   if (i < 0 || j < 0 || j >= inGroup.length) return budget;
-  const order = inGroup.slice();
-  const [item] = order.splice(i, 1);
-  order.splice(j, 0, item);
-  const rest = budget.categories.filter((c) => c.groupId !== cat.groupId);
-  return touch(budget, { categories: [...rest, ...order] });
+  const target = inGroup[j];
+  const beforeId = dir > 0 ? (inGroup[j + 1]?.id || null) : target.id;
+  return placeCategory(budget, id, cat.groupId, beforeId);
 }
 
 export function zeroAccountByUnassign(budget, accountId, month, pulls) {
@@ -855,8 +917,8 @@ export function normalizeBudget(b) {
     ownerId: b.ownerId || null,
     accounts: (b.accounts || []).map((a) => ({ balance: 0, archived: false, type: "checking", ...a })),
     creditCards: (b.creditCards || []).map((c) => ({ balance: 0, archived: false, ...c })),
-    categoryGroups: b.categoryGroups || [],
-    categories: (b.categories || []).map((c) => ({ rollover: "rollover", archived: false, ...c })),
+    categoryGroups: reindexIfNeeded(b.categoryGroups || []),
+    categories: reindexIfNeeded((b.categories || []).map((c) => ({ rollover: "rollover", archived: false, ...c }))),
     monthlyBudgets: b.monthlyBudgets || {},
     inflows: b.inflows || {},
     transactions: (b.transactions || []).map((tx) => tx.originalPayee !== undefined ? tx : { ...tx, originalPayee: tx.payee }),

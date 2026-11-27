@@ -8,6 +8,7 @@ import {
   setAssigned, moveMoney, coverOverspending, planClawback, applyClawback,
   computeMonthAssignments, applyAssignments, setCategory, addCategory, archiveCategory,
   deleteCategory, setMonthNote, addGroup, renameGroup, deleteGroup, moveGroup, moveCategory,
+  placeGroup, placeCategory,
 } from "../mutate.js?v=154";
 import { collectReminders } from "../notify.js?v=154";
 import { openMissingSide, openTx } from "./transactions.js?v=154";
@@ -173,6 +174,153 @@ function openNotePeek(ctx, cat, monthNote, persistentNote) {
   }
 }
 
+
+function sortKey(a, b) {
+  const as = Number.isFinite(a.sort) ? a.sort : 0;
+  const bs = Number.isFinite(b.sort) ? b.sort : 0;
+  if (as !== bs) return as - bs;
+  return String(a.id || "").localeCompare(String(b.id || ""));
+}
+
+const drag = { pending: null, info: null, drop: null, preCollapsed: null, ctx: null, bound: false };
+
+function clearDragStyle() {
+  document.documentElement.style.touchAction = "";
+  document.body.style.touchAction = "";
+  document.body.style.userSelect = "";
+  document.body.style.webkitUserSelect = "";
+}
+
+function clearDrag() {
+  drag.pending = null;
+  drag.info = null;
+  drag.drop = null;
+  drag.preCollapsed = null;
+  clearDragStyle();
+}
+
+function bindReorderListeners(ctx) {
+  drag.ctx = ctx;
+  if (drag.bound) return;
+  drag.bound = true;
+  const THRESH = 8;
+  const pointOf = (e) => (e.touches ? e.touches[0] : e);
+  const onMove = (e) => {
+    const ctxNow = drag.ctx;
+    if (!ctxNow) return;
+    if (drag.info) {
+      e.preventDefault?.();
+      const point = pointOf(e);
+      if (!point) return;
+      const el = document.elementFromPoint(point.clientX, point.clientY);
+      const budget = ctxNow.budget();
+      if (drag.info.type === "category") {
+        const catEl = el?.closest("[data-dnd-cat]");
+        const hdrEl = el?.closest("[data-dnd-grouphdr]");
+        if (catEl) {
+          const rect = catEl.getBoundingClientRect();
+          const groupId = catEl.dataset.dndGroup;
+          const catId = catEl.dataset.dndCat;
+          let beforeId = catId;
+          if (point.clientY > rect.top + rect.height / 2) {
+            const groupCats = (budget.categories || []).filter((c) => c.groupId === groupId && !c.archived).sort(sortKey);
+            const idx = groupCats.findIndex((c) => c.id === catId);
+            beforeId = groupCats[idx + 1]?.id || null;
+          }
+          const next = { groupId, beforeId };
+          if (drag.drop?.groupId !== next.groupId || drag.drop?.beforeId !== next.beforeId) {
+            drag.drop = next;
+            ctxNow.render();
+          }
+        } else if (hdrEl) {
+          const groupId = hdrEl.dataset.dndGrouphdr;
+          const groupCats = (budget.categories || []).filter((c) => c.groupId === groupId && !c.archived).sort(sortKey);
+          const next = { groupId, beforeId: groupCats[0]?.id || null };
+          if (drag.drop?.groupId !== next.groupId || drag.drop?.beforeId !== next.beforeId) {
+            drag.drop = next;
+            ctxNow.render();
+          }
+        }
+      } else if (drag.info.type === "group") {
+        const hdrEl = el?.closest("[data-dnd-grouphdr]");
+        if (hdrEl) {
+          const rect = hdrEl.getBoundingClientRect();
+          const groupId = hdrEl.dataset.dndGrouphdr;
+          let beforeGroupId = groupId;
+          if (point.clientY > rect.top + rect.height / 2) {
+            const groups = [...(budget.categoryGroups || [])].sort(sortKey);
+            const idx = groups.findIndex((g) => g.id === groupId);
+            beforeGroupId = groups[idx + 1]?.id || null;
+          }
+          if (drag.drop?.beforeGroupId !== beforeGroupId) {
+            drag.drop = { beforeGroupId };
+            ctxNow.render();
+          }
+        }
+      }
+    } else if (drag.pending) {
+      e.preventDefault?.();
+      const point = pointOf(e);
+      if (!point) return;
+      const dx = Math.abs(point.clientX - drag.pending.startX);
+      const dy = Math.abs(point.clientY - drag.pending.startY);
+      if (dx > THRESH || dy > THRESH) {
+        const { type, id } = drag.pending;
+        if (type === "group") {
+          drag.preCollapsed = { ...ctxNow.ui.collapsed };
+          const all = {};
+          for (const g of ctxNow.budget().categoryGroups || []) all[g.id] = true;
+          ctxNow.ui.collapsed = all;
+        }
+        document.body.style.userSelect = "none";
+        document.body.style.webkitUserSelect = "none";
+        drag.info = { type, id };
+        drag.pending = null;
+        ctxNow.render();
+      }
+    }
+  };
+  const onUp = () => {
+    const ctxNow = drag.ctx;
+    if (drag.info && ctxNow) {
+      const { type, id } = drag.info;
+      const dt = drag.drop;
+      if (dt) {
+        if (type === "category") ctxNow.updateBudget((b) => placeCategory(b, id, dt.groupId, dt.beforeId));
+        else ctxNow.updateBudget((b) => placeGroup(b, id, dt.beforeGroupId));
+      }
+      if (type === "group" && drag.preCollapsed) ctxNow.ui.collapsed = drag.preCollapsed;
+      const again = drag.ctx;
+      clearDrag();
+      drag.ctx = again;
+      ctxNow.render();
+    } else {
+      clearDragStyle();
+      drag.pending = null;
+    }
+  };
+  window.addEventListener("mousemove", onMove);
+  window.addEventListener("mouseup", onUp);
+  window.addEventListener("touchmove", onMove, { passive: false });
+  window.addEventListener("touchend", onUp);
+}
+
+function bindDragHandle(el, type, id) {
+  const start = (e) => {
+    if (e.button != null && e.button !== 0) return;
+    e.stopPropagation();
+    const pt = e.touches ? e.touches[0] : e;
+    if (!pt) return;
+    drag.pending = { type, id, startX: pt.clientX, startY: pt.clientY };
+    if (e.touches) {
+      document.documentElement.style.touchAction = "none";
+      document.body.style.touchAction = "none";
+    }
+  };
+  el.addEventListener("mousedown", start);
+  el.addEventListener("touchstart", start, { passive: true });
+}
+
 export function renderBudget(root, ctx) {
   const budget = ctx.budget();
   if (!budget) { root.append(h("p", { text: "No budget selected." })); return; }
@@ -180,6 +328,8 @@ export function renderBudget(root, ctx) {
   const today = monthKey();
   const snap = budgetSnapshot(budget, month, today);
   const collapsed = ctx.ui.collapsed;
+  const reorder = !!ctx.ui.reorderMode;
+  if (reorder) bindReorderListeners(ctx);
   const ro = ctx.readOnly();
   const showAct = showActivityCol();
   const showAssign = snap.free > 0 && openGoalCategories(budget, snap, month).length > 0;
@@ -208,6 +358,20 @@ export function renderBudget(root, ctx) {
       h("span", { class: "bud-needed", text: `· ${fmt(needed)} still needed` }),
     )
     : null;
+
+  const reorderBar = ro ? null : h("div", { class: "bud-reorder-bar" },
+    h("button", {
+      class: reorder ? "bud-reorder on" : "bud-reorder",
+      type: "button",
+      text: reorder ? "✓ Done" : "↕ Reorder",
+      onclick: () => {
+        ctx.ui.reorderMode = !ctx.ui.reorderMode;
+        ctx.ui.avgHintCatId = null;
+        if (!ctx.ui.reorderMode) clearDrag();
+        ctx.render();
+      },
+    }),
+  );
 
   const cols = h("div", { class: budgetGridClass() + " bud-cols" },
     h("span", { text: "Category" }),
@@ -258,19 +422,31 @@ export function renderBudget(root, ctx) {
   }
 
   const groups = h("div", { class: "bud-groups" });
-  for (const g of budget.categoryGroups || []) {
-    const cats = (budget.categories || []).filter((c) => c.groupId === g.id && !c.archived);
+  for (const g of [...(budget.categoryGroups || [])].sort(sortKey)) {
+    const cats = (budget.categories || []).filter((c) => c.groupId === g.id && !c.archived).sort(sortKey);
     if (!cats.length && g.name === "Uncategorized") continue;
     const open = !collapsed[g.id];
     const gB = cats.reduce((s, c) => s + Number(snap.budgeted[c.id] || 0), 0);
     const gA = cats.reduce((s, c) => s + Number(snap.activity[c.id] || 0), 0);
     const gAv = cats.reduce((s, c) => s + Number(snap.available[c.id] || 0), 0);
     const sec = h("section", { class: "bud-group" });
-    const gHead = h("div", { class: "bud-group-h " + budgetGridClass() });
+    const isDraggedGroup = reorder && drag.info?.type === "group" && drag.info.id === g.id;
+    const groupDropBefore = reorder && drag.info?.type === "group" && drag.drop?.beforeGroupId === g.id;
+    const visibleGroups = [...(budget.categoryGroups || [])].sort(sortKey).filter((gg) => {
+      const c2 = (budget.categories || []).filter((c) => c.groupId === gg.id && !c.archived);
+      return !(c2.length === 0 && gg.name === "Uncategorized");
+    });
+    const lastG = visibleGroups[visibleGroups.length - 1]?.id;
+    const groupDropAfter = reorder && drag.info?.type === "group" && drag.drop?.beforeGroupId == null && g.id === lastG;
+    const catDropInEmpty = reorder && drag.info?.type === "category" && drag.drop?.groupId === g.id && cats.length === 0;
+    const gHead = h("div", {
+      class: "bud-group-h " + budgetGridClass() + (reorder ? " reorder" : "") + (isDraggedGroup ? " dragging" : "") + (groupDropBefore || catDropInEmpty ? " drop-before" : "") + (groupDropAfter ? " drop-after" : ""),
+      "data-dnd-grouphdr": g.id,
+    });
     const nameBtn = h("button", {
       class: "bud-group-name",
       type: "button",
-      onclick: () => { collapsed[g.id] = !collapsed[g.id]; ctx.render(); },
+      onclick: () => { if (reorder) return; collapsed[g.id] = !collapsed[g.id]; ctx.render(); },
     }, h("span", { class: "bud-chev", text: open ? "▼" : "▶" }), g.name);
     gHead.append(nameBtn);
     gHead.append(h("div", { class: `bud-gval ${gB ? "" : "zero"}`, text: fmt(gB) }));
@@ -279,14 +455,15 @@ export function renderBudget(root, ctx) {
         class: `bud-gval ${activityClass(gA)}`,
         text: fmtActivity(gA),
       });
-      if (Math.abs(gA) > 0.005) {
+      if (Math.abs(gA) > 0.005 && !reorder) {
         actEl.classList.add("linkish");
         actEl.addEventListener("click", (e) => { e.stopPropagation(); goMonthActivity(ctx, { groupId: g.id }); });
       }
       gHead.append(actEl);
     }
     gHead.append(h("div", { class: `bud-gval avail ${availableClass(gAv)}`, text: fmt(gAv) }));
-    bindContextMenu(gHead, () => [
+    if (reorder) bindDragHandle(gHead, "group", g.id);
+    else bindContextMenu(gHead, () => [
       { label: "✏️ Edit Group", edit: true, onClick: () => openGroup(ctx, g) },
     ], { readOnly: ro });
     sec.append(gHead);
@@ -337,7 +514,7 @@ export function renderBudget(root, ctx) {
     ),
   );
 
-  root.append(h("div", { class: "bud-view" }, tiles, banner, cols, notices, groups, archivedBox, totals));
+  root.append(h("div", { class: "bud-view" }, tiles, banner, reorderBar, cols, notices, groups, archivedBox, totals));
   if (ctx.ui.focusCat) {
     const id = ctx.ui.focusCat;
     ctx.ui.focusCat = null;
@@ -405,8 +582,18 @@ function categoryRow(ctx, cat, snap, month, today) {
   const ro = ctx.readOnly();
   const showAct = showActivityCol();
   const hintOn = ctx.ui.avgHintCatId === cat.id;
+  const reorder = !!ctx.ui.reorderMode;
+  const isDragged = reorder && drag.info?.type === "category" && drag.info.id === cat.id;
+  const groupCats = (ctx.budget().categories || []).filter((c) => c.groupId === cat.groupId && !c.archived).sort(sortKey);
+  const isLast = groupCats[groupCats.length - 1]?.id === cat.id;
+  const dropBefore = reorder && drag.info?.type === "category" && drag.drop?.groupId === cat.groupId && drag.drop?.beforeId === cat.id;
+  const dropAfter = reorder && drag.info?.type === "category" && drag.drop?.groupId === cat.groupId && drag.drop?.beforeId == null && isLast;
 
-  const wrap = h("div", { class: "bud-cat" });
+  const wrap = h("div", {
+    class: "bud-cat" + (reorder ? " reorder" : "") + (isDragged ? " dragging" : "") + (dropBefore ? " drop-before" : "") + (dropAfter ? " drop-after" : ""),
+    "data-dnd-cat": cat.id,
+    "data-dnd-group": cat.groupId,
+  });
   const row = h("div", { class: "bud-cat-row " + budgetGridClass() });
 
   const nameCell = h("div", { class: "bud-cat-name" });
@@ -415,7 +602,7 @@ function categoryRow(ctx, cat, snap, month, today) {
     type: "button",
     text: cat.name,
     onclick: () => {
-      if (cat.creditCardId) return;
+      if (reorder || cat.creditCardId) return;
       ctx.ui.avgHintCatId = hintOn ? null : cat.id;
       ctx.render();
     },
@@ -467,7 +654,7 @@ function categoryRow(ctx, cat, snap, month, today) {
   const built = amountInput({
     value: budgeted,
     allowNegative: true,
-    disabled: ro,
+    disabled: ro || reorder,
     label: cat.name,
     onCommit: (val) => commitAssigned(ctx, cat, month, val),
   });
@@ -515,7 +702,8 @@ function categoryRow(ctx, cat, snap, month, today) {
     }
   }
 
-  bindContextMenu(wrap, () => [
+  if (reorder) bindDragHandle(wrap, "category", cat.id);
+  else bindContextMenu(wrap, () => [
     { label: "⚙️ Category Settings", edit: true, onClick: () => openCategory(ctx, cat) },
     { label: cat.archived ? "↩ Restore Category" : "🗂 Archive Category", edit: true, onClick: () => ctx.updateBudget((b) => archiveCategory(b, cat.id, month)) },
     { label: "📝 Add Note for This Month", edit: true, onClick: () => openNote(ctx, cat) },

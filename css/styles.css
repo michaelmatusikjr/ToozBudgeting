@@ -1387,3 +1387,51 @@ input, textarea, select, [contenteditable="true"] {
   font-family: inherit;
   cursor: pointer;
 }
+
+/* WU-11: reorder mode + drag */
+.bud-reorder-bar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 4px 12px 0;
+  background: var(--bg);
+}
+.bud-reorder {
+  background: transparent;
+  color: var(--muted);
+  border: 1.5px solid var(--line);
+  border-radius: 7px;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  font-family: inherit;
+}
+.bud-reorder.on {
+  background: var(--purple);
+  color: #fff;
+  border-color: var(--purple);
+}
+.bud-group-h.reorder {
+  background: var(--group-bg-reorder);
+  cursor: grab;
+  touch-action: none;
+}
+.bud-cat.reorder .bud-cat-row {
+  background: var(--row-reorder);
+  cursor: grab;
+  touch-action: none;
+}
+.bud-cat.reorder { background: var(--row-reorder); }
+.bud-group-h.dragging,
+.bud-cat.dragging { opacity: 0.4; }
+.bud-group-h,
+.bud-cat {
+  border-top: 3px solid transparent;
+}
+.bud-group-h.drop-before,
+.bud-cat.drop-before { border-top-color: var(--purple); }
+.bud-group-h.drop-after { border-bottom: 3px solid var(--purple); }
+.bud-cat.drop-after { border-bottom: 3px solid var(--purple); }
+.bud-cat.reorder .bud-amt,
+.bud-cat.reorder .bud-avail,
+.bud-cat.reorder .bud-act { pointer-events: none; }
