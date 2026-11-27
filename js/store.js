@@ -290,8 +290,13 @@ export function exportData(state) {
 
 export function importData(parsed) {
   if (!parsed || typeof parsed !== "object") throw new Error("That file is not a ToozBudgeting backup.");
-  const budgets = parsed.budgets || parsed.data?.budgets;
-  if (!Array.isArray(budgets)) throw new Error("This doesn't look like a budget backup.");
+  const raw = parsed.budgets || parsed.data?.budgets;
+  if (!Array.isArray(raw)) throw new Error("This doesn't look like a budget backup.");
+  // JSX backups store CSV templates as importTemplates; ToozBudgeting uses csvMappings (DATA-01).
+  const budgets = raw.map((b) => ({
+    ...b,
+    csvMappings: b.csvMappings || b.importTemplates || {},
+  }));
   const users = Array.isArray(parsed.users) ? parsed.users : [];
   const state = migrate({
     sv: SCHEMA_VERSION,
