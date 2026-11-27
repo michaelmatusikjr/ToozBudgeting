@@ -289,8 +289,8 @@ async function listItems(env, session) {
   requireAction(session, "bank.view");
   const rows = (await env.DB.prepare("SELECT * FROM items WHERE household_id = ? AND status != 'removed' ORDER BY created_at").bind(session.householdId).all()).results || [];
   let visible = rows;
-  if (householdRole(session) !== "owner") {
-    const index = await plaidAccountIndex(env, session.householdId);
+  const index = householdRole(session) === "owner" ? null : await plaidAccountIndex(env, session.householdId);
+  if (index) {
     visible = rows.filter((row) => {
       let accounts = [];
       try { accounts = JSON.parse(row.accounts || "[]"); } catch { accounts = []; }
@@ -303,7 +303,15 @@ async function listItems(env, session) {
     });
   }
   return {
-    items: visible.map(itemView),
+    items: visible.map((row) => {
+      const view = itemView(row);
+      if (!index) return view;
+      view.accounts = (view.accounts || []).filter((a) => {
+        const budgets = index.mentioned.get(a.id);
+        return budgets && [...budgets].some((b) => budgetRole(session, b) != null);
+      });
+      return view;
+    }),
     used: Number(await meta(env, "items_created") || 0),
     cap: Number(env.ITEM_CAP || DEFAULT_CAP),
     canManage: householdRole(session) === "owner",
