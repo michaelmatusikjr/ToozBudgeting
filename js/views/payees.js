@@ -1,6 +1,5 @@
-import { h, btn, openSheet, field, textInput, toast, keepFocus, confirmDialog, btnRow } from "../ui.js?v=154";
-import { toTitleCase } from "../util.js?v=154";
-import { displayName, originalsForCanonical, buildMergeGroups, getSharedWordsDefault, payeeDefaultCategory, payeeSuggestedCategory, payeeCategoryState, payeeDirectory, isAccountPayee } from "../payees.js?v=154";
+import { h, btn, openSheet, field, textInput, toast, keepFocus, confirmDialog, btnRow, bindContextMenu, isTouchUi } from "../ui.js?v=154";
+import { displayName, originalsForCanonical, buildMergeGroups, getSharedWordsDefault, payeeCategoryState, payeeDirectory, isAccountPayee } from "../payees.js?v=154";
 import { setCanonical, unmergeOriginal, unmergeAll, setPayeeCategory, rejectMerge, clearPayeeCategories } from "../mutate.js?v=154";
 
 export function renderPayees(root, ctx) {
@@ -173,6 +172,7 @@ function payeeRow(ctx, name, count, selected, ro) {
   });
   const nameEl = h("button", { type: "button", class: "pay-name", text: name });
   if (isMerged) nameEl.append(h("span", { class: "pay-merged", text: `(${originals.length})` }));
+  nameEl.addEventListener("click", (e) => { e.stopPropagation(); openDisplayName(ctx, name); });
   const modes = h("div", { class: "pay-modes" });
   for (const m of ["none", "default", "suggested"]) {
     const on = mode === m;
@@ -204,6 +204,21 @@ function payeeRow(ctx, name, count, selected, ro) {
   }
   const num = h("button", { type: "button", class: "pay-count", text: String(count), onclick: () => ctx.go("transactions", { payee: name }) });
   row.append(box, nameEl, catCell, num);
+  bindContextMenu(row, () => {
+    const originalsNow = originalsForCanonical(ctx.budget(), name);
+    const merged = originalsNow.some((o) => o !== name);
+    return [
+      { label: "✏️ Set Display Name", edit: true, onClick: () => openDisplayName(ctx, name) },
+      {
+        label: merged ? `↩ Unmerge All (${originalsNow.length})` : "↩ Unmerge",
+        disabled: !merged,
+        edit: true,
+        onClick: () => askSure(`Unmerge all original payee names from "${name}"? Each original name will revert to displaying itself.`, () => {
+          ctx.updateBudget((b) => unmergeCanonical(b, originalsNow));
+        }),
+      },
+    ];
+  }, { readOnly: ro });
   return row;
 }
 
@@ -230,150 +245,263 @@ function openAddExclude(ctx) {
   });
 }
 
-function openPayee(ctx, name) {
+function askSure(message, onConfirm) {
+  const sheet = openSheet({
+    title: "Are you sure?",
+    body: (host) => {
+      host.append(
+        h("p", { class: "pay-dn-lede", text: message }),
+        btnRow(
+          { label: "No, Cancel", kind: "ghost", onClick: () => sheet.close() },
+          { label: "Yes, Continue", kind: "danger", onClick: () => { sheet.close(); onConfirm?.(); } },
+        ),
+      );
+    },
+  });
+}
+
+function unmergeCanonical(budget, originals) {
+  let next = budget;
+  for (const o of originals || []) next = unmergeOriginal(next, o);
+  return next;
+}
+
+function txCount(budget, name) {
+  return (budget.transactions || []).reduce((n, t) => n + (t.subtype !== "starting_balance" && displayName(budget, t.originalPayee || t.payee) === name ? 1 : 0), 0);
+}
+
+function openDisplayName(ctx, name) {
+  const ro = !!ctx.readOnly();
   const budget = ctx.budget();
   const originals = originalsForCanonical(budget, name);
+  const input = textInput({ placeholder: `Current: ${name}` });
+  if (ro) input.disabled = true;
+  const err = h("div", { class: "pay-dn-err" });
   const sheet = openSheet({
-    title: name,
+    title: "Payee Display Name",
+    closeLabel: "Discard",
     body: (host) => {
-      host.append(h("p", { class: "hint", text: originals.length > 1 ? `Merged from ${originals.join(", ")}` : "Not merged." }));
-      const def = h("select", { class: "input" }, h("option", { value: "", text: "No default" }));
-      const sug = h("select", { class: "input" }, h("option", { value: "", text: "No suggestion" }));
-      for (const g of budget.categoryGroups) {
-        const o1 = h("optgroup", { label: g.name });
-        const o2 = h("optgroup", { label: g.name });
-        for (const c of budget.categories.filter((c) => c.groupId === g.id && !c.archived && !c.creditCardId)) {
-          o1.append(h("option", { value: c.id, text: c.name }));
-          o2.append(h("option", { value: c.id, text: c.name }));
+      host.append(h("p", { class: "pay-dn-lede", text: `All transactions whose original payee name maps to "${name}" will show the selected name.` }));
+      const list = h("div", { class: "pay-dn-list" });
+      list.append(h("div", { class: "pay-dn-head", text: "Original names in this group" }));
+      for (const o of originals) {
+        const row = h("div", { class: "pay-dn-item" }, h("span", { text: o }));
+        if (!ro && o !== name) {
+          row.append(btn("↩ Unmerge", { kind: "ghost small", onClick: () => {
+            sheet.close();
+            askSure(`Unmerge "${o}"? Transactions with this original payee will revert to displaying "${o}" instead of "${name}".`, () => {
+              ctx.updateBudget((b) => unmergeOriginal(b, o));
+            });
+          }}));
         }
-        def.append(o1); sug.append(o2);
+        list.append(row);
       }
-      def.value = payeeDefaultCategory(budget, name) || "";
-      sug.value = payeeSuggestedCategory(budget, name) || "";
-      host.append(field("Default category", def), field("Suggested category", sug),
-        btn("Save categories", { block: true, onClick: () => {
-          ctx.updateBudget((b) => {
-            let n = setPayeeCategory(b, name, def.value, "default");
-            if (sug.value) n = setPayeeCategory(n, name, sug.value, "suggested");
-            return n;
-          });
+      host.append(list);
+      if (!ro && originals.length > 1) {
+        const all = btn(`↩ Unmerge All (${originals.length})`, { kind: "danger small", onClick: () => {
           sheet.close();
-        }}),
-        btn("See transactions", { kind: "ghost", block: true, onClick: () => { sheet.close(); ctx.go("transactions", { payee: name }); } }),
-      );
-      if (originals.length) {
-        host.append(h("p", { class: "kicker", text: "Original names" }));
-        for (const o of originals) {
-          host.append(h("div", { class: "line" }, h("span", { text: o }), btn("Unmerge", { kind: "quiet", onClick: () => { ctx.updateBudget((b) => unmergeOriginal(b, o)); sheet.close(); } })));
-        }
+          askSure(`Unmerge all ${originals.length} original payee names from "${name}"? Each will revert to displaying its own original name.`, () => {
+            ctx.updateBudget((b) => unmergeCanonical(b, originals));
+          });
+        }});
+        all.classList.add("pay-dn-all");
+        host.append(all);
       }
+      const saveBtn = btn("Close", { kind: "purple", onClick: () => {
+        const custom = input.value.trim();
+        if (!custom || custom === name || ro) { sheet.close(); return; }
+        ctx.updateBudget((b) => setCanonical(b, originalsForCanonical(b, name), custom));
+        sheet.close();
+      }});
+      input.addEventListener("input", () => {
+        const span = saveBtn.querySelector("span");
+        if (span) span.textContent = input.value.trim() ? "Apply" : "Close";
+        err.textContent = "";
+      });
+      host.append(
+        field("Set custom display name for all above", input),
+        err,
+        btnRow({ label: "Cancel", kind: "ghost", onClick: () => sheet.close() }, saveBtn),
+      );
     },
   });
 }
 
 function openMerge(ctx, preset) {
-  const budget = ctx.budget();
-  const names = payeeDirectory(budget).filter((n) => (budget.transactions || []).some((t) => displayName(budget, t.originalPayee || t.payee) === n && t.subtype !== "starting_balance") && !isAccountPayee(budget, n));
-  const picked = new Set(preset || []);
+  const names = [...(preset || [])];
+  let canonical = names[0] || "";
+  const input = textInput({ placeholder: "Type a new payee name..." });
+  const collide = h("div", { class: "pay-merge-collide" });
+  const opts = [];
   const sheet = openSheet({
-    title: "Merge payees",
+    title: "Merge Payees",
+    closeLabel: "Discard",
     body: (host) => {
-      const list = h("div", { class: "tx-list" });
-      for (const n of names.sort((a, b) => a.localeCompare(b))) {
-        list.append(h("label", { class: "line" },
-          h("input", { type: "checkbox", checked: picked.has(n), onchange: (e) => { if (e.target.checked) picked.add(n); else picked.delete(n); } }),
-          h("span", { text: n }),
-        ));
+      host.append(h("p", { class: "pay-merge-lede", text: "Choose which display name to keep, or enter your own. All original payee names in these groups will map to this display name." }));
+      for (const n of names) {
+        const lab = h("label", { class: "pay-merge-opt" });
+        const radio = h("input", { type: "radio", name: "pay-merge-canon" });
+        radio.addEventListener("change", () => { canonical = n; input.value = ""; sync(); });
+        lab.append(radio, h("span", { text: n }));
+        host.append(lab);
+        opts.push({ n, lab, radio });
       }
-      const canon = textInput({ value: preset ? getSharedWordsDefault(preset) : "", placeholder: "Canonical name" });
-      host.append(h("p", { class: "lede", text: "Transactions keep their original payee. The name you choose is what you’ll see." }), list, field("Display as", canon),
-        btn("Merge", { block: true, onClick: () => {
-          const chosen = [...picked];
-          if (chosen.length < 2) { toast("Pick at least two payees"); return; }
-          const display = toTitleCase((canon.value || chosen[0]).trim());
-          const originals = chosen.flatMap((n) => originalsForCanonical(budget, n));
-          ctx.updateBudget((b) => setCanonical(b, [...new Set(originals.length ? originals : chosen)], display));
-          sheet.close();
-          toast("Merged");
-        }}));
+      const save = btn("Merge", { kind: "purple", onClick: () => {
+        const finalCanonical = (input.value.trim() || canonical).trim();
+        if (!finalCanonical) return;
+        const originals = names.flatMap((n) => originalsForCanonical(ctx.budget(), n));
+        ctx.updateBudget((b) => setCanonical(b, [...new Set(originals)], finalCanonical));
+        ctx.ui.selectedPayees = new Set();
+        sheet.close();
+      }});
+      const sync = () => {
+        const custom = input.value.trim();
+        const finalCanonical = custom || canonical;
+        for (const o of opts) {
+          const on = !custom && canonical === o.n;
+          o.radio.checked = on;
+          o.lab.classList.toggle("on", on);
+        }
+        const dir = payeeDirectory(ctx.budget());
+        const hit = custom && dir.find((n) => n.toLowerCase() === custom.toLowerCase() && !names.includes(n));
+        collide.textContent = hit ? `"${hit}" is already a payee — it'll be merged into "${finalCanonical}" too.` : "";
+        save.disabled = !finalCanonical;
+      };
+      input.addEventListener("input", sync);
+      host.append(field("Or enter a custom display name", input), collide, btnRow(
+        { label: "Cancel", kind: "ghost", onClick: () => sheet.close() },
+        save,
+      ));
+      sync();
     },
   });
 }
 
+function toModalGroups(rawGroups) {
+  return rawGroups.map((g) => ({
+    names: [...g],
+    checked: [...g],
+    customName: getSharedWordsDefault(g),
+  }));
+}
+
+function currentSuggestionGroups(ctx) {
+  const budget = ctx.budget();
+  const shown = payeeDirectory(budget).filter((n) => txCount(budget, n));
+  return buildMergeGroups(shown, budget.rejectedMerges || [], budget.mergeExcludeWords || ["TST*"])
+    .map((names) => names.filter((n) => !isAccountPayee(budget, n)))
+    .filter((names) => names.length > 1);
+}
+
 function openSuggestions(ctx, groups) {
-  let left = groups.map((names) => names.filter((n) => !isAccountPayee(ctx.budget(), n))).filter((names) => names.length > 1);
-  let draft = null;
+  const start = toModalGroups((groups || currentSuggestionGroups(ctx)).map((names) => names.filter((n) => !isAccountPayee(ctx.budget(), n))).filter((names) => names.length > 1));
+  if (!start.length) return;
+  let state = { groups: start, currentIdx: 0 };
   let sheet;
-  const countOf = (budget, name) => (budget.transactions || []).reduce((n, t) => n + (t.subtype !== "starting_balance" && displayName(budget, t.originalPayee || t.payee) === name ? 1 : 0), 0);
-  const fresh = () => {
-    const budget = ctx.budget();
-    const shown = payeeDirectory(budget).filter((n) => countOf(budget, n));
-    return buildMergeGroups(shown, budget.rejectedMerges || [], budget.mergeExcludeWords || ["TST*"])
-      .map((names) => names.filter((n) => !isAccountPayee(budget, n)))
-      .filter((names) => names.length > 1);
+  const setTitle = () => {
+    const title = sheet?.content?.parentElement?.querySelector(".sheet-title");
+    if (title) title.textContent = `🔀 Suggested Merge (${state.currentIdx + 1} of ${state.groups.length})`;
   };
-  const paint = (host) => {
-    host.replaceChildren();
-    if (!left.length) {
+  const goNext = (updatedGroups) => {
+    const g = updatedGroups || state.groups;
+    state = { groups: g, currentIdx: state.currentIdx + 1 };
+    if (state.currentIdx >= state.groups.length) {
       sheet?.close();
-      toast("Suggestions finished");
+      const leftover = currentSuggestionGroups(ctx);
+      if (leftover.length) queueMicrotask(() => openSuggestions(ctx, leftover));
       return;
     }
-    const names = left[0];
-    const key = names.join("|||");
-    if (!draft || draft.key !== key) draft = { key, names, checked: new Set(names), custom: getSharedWordsDefault(names) };
-    const title = host.parentElement?.querySelector(".sheet-title");
-    if (title) title.textContent = left.length === 1 ? "Last suggestion" : `Suggestions · ${left.length} left`;
-    const budget = ctx.budget();
-    host.append(h("p", { class: "lede", text: "Check the ones that are the same payee. This stays open until you finish the list or close it." }));
-    for (const name of names) {
-      host.append(h("label", { class: "line" },
-        h("input", {
-          type: "checkbox",
-          checked: draft.checked.has(name),
-          onchange: (e) => {
-            if (e.target.checked) draft.checked.add(name);
-            else draft.checked.delete(name);
-            paint(host);
-          },
-        }),
-        h("span", {}, h("strong", { text: name }), h("span", { class: "muted", text: ` · ${countOf(budget, name)}` })),
-      ));
-    }
-    const canon = textInput({ value: draft.custom, placeholder: [...draft.checked][0] || "Display name" });
-    canon.addEventListener("input", () => { draft.custom = canon.value; });
-    host.append(
-      field("Display as", canon),
-      btn("Merge", {
-        block: true,
-        disabled: draft.checked.size < 2,
-        onClick: () => {
-          if (draft.checked.size < 2) { toast("Check at least two payees"); return; }
-          const chosen = [...draft.checked].filter((n) => !isAccountPayee(ctx.budget(), n));
-          if (chosen.length < 2) { toast("Accounts can’t be merged with payees"); return; }
-          const target = toTitleCase((draft.custom || chosen[0]).trim());
-          if (!target || isAccountPayee(ctx.budget(), target)) { toast("Pick a payee name, not an account"); return; }
-          const originals = chosen.flatMap((n) => originalsForCanonical(ctx.budget(), n));
-          const unchecked = names.filter((n) => !draft.checked.has(n));
-          ctx.updateBudget((b) => {
-            let next = setCanonical(b, [...new Set(originals.length ? originals : chosen)], target);
-            for (const un of unchecked) next = rejectMerge(next, [un, target]);
-            return next;
-          });
-          draft = null;
-          left = fresh();
-          paint(host);
-        },
-      }),
-      btn("Not the same", { kind: "quiet", block: true, onClick: () => {
-        ctx.updateBudget((b) => rejectMerge(b, names));
-        draft = null;
-        left = fresh();
-        paint(host);
-      }}),
-    );
+    paint();
   };
-  sheet = openSheet({ title: "Suggestions", body: paint });
+  const applyMerge = () => {
+    const grp = state.groups[state.currentIdx];
+    const checkedNames = grp.checked;
+    if (checkedNames.length < 2) { goNext(); return; }
+    const target = grp.customName.trim() ? grp.customName.trim() : checkedNames[0];
+    if (!target) { goNext(); return; }
+    const allOriginals = checkedNames.flatMap((cn) => originalsForCanonical(ctx.budget(), cn));
+    const uncheckedNames = grp.names.filter((n) => !checkedNames.includes(n));
+    ctx.updateBudget((b) => {
+      let next = setCanonical(b, [...new Set(allOriginals)], target);
+      for (const un of uncheckedNames) next = rejectMerge(next, [un, target]);
+      return next;
+    });
+    const budget = ctx.budget();
+    const shown = payeeDirectory(budget).filter((n) => txCount(budget, n));
+    const freshGroups = buildMergeGroups(shown, budget.rejectedMerges || [], budget.mergeExcludeWords || ["TST*"])
+      .map((names) => names.filter((n) => !isAccountPayee(budget, n)))
+      .filter((names) => names.length > 1);
+    const upcomingKeys = new Set(state.groups.slice(state.currentIdx + 1).map((g) => [...g.names].sort().join("|||")));
+    const newSuggestions = toModalGroups(freshGroups.filter((fg) => !upcomingKeys.has([...fg].sort().join("|||"))));
+    const updatedGroups = [
+      ...state.groups.slice(0, state.currentIdx + 1),
+      ...newSuggestions,
+      ...state.groups.slice(state.currentIdx + 1),
+    ];
+    goNext(updatedGroups);
+  };
+  const rejectGroup = () => {
+    const names = state.groups[state.currentIdx].names;
+    ctx.updateBudget((b) => rejectMerge(b, names));
+    goNext();
+  };
+  const paint = () => {
+    const host = sheet.content;
+    host.replaceChildren();
+    const grp = state.groups[state.currentIdx];
+    if (!grp) { goNext(); return; }
+    setTitle();
+    const checkedNames = grp.checked;
+    const budget = ctx.budget();
+    const ro = !!ctx.readOnly();
+    host.append(h("p", { class: "pay-suggest-lede", text: "These payees look like they might be the same. Check the ones to merge and pick a display name." }));
+    const list = h("div", { class: "pay-suggest-list" });
+    for (const n of grp.names) {
+      const on = checkedNames.includes(n);
+      const lab = h("label", { class: `pay-suggest-item${on ? " on" : ""}` });
+      const box = h("input", { type: "checkbox", checked: on, disabled: ro });
+      box.addEventListener("change", () => {
+        grp.checked = on ? checkedNames.filter((x) => x !== n) : [...checkedNames, n];
+        paint();
+      });
+      const count = txCount(budget, n);
+      lab.append(
+        box,
+        h("div", { class: "pay-suggest-meta" },
+          h("div", { class: "pay-suggest-name", text: n }),
+          h("div", { class: "pay-suggest-count", text: `${count} transaction${count !== 1 ? "s" : ""}` }),
+        ),
+      );
+      list.append(lab);
+    }
+    host.append(list);
+    const touch = isTouchUi();
+    const input = textInput({ value: grp.customName, placeholder: checkedNames[0] || "Display name..." });
+    if (touch) input.readOnly = true;
+    input.addEventListener("input", () => { grp.customName = input.value; });
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter" && grp.checked.length >= 2 && !ro) applyMerge(); });
+    input.addEventListener("focus", () => { if (touch) input.readOnly = false; });
+    input.addEventListener("blur", () => { if (touch) input.readOnly = true; });
+    input.addEventListener("click", () => {
+      if (touch && input.readOnly) {
+        input.readOnly = false;
+        setTimeout(() => input.focus(), 0);
+      }
+    });
+    host.append(field("Merge display name (leave blank to use first checked)", input));
+    const mergeLabel = `✓ Merge ${checkedNames.length} payees${state.currentIdx + 1 < state.groups.length ? ` → Next (${state.groups.length - state.currentIdx - 1} left)` : ""}`;
+    const mergeBtn = btn(mergeLabel, { kind: "purple", disabled: ro || checkedNames.length < 2, onClick: applyMerge });
+    mergeBtn.addEventListener("mousedown", (e) => e.preventDefault());
+    const rejectBtn = btn("Do not merge any of these payees", { kind: "ghost", disabled: ro, onClick: rejectGroup });
+    rejectBtn.addEventListener("mousedown", (e) => e.preventDefault());
+    host.append(h("div", { class: "pay-suggest-actions" }, mergeBtn, rejectBtn));
+  };
+  sheet = openSheet({
+    title: `🔀 Suggested Merge (1 of ${start.length})`,
+    body: () => {},
+    onClose: () => { /* closing skips the rest, like the JSX */ },
+  });
+  paint();
 }
 
 function openExclude(ctx) {
