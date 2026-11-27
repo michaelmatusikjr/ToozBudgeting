@@ -1,12 +1,12 @@
-import { h, btn, openSheet, field, textInput, toast, keepFocus } from "../ui.js?v=136";
-import { toTitleCase } from "../util.js?v=136";
-import { canonicalNames, displayName, originalsForCanonical, buildMergeGroups, getSharedWordsDefault, payeeDefaultCategory, payeeSuggestedCategory } from "../payees.js?v=136";
-import { setCanonical, unmergeOriginal, unmergeAll, setPayeeCategory, rejectMerge, clearPayeeCategories } from "../mutate.js?v=136";
+import { h, btn, openSheet, field, textInput, toast, keepFocus } from "../ui.js?v=137";
+import { toTitleCase } from "../util.js?v=137";
+import { displayName, originalsForCanonical, buildMergeGroups, getSharedWordsDefault, payeeDefaultCategory, payeeSuggestedCategory, payeeDirectory, isAccountPayee } from "../payees.js?v=137";
+import { setCanonical, unmergeOriginal, unmergeAll, setPayeeCategory, rejectMerge, clearPayeeCategories } from "../mutate.js?v=137";
 
 export function renderPayees(root, ctx) {
   const budget = ctx.budget();
   const q = (ctx.ui.payeeQuery || "").toLowerCase();
-  const names = canonicalNames(budget).filter((n) => !q || n.toLowerCase().includes(q)).sort((a, b) => a.localeCompare(b));
+  const names = payeeDirectory(budget).filter((n) => !q || n.toLowerCase().includes(q)).sort((a, b) => a.localeCompare(b));
   const counts = {};
   for (const tx of budget.transactions || []) {
     if (tx.subtype === "starting_balance") continue;
@@ -89,7 +89,7 @@ function openPayee(ctx, name) {
 
 function openMerge(ctx, preset) {
   const budget = ctx.budget();
-  const names = canonicalNames(budget).filter((n) => (budget.transactions || []).some((t) => displayName(budget, t.originalPayee || t.payee) === n && t.subtype !== "starting_balance"));
+  const names = payeeDirectory(budget).filter((n) => (budget.transactions || []).some((t) => displayName(budget, t.originalPayee || t.payee) === n && t.subtype !== "starting_balance") && !isAccountPayee(budget, n));
   const picked = new Set(preset || []);
   const sheet = openSheet({
     title: "Merge payees",
@@ -117,22 +117,79 @@ function openMerge(ctx, preset) {
 }
 
 function openSuggestions(ctx, groups) {
-  const sheet = openSheet({
-    title: "Suggestions",
-    body: (host) => {
-      for (const g of groups) {
-        const shared = getSharedWordsDefault(g);
-        host.append(h("div", { class: "pair" },
-          h("strong", { text: g.join(" · ") }),
-          h("p", { class: "hint", text: shared ? `Suggested name: ${shared}` : "" }),
-          h("div", { class: "row gap" },
-            btn("Merge", { onClick: () => { sheet.close(); openMerge(ctx, g); } }),
-            btn("Not the same", { kind: "quiet", onClick: () => { ctx.updateBudget((b) => rejectMerge(b, g)); sheet.close(); toast("Won’t suggest that pair"); } }),
-          ),
-        ));
-      }
-    },
-  });
+  let left = groups.map((names) => names.filter((n) => !isAccountPayee(ctx.budget(), n))).filter((names) => names.length > 1);
+  let draft = null;
+  let sheet;
+  const countOf = (budget, name) => (budget.transactions || []).reduce((n, t) => n + (t.subtype !== "starting_balance" && displayName(budget, t.originalPayee || t.payee) === name ? 1 : 0), 0);
+  const fresh = () => {
+    const budget = ctx.budget();
+    const shown = payeeDirectory(budget).filter((n) => countOf(budget, n));
+    return buildMergeGroups(shown, budget.rejectedMerges || [], budget.mergeExcludeWords || ["TST*"])
+      .map((names) => names.filter((n) => !isAccountPayee(budget, n)))
+      .filter((names) => names.length > 1);
+  };
+  const paint = (host) => {
+    host.replaceChildren();
+    if (!left.length) {
+      sheet?.close();
+      toast("Suggestions finished");
+      return;
+    }
+    const names = left[0];
+    const key = names.join("|||");
+    if (!draft || draft.key !== key) draft = { key, names, checked: new Set(names), custom: getSharedWordsDefault(names) };
+    const title = host.parentElement?.querySelector(".sheet-title");
+    if (title) title.textContent = left.length === 1 ? "Last suggestion" : `Suggestions · ${left.length} left`;
+    const budget = ctx.budget();
+    host.append(h("p", { class: "lede", text: "Check the ones that are the same payee. This stays open until you finish the list or close it." }));
+    for (const name of names) {
+      host.append(h("label", { class: "line" },
+        h("input", {
+          type: "checkbox",
+          checked: draft.checked.has(name),
+          onchange: (e) => {
+            if (e.target.checked) draft.checked.add(name);
+            else draft.checked.delete(name);
+            paint(host);
+          },
+        }),
+        h("span", {}, h("strong", { text: name }), h("span", { class: "muted", text: ` · ${countOf(budget, name)}` })),
+      ));
+    }
+    const canon = textInput({ value: draft.custom, placeholder: [...draft.checked][0] || "Display name" });
+    canon.addEventListener("input", () => { draft.custom = canon.value; });
+    host.append(
+      field("Display as", canon),
+      btn("Merge", {
+        block: true,
+        disabled: draft.checked.size < 2,
+        onClick: () => {
+          if (draft.checked.size < 2) { toast("Check at least two payees"); return; }
+          const chosen = [...draft.checked].filter((n) => !isAccountPayee(ctx.budget(), n));
+          if (chosen.length < 2) { toast("Accounts can’t be merged with payees"); return; }
+          const target = toTitleCase((draft.custom || chosen[0]).trim());
+          if (!target || isAccountPayee(ctx.budget(), target)) { toast("Pick a payee name, not an account"); return; }
+          const originals = chosen.flatMap((n) => originalsForCanonical(ctx.budget(), n));
+          const unchecked = names.filter((n) => !draft.checked.has(n));
+          ctx.updateBudget((b) => {
+            let next = setCanonical(b, [...new Set(originals.length ? originals : chosen)], target);
+            for (const un of unchecked) next = rejectMerge(next, [un, target]);
+            return next;
+          });
+          draft = null;
+          left = fresh();
+          paint(host);
+        },
+      }),
+      btn("Not the same", { kind: "quiet", block: true, onClick: () => {
+        ctx.updateBudget((b) => rejectMerge(b, names));
+        draft = null;
+        left = fresh();
+        paint(host);
+      }}),
+    );
+  };
+  sheet = openSheet({ title: "Suggestions", body: paint });
 }
 
 function openExclude(ctx) {

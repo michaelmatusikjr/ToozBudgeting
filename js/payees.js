@@ -1,4 +1,4 @@
-import { normalizeMerge, uid } from "./util.js?v=136";
+import { normalizeMerge, uid } from "./util.js?v=137";
 
 export const wordsMatch = (a, b) => {
   if (!a || !b || a.length < 3 || b.length < 3) return false;
@@ -17,7 +17,7 @@ export function getSharedWordsDefault(names) {
 
 export function buildMergeGroups(canonicals, rejected = [], excludeWords = []) {
   if (!canonicals || canonicals.length < 2) return [];
-  const rejectedSet = new Set(rejected);
+  const rejectedSet = pairKeys(rejected);
   const isPairRejected = (a, b) => rejectedSet.has([a, b].sort().join("|||"));
   const excludeNormed = new Set(excludeWords.map((w) => normalizeMerge(w)).filter((w) => w.length > 0));
   const normed = canonicals.map((n) => {
@@ -49,6 +49,54 @@ export function buildMergeGroups(canonicals, rejected = [], excludeWords = []) {
   collect("first");
   collect("any");
   return groups;
+}
+
+/** A stored rejection may be one pair, or an older key that listed the whole group. */
+function pairKeys(rejected) {
+  const set = new Set();
+  for (const raw of rejected || []) {
+    const parts = String(raw).split("|||").filter(Boolean);
+    for (let i = 0; i < parts.length; i++) {
+      for (let j = i + 1; j < parts.length; j++) set.add([parts[i], parts[j]].sort().join("|||"));
+    }
+  }
+  return set;
+}
+
+const accountKeys = new WeakMap();
+
+function accountKeySet(budget) {
+  let set = accountKeys.get(budget);
+  if (set) return set;
+  set = new Set();
+  const add = (name) => {
+    const raw = String(name || "").trim().toLowerCase();
+    if (!raw) return;
+    set.add(raw);
+    const key = normalizeMerge(name);
+    if (key) set.add(key);
+  };
+  for (const a of budget?.accounts || []) add(a.name);
+  for (const c of budget?.creditCards || []) add(c.name);
+  accountKeys.set(budget, set);
+  return set;
+}
+
+/** True when this string is an account or card, including "Transfer : Checking". Never a payee. */
+export function isAccountPayee(budget, name) {
+  if (!name || !budget) return false;
+  const set = accountKeySet(budget);
+  const raw = String(name).trim().toLowerCase();
+  const key = normalizeMerge(name);
+  if (set.has(raw) || (key && set.has(key))) return true;
+  const stripped = raw.replace(/^transfer\s*(:|to|from)\s+/, "").trim();
+  if (!stripped || stripped === raw) return false;
+  const sk = normalizeMerge(stripped);
+  return set.has(stripped) || (!!sk && set.has(sk));
+}
+
+export function payeeDirectory(budget) {
+  return canonicalNames(budget).filter((n) => n && !isAccountPayee(budget, n));
 }
 
 const payeeByName = new WeakMap();

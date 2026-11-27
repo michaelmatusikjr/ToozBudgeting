@@ -1,8 +1,8 @@
-import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, keepFocus } from "../ui.js?v=136";
-import { fmt, todayKey, toTitleCase, isCard, ccPayCat, makePayFrom, RTA } from "../util.js?v=136";
-import { displayName, payeeDefaultCategory, payeeSuggestedCategory, findFuzzyDuplicates } from "../payees.js?v=136";
-import { addTransaction, deleteTransactions, isLocked, setTxCategory, updateTransaction, replaceTransaction, confirmCategories } from "../mutate.js?v=136";
-import { parseCSV, guessColumnMapping, applyMapping } from "../csv.js?v=136";
+import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, keepFocus } from "../ui.js?v=137";
+import { fmt, todayKey, toTitleCase, isCard, ccPayCat, makePayFrom, RTA } from "../util.js?v=137";
+import { displayName, payeeDefaultCategory, payeeSuggestedCategory, findFuzzyDuplicates, isAccountPayee } from "../payees.js?v=137";
+import { addTransaction, deleteTransactions, isLocked, setTxCategory, updateTransaction, replaceTransaction, confirmCategories } from "../mutate.js?v=137";
+import { parseCSV, guessColumnMapping, applyMapping } from "../csv.js?v=137";
 
 export function renderTransactions(root, ctx) {
   const budget = ctx.budget();
@@ -259,7 +259,7 @@ export function openTx(ctx, existing) {
         suggest.replaceChildren();
         const q = payee.value.trim().toLowerCase();
         if (q.length < 1) return;
-        const names = [...new Set((budget.transactions || []).map((t) => displayName(budget, t.originalPayee || t.payee)).filter(Boolean))];
+        const names = [...new Set((budget.transactions || []).map((t) => displayName(budget, t.originalPayee || t.payee)).filter((n) => n && !isAccountPayee(budget, n)))];
         for (const n of names.filter((n) => n.toLowerCase().includes(q)).slice(0, 6)) {
           suggest.append(h("button", { type: "button", class: "sug", text: n, onclick: () => {
             payee.value = n; form.payee = n;

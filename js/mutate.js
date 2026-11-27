@@ -2,12 +2,12 @@
 import {
   uid, toTitleCase, monthKey, todayKey, nextMonth, prevMonth, isCard, isBank, ccPayCat,
   isPayFrom, payFromId, round2, deepClone,
-} from "./util.js?v=136";
-import { available, readyToAssign, getGoalMetrics, globalFree, furthestMonth, accountBalances } from "./calc.js?v=136";
+} from "./util.js?v=137";
+import { available, readyToAssign, getGoalMetrics, globalFree, furthestMonth, accountBalances } from "./calc.js?v=137";
 import {
   ensurePayee, prunePayees, findFuzzyDuplicates, runPaymentMatchScan, displayName,
   originalsForCanonical, payeeDefaultCategory, payeeSuggestedCategory,
-} from "./payees.js?v=136";
+} from "./payees.js?v=137";
 
 const stamp = () => new Date().toISOString();
 
@@ -626,9 +626,12 @@ export function setPayeeCategory(budget, canonical, categoryId, which) {
 }
 
 export function rejectMerge(budget, names) {
-  const key = [...names].sort().join("|||");
+  const list = [...names].filter(Boolean);
   const rejected = [...(budget.rejectedMerges || [])];
-  if (!rejected.includes(key)) rejected.push(key);
+  const add = (key) => { if (key && !rejected.includes(key)) rejected.push(key); };
+  for (let i = 0; i < list.length; i++) {
+    for (let j = i + 1; j < list.length; j++) add([list[i], list[j]].sort().join("|||"));
+  }
   return touch(budget, { rejectedMerges: rejected });
 }
 

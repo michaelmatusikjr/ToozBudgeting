@@ -25,7 +25,7 @@ export async function promptInstall() {
 
 export async function registerSW(onWaiting) {
   if (!("serviceWorker" in navigator)) return null;
-  const reg = await navigator.serviceWorker.register("./sw.js?v=136");
+  const reg = await navigator.serviceWorker.register("./sw.js?v=137");
   const watch = () => { if (reg.waiting) onWaiting?.(reg); };
   watch();
   reg.addEventListener("updatefound", () => {

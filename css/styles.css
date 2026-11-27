@@ -729,3 +729,13 @@ input[type="color"].input { padding: 4px; min-height: 48px; }
 @media (prefers-reduced-motion: reduce) {
   .btn, .link-row > .text-link, .group-foot .quiet-link, .notice-go { transition: none; }
 }
+*, *::before, *::after {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+input, textarea, select, [contenteditable="true"] {
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
+}

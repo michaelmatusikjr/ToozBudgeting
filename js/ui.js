@@ -1,5 +1,5 @@
 /** DOM helpers, toasts, sheets, and the amount pad. User text always goes through textContent. */
-import { evalMath, fmt, hasOp, round2 } from "./util.js?v=136";
+import { evalMath, fmt, hasOp, round2 } from "./util.js?v=137";
 
 export function h(tag, attrs, ...kids) {
   const el = document.createElement(tag);
@@ -41,8 +41,8 @@ export function icon(name) {
     back: '<path d="M15 5 8 12l7 7"/>',
     search: '<circle cx="11" cy="11" r="6"/><path d="m20 20-3.5-3.5"/>',
     check: '<path d="m5 12 5 5L20 7"/>',
-    undo: '<path d="M8 8H4v4"/><path d="M4 8a8 8 0 1 1-1 6"/>',
-    redo: '<path d="M16 8h4v4"/><path d="M20 8a8 8 0 1 0 1 6"/>',
+    undo: '<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5 5.5 5.5 0 0 1-5.5 5.5H11"/>',
+    redo: '<path d="m15 14 5-5-5-5"/><path d="M20 9H9.5A5.5 5.5 0 0 0 4 14.5 5.5 5.5 0 0 0 9.5 20H13"/>',
     chev: '<path d="m9 6 6 6-6 6"/>',
   };
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");

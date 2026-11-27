@@ -1,4 +1,4 @@
-const CACHE = "tooz-shell-v9";
+const CACHE = "tooz-shell-v10";
 const SHELL = [
   "./",
   "./index.html",
