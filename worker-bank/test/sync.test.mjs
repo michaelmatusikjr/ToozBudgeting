@@ -1,13 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { setup } from "./helpers.mjs";
+import { setup, grantAccess } from "./helpers.mjs";
 
 const rec = (id, kind, body, t, extra = {}) => ({ id, kind, budgetId: "b1", body, t, dev: "devA", deleted: false, ...extra });
 
 async function household(t) {
   const owner = await t.signIn();
-  for (const [email, role, scopes] of [["wife@example.com", "owner"], ["kid@example.com", "viewer"], ["teen@example.com", "member", { categories: { b1: ["fun"] } }]]) {
-    await t.call("POST", "/household/invites", { email, role, scopes }, owner.auth);
+  for (const [email, role] of [["wife@example.com", "owner"], ["kid@example.com", "viewer"], ["teen@example.com", "member"]]) {
+    await t.call("POST", "/household/invites", { email, role }, owner.auth);
   }
   return { owner, wife: await t.signIn("wife@example.com"), kid: await t.signIn("kid@example.com"), teen: await t.signIn("teen@example.com") };
 }
@@ -77,14 +77,16 @@ test("viewers are read-only on the server", async () => {
   const t = setup();
   const { owner, kid } = await household(t);
   await t.call("POST", "/sync/push", { records: [rec("tx:1", "transaction", { amount: 1 }, 1000)] }, owner.auth);
+  grantAccess(t, { userId: kid.me.user.id, budgetId: "b1", role: "viewer" });
   const w = await t.call("POST", "/sync/push", { records: [rec("tx:1", "transaction", { amount: 999 }, 9000)] }, kid.auth);
-  assert.equal(w.status, 403);
-  assert.equal(w.data.code, "FORBIDDEN");
+  assert.equal(w.status, 200);
+  assert.deepEqual(w.data.denied, ["tx:1"]);
+  assert.equal(w.data.applied, 0);
   const pl = await t.call("GET", "/sync/pull?since=0", undefined, kid.auth);
   assert.equal(JSON.parse(pl.data.records[0].body).amount, 1, "unchanged, and viewers can still read");
 });
 
-test("scopes: a member limited to some categories only sees and edits those", async () => {
+test("category scopes are retired: a budget member sees and edits every category (D11)", async () => {
   const t = setup();
   const { owner, teen } = await household(t);
   await t.call("POST", "/sync/push", { records: [
@@ -95,20 +97,22 @@ test("scopes: a member limited to some categories only sees and edits those", as
     rec("tx:c", "transaction", { id: "c", splits: [{ categoryId: "rent", amount: 1 }, { categoryId: "fun", amount: 2 }] }, 1000),
     rec("account:chk", "account", { id: "chk" }, 1000),
   ] }, owner.auth);
+  grantAccess(t, { userId: teen.me.user.id, budgetId: "b1", role: "member" });
   const ids = (await t.call("GET", "/sync/pull?since=0", undefined, teen.auth)).data.records.map((r) => r.id).sort();
-  assert.deepEqual(ids, ["account:chk", "category:fun", "tx:a", "tx:c"]);
+  assert.deepEqual(ids, ["account:chk", "category:fun", "category:rent", "tx:a", "tx:b", "tx:c"]);
   const w = await t.call("POST", "/sync/push", { records: [rec("tx:b", "transaction", { id: "b", categoryId: "rent", amount: 1 }, 5000), rec("tx:a", "transaction", { id: "a", categoryId: "fun", amount: 11 }, 5000)] }, teen.auth);
   assert.equal(w.status, 200);
-  assert.deepEqual(w.data.denied, ["tx:b"]);
-  assert.equal(w.data.applied, 1);
+  assert.deepEqual(w.data.denied || [], []);
+  assert.equal(w.data.applied, 2);
 });
 
-test("scopes: budget-limited viewers don't see other budgets", async () => {
+test("budget-limited viewers don't see other budgets", async () => {
   const t = setup();
   const owner = await t.signIn();
-  await t.call("POST", "/household/invites", { email: "kid@example.com", role: "viewer", scopes: { budgets: ["kids"] } }, owner.auth);
+  await t.call("POST", "/household/invites", { email: "kid@example.com", role: "member" }, owner.auth);
   const kid = await t.signIn("kid@example.com");
   await t.call("POST", "/sync/push", { records: [rec("budget:b1", "budget", { id: "b1" }, 1), rec("budget:kids", "budget", { id: "kids" }, 1, { budgetId: "kids" })] }, owner.auth);
+  grantAccess(t, { userId: kid.me.user.id, budgetId: "kids", role: "viewer" });
   const ids = (await t.call("GET", "/sync/pull?since=0", undefined, kid.auth)).data.records.map((r) => r.id);
   assert.deepEqual(ids, ["budget:kids"]);
 });
@@ -119,6 +123,7 @@ test("members can't change bank links or delete a budget; owners can", async () 
   await t.call("POST", "/household/invites", { email: "helper@example.com", role: "member" }, owner.auth);
   const helper = await t.signIn("helper@example.com");
   await t.call("POST", "/sync/push", { records: [rec("budget:b1", "budget", { id: "b1", name: "B", bankLinks: { accounts: { x: { target: "chk" } } } }, 1000)] }, owner.auth);
+  grantAccess(t, { userId: helper.me.user.id, budgetId: "b1", role: "member" });
   await t.call("POST", "/sync/push", { records: [rec("budget:b1", "budget", { id: "b1", name: "Renamed", bankLinks: {} }, 2000, { dev: "devH" })] }, helper.auth);
   const body = JSON.parse((await t.call("GET", "/sync/pull?since=0", undefined, owner.auth)).data.records[0].body);
   assert.equal(body.name, "Renamed");

@@ -256,24 +256,23 @@ test("the old pairing endpoint is gone", async () => {
   assert.equal((await t.call("POST", "/bank/pair", { secret: "x" })).status, 410);
 });
 
-test("bank roles: only owners manage banks; viewers can't apply; members can apply", async () => {
+test("bank roles: only household owners manage banks; members can apply", async () => {
   const t = setup();
   const owner = await t.signIn();
-  for (const [email, role] of [["kid@example.com", "viewer"], ["helper@example.com", "member"]]) {
+  for (const [email, role] of [["kid@example.com", "member"], ["helper@example.com", "member"]]) {
     assert.equal((await t.call("POST", "/household/invites", { email, role }, owner.auth)).status, 200);
   }
-  const viewer = await t.signIn("kid@example.com");
+  const other = await t.signIn("kid@example.com");
   const member = await t.signIn("helper@example.com");
   assert.equal((await t.call("POST", "/bank/link-token", {}, member.auth)).status, 403);
-  assert.equal((await t.call("POST", "/bank/link-token", {}, viewer.auth)).status, 403);
+  assert.equal((await t.call("POST", "/bank/link-token", {}, other.auth)).status, 403);
   assert.equal((await t.call("POST", "/bank/exchange", { publicToken: "p" }, member.auth)).status, 403);
   const ex = await t.call("POST", "/bank/exchange", { publicToken: "public-1", institution: { institution_id: "ins_usaa", name: "USAA" } }, owner.auth);
   assert.equal(ex.status, 200);
   await Promise.all(t.waits.splice(0));
   assert.equal((await t.call("DELETE", `/bank/items/${ex.data.item.itemId}`, undefined, member.auth)).status, 403);
-  assert.equal((await t.call("GET", "/bank/items", undefined, viewer.auth)).data.items.length, 1, "viewers can see bank status");
-  assert.equal((await t.call("GET", "/bank/inbox", undefined, viewer.auth)).status, 403);
-  assert.equal((await t.call("POST", "/bank/sync", {}, viewer.auth)).status, 403);
+  assert.equal((await t.call("GET", "/bank/items", undefined, other.auth)).data.items.length, 1, "members can see bank status");
+  assert.equal((await t.call("GET", "/bank/inbox", undefined, other.auth)).status, 200);
   assert.equal((await t.call("GET", "/bank/inbox", undefined, member.auth)).status, 200);
 });
 

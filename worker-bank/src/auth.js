@@ -7,7 +7,7 @@
  */
 import { randomToken, sha256Hex, safeEqual, verifyRs256, jwtHeader, sealToken, openToken } from "./crypto.js";
 import { HttpError, now, readJson, meta, setMeta } from "./http.js";
-import { ROLES, can, parseScopes } from "./roles.js";
+import { ROLES, can, parseScopes, legacyRole } from "./roles.js";
 
 export const GOOGLE_CERTS_URL = "https://www.googleapis.com/oauth2/v3/certs";
 const GOOGLE_ISS = new Set(["accounts.google.com", "https://accounts.google.com"]);
@@ -343,7 +343,7 @@ async function sessionFromToken(env, token) {
   if (!m) throw new HttpError(401, "Sign in first", { code: "SIGNED_OUT" });
   const row = await env.DB.prepare(`SELECT s.id AS session_id, s.token_hash, s.expires_at, s.last_seen, s.household_id, s.device_name,
       u.id AS user_id, u.email, u.name, u.picture,
-      m.role, m.scopes, m.display_name, m.access_rev
+      m.role, m.display_name, m.access_rev
     FROM sessions s JOIN users u ON u.id = s.user_id
     LEFT JOIN memberships m ON m.household_id = s.household_id AND m.user_id = s.user_id
     WHERE s.id = ?`).bind(m[1]).first();
@@ -353,14 +353,22 @@ async function sessionFromToken(env, token) {
     throw new HttpError(401, "Your sign-in expired. Sign in again.", { code: "SIGNED_OUT" });
   }
   if (!row.role) throw new HttpError(403, "You’re no longer in this household.", { code: "REMOVED" });
-  return {
+  const accessRows = (await env.DB.prepare(
+    "SELECT budget_id, role FROM budget_access WHERE household_id = ? AND user_id = ?"
+  ).bind(row.household_id, row.user_id).all()).results || [];
+  const access = Object.fromEntries(accessRows.map((r) => [r.budget_id, r.role]));
+  const household = row.role === "owner" ? "owner" : "member";
+  const session = {
     sessionId: row.session_id,
     householdId: row.household_id,
     deviceName: row.device_name,
     user: { id: row.user_id, email: row.email, name: row.name, picture: row.picture },
-    member: { role: row.role, scopes: parseScopes(row.scopes), displayName: row.display_name || row.name, accessRev: row.access_rev || 1 },
+    access,
+    member: { householdRole: household, access, displayName: row.display_name || row.name, accessRev: row.access_rev || 1 },
     lastSeen: row.last_seen,
   };
+  session.member.role = legacyRole(session);
+  return session;
 }
 
 /** Bearer session from the request. Refreshes last_seen and slides the expiry about once an hour. */

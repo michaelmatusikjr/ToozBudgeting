@@ -96,8 +96,7 @@ test("invites: only owners can invite; bad roles, revoked and expired invites ar
   assert.equal((await t.call("POST", "/household/invites", { email: "nope", role: "member" }, owner.auth)).status, 400);
   await t.call("POST", "/household/invites", { email: "kid@example.com", role: "viewer", scopes: { budgets: ["b1"] } }, owner.auth);
   const kid = await t.signIn("kid@example.com");
-  assert.equal(kid.me.role, "viewer");
-  assert.deepEqual(kid.me.scopes, { budgets: ["b1"] });
+  assert.equal(kid.me.role, "member", "household viewer is retired; leftover viewer memberships are household members");
   assert.equal((await t.call("POST", "/household/invites", { email: "friend@example.com", role: "owner" }, kid.auth)).status, 403);
   const inv = await t.call("POST", "/household/invites", { email: "late@example.com", role: "member" }, owner.auth);
   await t.call("DELETE", `/household/invites/${inv.data.invite.id}`, undefined, owner.auth);
@@ -116,7 +115,7 @@ test("members: owners change roles and remove people; the last owner stays an ow
   const ch = await t.call("PATCH", `/household/members/${kidId}`, { role: "viewer", scopes: { categories: { b1: ["c1"] } } }, owner.auth);
   assert.equal(ch.status, 200);
   const me = await t.call("GET", "/me", undefined, kid.auth);
-  assert.equal(me.data.role, "viewer");
+  assert.equal(me.data.role, "member", "legacy /me role is member unless every visible budget is view-only");
   assert.equal(me.data.accessRev, 2, "access changes bump accessRev so the app re-pulls");
   assert.equal((await t.call("PATCH", `/household/members/${kidId}`, { role: "owner" }, kid.auth)).status, 403);
   assert.equal((await t.call("PATCH", `/household/members/${owner.me.user.id}`, { role: "member" }, owner.auth)).status, 409);

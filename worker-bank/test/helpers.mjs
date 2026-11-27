@@ -99,3 +99,13 @@ export function setup(over = {}) {
 }
 
 export const tx = (id, amount, extra = {}) => ({ transaction_id: id, account_id: "acc-chk", amount, date: "2026-11-28", name: "SHOP " + id, merchant_name: null, pending: false, personal_finance_category: { primary: "GENERAL_MERCHANDISE", detailed: "GENERAL_MERCHANDISE_OTHER" }, location: { address: "x" }, ...extra });
+
+
+/** Grant a budget role for tests (WU-41+). */
+export function grantAccess(t, { userId, budgetId, role, householdId, grantedBy = null }) {
+  const hid = householdId || t.DB.raw.prepare("SELECT id FROM households LIMIT 1").get()?.id;
+  t.DB.raw.prepare(`
+    INSERT OR REPLACE INTO budget_access (household_id, budget_id, user_id, role, granted_by, granted_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(hid, budgetId, userId, role, grantedBy, Date.now());
+}

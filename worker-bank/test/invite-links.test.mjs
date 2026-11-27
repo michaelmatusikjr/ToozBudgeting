@@ -56,7 +56,7 @@ test("the invited Google account joins through the link; then the link is used u
   const r = await t.call("POST", "/auth/google", { credential: cred, invite: inv.id, deviceName: "iPhone" });
   assert.equal(r.status, 200);
   assert.equal(r.data.joined, "invite");
-  assert.equal(r.data.me.role, "viewer");
+  assert.equal(r.data.me.role, "member", "a viewer invite joins as a household member; budget View only is set in WU-43");
   assert.equal(r.data.me.household.id, owner.me.household.id);
   assert.equal((await t.call("GET", `/auth/invite/${inv.id}`)).data.code, "INVITE_USED");
   // Signing in again later with the old link still works for her (the stale link doesn't block a member).

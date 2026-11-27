@@ -1,22 +1,24 @@
 /**
- * Roles and permissions. Every server-side check goes through here, so a permissions UI can come later
- * without touching the handlers.
+ * Two-layer permissions.
  *
- * owner  : everything, including members, invites, and bank logins.
- * member : reads and edits the budgets in scope; applies bank transactions; can't manage people or banks.
- * viewer : read-only on the server. Pushes are refused.
+ * Household roles: owner or member.
+ *   household.read  — everyone in the household
+ *   household.manage, bank.manage — household Owners
  *
- * scopes (optional, JSON on the membership): limits what a member or viewer can see.
- *   { budgets: ["budgetId", ...] }                       only these budgets
- *   { categories: { "budgetId": ["categoryId", ...] } }  within a budget, only these categories
- * null or missing means everything. Owners ignore scopes.
+ * Budget roles (per person, per budget): owner, member, viewer (View only), or no row (No access).
+ * Household Owners are Owner of every budget, even without a budget_access row (D2).
+ *
+ * The legacy `role` field returned to old apps is computed by legacyRole(): owner for household
+ * Owners, viewer when every budget they can see is View only, otherwise member.
  */
+// Household roles in use are owner and member. "viewer" remains assignable on
+// invites and memberships until WU-43, and session loading treats it as a household member.
 export const ROLES = ["owner", "member", "viewer"];
+export const BUDGET_ROLES = ["owner", "member", "viewer"];
 
-const ACTIONS = {
+const HOUSEHOLD_ACTIONS = {
   owner: new Set(["household.read", "household.manage", "budget.read", "budget.write", "bank.view", "bank.apply", "bank.manage"]),
   member: new Set(["household.read", "budget.read", "budget.write", "bank.view", "bank.apply"]),
-  viewer: new Set(["household.read", "budget.read", "bank.view"]),
 };
 
 export const SYNC_KINDS = new Set([
@@ -24,13 +26,28 @@ export const SYNC_KINDS = new Set([
   "assignment", "assignmentCell", "inflow", "note", "reminder",
 ]);
 
-/** Fields on a budget header that only owners may change. The server keeps the stored value otherwise. */
+/** Fields on a budget header that only household Owners may change. The server keeps the stored value otherwise. */
 export const OWNER_ONLY_BUDGET_FIELDS = ["bankLinks"];
 
-export function can(member, action) {
-  return !!member && !!ACTIONS[member.role]?.has(action);
+function asSession(sessionOrMember) {
+  if (sessionOrMember && sessionOrMember.member) return sessionOrMember;
+  return { member: sessionOrMember || {}, access: sessionOrMember?.access || {} };
 }
 
+export function householdRole(sessionOrMember) {
+  const member = asSession(sessionOrMember).member;
+  const r = member.householdRole || member.role;
+  if (r === "owner") return "owner";
+  if (r) return "member";
+  return null;
+}
+
+export function can(sessionOrMember, action) {
+  const role = householdRole(sessionOrMember);
+  return !!role && !!HOUSEHOLD_ACTIONS[role]?.has(action);
+}
+
+/** Still used by invite payloads until WU-43. Category scopes are no longer read (D11). */
 export function parseScopes(raw) {
   if (!raw) return null;
   let s = raw;
@@ -38,21 +55,15 @@ export function parseScopes(raw) {
   if (!s || typeof s !== "object") return null;
   const out = {};
   if (Array.isArray(s.budgets)) out.budgets = s.budgets.map(String).slice(0, 200);
-  if (s.categories && typeof s.categories === "object") {
-    out.categories = {};
-    for (const [b, list] of Object.entries(s.categories)) if (Array.isArray(list)) out.categories[String(b)] = list.map(String).slice(0, 1000);
-  }
   return Object.keys(out).length ? out : null;
 }
 
-function budgetAllowed(member, budgetId) {
-  if (member.role === "owner" || !member.scopes?.budgets) return true;
-  return budgetId != null && member.scopes.budgets.includes(budgetId);
-}
-
-function categoryList(member, budgetId) {
-  if (member.role === "owner") return null;
-  return member.scopes?.categories?.[budgetId] || null;
+export function budgetRole(sessionOrMember, budgetId) {
+  const session = asSession(sessionOrMember);
+  if (householdRole(session) === "owner") return "owner";
+  if (budgetId == null || budgetId === "") return null;
+  const access = session.access || session.member.access || {};
+  return access[budgetId] || null;
 }
 
 function bodyOf(rec) {
@@ -61,27 +72,37 @@ function bodyOf(rec) {
   return rec.bodyObj;
 }
 
-/** rec: { id, kind, budgetId|budget_id, body (string or object), deleted } */
-export function canReadRecord(member, rec) {
-  if (!can(member, "budget.read")) return false;
-  const budgetId = rec.budgetId ?? rec.budget_id ?? null;
-  if (!budgetAllowed(member, budgetId)) return false;
-  const cats = categoryList(member, budgetId);
-  if (!cats || rec.deleted) return true;
-  const body = bodyOf(rec) || {};
-  if (rec.kind === "category") return cats.includes(body.id);
-  if (rec.kind === "assignmentCell") return cats.includes(body.categoryId);
-  if (rec.kind === "transaction") {
-    if (Array.isArray(body.splits) && body.splits.length) return body.splits.some((s) => cats.includes(s.categoryId));
-    return cats.includes(body.categoryId);
+export function recordBudgetId(rec) {
+  const bid = rec.budgetId ?? rec.budget_id ?? null;
+  if (bid != null && bid !== "") return bid;
+  if (rec.kind === "budget") {
+    const body = bodyOf(rec) || {};
+    if (body.id) return body.id;
+    const id = String(rec.id || "");
+    if (id.startsWith("budget:")) return id.slice("budget:".length);
+    return id || null;
   }
+  return null;
+}
+
+/** rec: { id, kind, budgetId|budget_id, body (string or object), deleted } */
+export function canReadRecord(sessionOrMember, rec) {
+  return budgetRole(sessionOrMember, recordBudgetId(rec)) != null;
+}
+
+export function canWriteRecord(sessionOrMember, rec) {
+  if (!SYNC_KINDS.has(rec.kind)) return false;
+  const role = budgetRole(sessionOrMember, recordBudgetId(rec));
+  if (role !== "owner" && role !== "member") return false;
+  if (rec.kind === "budget" && rec.deleted) return role === "owner";
   return true;
 }
 
-export function canWriteRecord(member, rec) {
-  if (!can(member, "budget.write")) return false;
-  if (!SYNC_KINDS.has(rec.kind)) return false;
-  if (member.role === "owner") return true;
-  if (rec.kind === "budget" && rec.deleted) return false;
-  return canReadRecord(member, rec);
+/** Legacy household-style role for old apps (WU-41 step 5). */
+export function legacyRole(sessionOrMember) {
+  const session = asSession(sessionOrMember);
+  if (householdRole(session) === "owner") return "owner";
+  const roles = Object.values(session.access || session.member.access || {});
+  if (roles.length && roles.every((r) => r === "viewer")) return "viewer";
+  return "member";
 }
