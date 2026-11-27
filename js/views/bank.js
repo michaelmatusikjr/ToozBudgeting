@@ -1,10 +1,11 @@
 /** Settings > Bank sync: connect banks through Plaid (owners), map accounts, and sync. Uses the household sign-in. */
-import { h, btn, openSheet, field, textInput, toast, confirmDialog } from "../ui.js?v=153";
-import { bankSettings, setBankLink, setBankSettings } from "../bankmap.js?v=153";
+import { h, btn, openSheet, field, textInput, toast, confirmDialog } from "../ui.js?v=154";
+import { bankSettings, setBankLink, setBankSettings } from "../bankmap.js?v=154";
 import {
   bankState, bankConfig, setBankConfig, bankAccess, listItems, linkToken, openLink,
   pendingOAuth, pullBank, requestSync, disconnectItem, rememberItems, plainBankError, bankHealth, BANK_DEFAULTS,
-} from "../banksync.js?v=153";
+} from "../banksync.js?v=154";
+import { isIOS, isStandalone } from "../pwa.js?v=154";
 
 const STATUS = {
   ok: ["Connected", ""],
@@ -169,7 +170,73 @@ function itemCard(ctx, item, settings, data, repaint, owner) {
   );
 }
 
-async function startLink(ctx, itemId, data, repaint) {
+/* ---------- iPhone home-screen app: connect in Safari ---------- */
+
+// On iPhone, a bank's own sign-in (Chase OAuth, often App-to-App) can't hand back to a home-screen app: Plaid's
+// bank window inside the app goes white and the bank's "Return to ToozBudgeting" opens Safari. So the home-screen
+// app sends bank connections to connect.html in Safari, where Plaid's mobile flow works, and picks up the result.
+const SAFARI_KEY = "toozbudgeting:bank:safari";
+export const useSafariForLink = () => isIOS() && isStandalone();
+
+export function connectUrl(itemId) {
+  const u = new URL("./connect.html", location.href);
+  u.search = itemId ? `?item=${encodeURIComponent(itemId)}` : "";
+  u.hash = "";
+  return u.href;
+}
+/** iOS 17+ opens x-safari-https:// links in Safari, even from a home-screen app. */
+export const safariUrl = (href) => href.replace(/^https:/, "x-safari-https:");
+
+let watching = null;
+function watchSafari(ctx, repaint, before) {
+  try { localStorage.setItem(SAFARI_KEY, JSON.stringify({ at: Date.now(), before })); } catch { /* ignore */ }
+  if (watching) return;
+  const check = async () => {
+    if (document.visibilityState !== "visible") return;
+    let rec = null;
+    try { rec = JSON.parse(localStorage.getItem(SAFARI_KEY) || "null"); } catch { /* ignore */ }
+    if (!rec || Date.now() - rec.at > 30 * 60000) { stop(); return; }
+    try {
+      const data = await listItems();
+      const fresh = (data.items || []).find((i) => !rec.before.includes(`${i.itemId}:${i.status}`) && i.status === "ok");
+      if (!fresh) return;
+      rememberItems(ctx, data.items);
+      stop();
+      toast(`${fresh.institution || "Bank"} connected in Safari. Choose where each account goes.`, { ms: 7000 });
+      repaint?.();
+    } catch { /* try again on the next visit */ }
+  };
+  const stop = () => {
+    document.removeEventListener("visibilitychange", check);
+    clearInterval(watching); watching = null;
+    try { localStorage.removeItem(SAFARI_KEY); } catch { /* ignore */ }
+  };
+  document.addEventListener("visibilitychange", check);
+  watching = setInterval(check, 5000);
+}
+
+function openSafariSheet(ctx, itemId, data, repaint) {
+  const href = connectUrl(itemId);
+  const before = (data.items || []).map((i) => `${i.itemId}:${i.status}`);
+  const out = h("p", { class: "hint", text: "" });
+  const sheet = openSheet({ title: itemId ? "Reconnect in Safari" : "Connect in Safari", body: (host) => {
+    host.append(
+      h("p", { class: "lede", text: "On iPhone, banks like Chase can’t send you back to a home-screen app, so bank connections finish in Safari." }),
+      h("p", { class: "hint", text: "Safari opens ToozBudgeting’s connect page. Sign in with Google there (same account), connect your bank, then come back here. The new bank shows up on its own." }),
+      btn("Open Safari to connect", { block: true, onClick: () => { watchSafari(ctx, () => { try { sheet.close(); } catch { /* already closed */ } repaint?.(); }, before); out.textContent = "Opening Safari… If nothing happens, copy the link and paste it into Safari."; location.href = safariUrl(href); } }),
+      btn("Copy link for Safari", { block: true, kind: "ghost", onClick: async () => {
+        watchSafari(ctx, () => { try { sheet.close(); } catch { /* already closed */ } repaint?.(); }, before);
+        try { await navigator.clipboard.writeText(href); out.textContent = "Copied. Open Safari, paste it in the address bar, and go."; }
+        catch { out.textContent = href; }
+      } }),
+      out,
+      btn("Try here anyway", { block: true, kind: "quiet", onClick: () => { sheet.close(); startLink(ctx, itemId, data, repaint, { here: true }); } }),
+    );
+  } });
+}
+
+async function startLink(ctx, itemId, data, repaint, { here = false } = {}) {
+  if (!here && useSafariForLink()) { openSafariSheet(ctx, itemId, data, repaint); return; }
   try {
     const res = await linkToken(itemId);
     if (res.warning) toast(res.warning, { ms: 7000 });

@@ -2,7 +2,7 @@
  * Household account: Sign in with Google, the session token, and the household API.
  * The server is the toozbudgeting-bank Worker. The session token lives in IndexedDB on this device only.
  */
-import { deviceGet, deviceSet } from "./store.js?v=153";
+import { deviceGet, deviceSet } from "./store.js?v=154";
 
 export const SERVER_DEFAULT = "https://toozbudgeting-bank.michael-matusik-jr.workers.dev";
 const GIS_SRC = "https://accounts.google.com/gsi/client";

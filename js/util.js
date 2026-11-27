@@ -1,7 +1,7 @@
 /** Shared helpers. No DOM. Dates are local calendar dates (YYYY-MM-DD), never UTC slices. */
 
 export const APP_NAME = "ToozBudgeting";
-export const APP_VERSION = "1.5.3";
+export const APP_VERSION = "1.5.4";
 export const SCHEMA_VERSION = 1;
 
 export const uid = () => {

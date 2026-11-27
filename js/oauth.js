@@ -9,10 +9,13 @@
  *
  * This page always shows a status, a reason code when something fails, and a way back. Never a blank screen.
  */
-import { account, renderGoogleButton, withCode, ApiError } from "./account.js?v=153";
-import { loadPlaidLink, exchangePublicToken, markRepaired, readLocalLink, clearLocalLink, pendingLinkSession, linkSessionEvent } from "./banksync.js?v=153";
+import { account, renderGoogleButton, withCode, ApiError } from "./account.js?v=154";
+import { loadPlaidLink, exchangePublicToken, markRepaired, readLocalLink, clearLocalLink, pendingLinkSession, linkSessionEvent } from "./banksync.js?v=154";
+
+import { APP_VERSION } from "./util.js?v=154";
 
 window.__oauthStarted = true;
+document.getElementById("ver") && (document.getElementById("ver").textContent = `ToozBudgeting ${APP_VERSION}`);
 const $ = (id) => document.getElementById(id);
 const isStandalone = () => !!(navigator.standalone || matchMedia?.("(display-mode: standalone)")?.matches);
 
@@ -77,7 +80,8 @@ async function main() {
   catch (e) { show("Couldn’t load Plaid", e.message, { error: true, code: "PLAID_LOAD", extra: retryButton() }); return; }
 
   // Same browser as the app (not the iPhone home-screen app): go straight back when done.
-  const backTo = local && !isStandalone() ? "./#settings/bank" : "./";
+  const fromSafariConnect = local?.from === "connect";
+  const backTo = local && !fromSafariConnect && !isStandalone() ? "./#settings/bank" : "./";
   const handler = Plaid.create({
     token: link.linkToken,
     receivedRedirectUri: href,
@@ -89,7 +93,7 @@ async function main() {
         else name = (await exchangePublicToken(publicToken, metadata, link.id)).item?.institution || name;
         clearLocalLink();
         const verb = link.mode === "update" ? "reconnected" : "connected";
-        if (local) {
+        if (local && !fromSafariConnect) {
           show(`${name} ${verb}`, "Taking you back to ToozBudgeting…", { back: backTo });
           setTimeout(() => location.replace(backTo), 900);
         } else {
