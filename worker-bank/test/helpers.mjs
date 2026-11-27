@@ -52,6 +52,7 @@ export function fakePlaid() {
       return [200, { ...page.res, accounts: state.accounts }];
     },
     "/webhook_verification_key/get": () => [200, { key: state.whKey }],
+    "/item/webhook/update": () => [200, { item: {} }],
   };
   return { calls, state, routes };
 }

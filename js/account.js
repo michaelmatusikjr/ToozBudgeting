@@ -2,7 +2,7 @@
  * Household account: Sign in with Google, the session token, and the household API.
  * The server is the toozbudgeting-bank Worker. The session token lives in IndexedDB on this device only.
  */
-import { deviceGet, deviceSet } from "./store.js?v=140";
+import { deviceGet, deviceSet } from "./store.js?v=151";
 
 export const SERVER_DEFAULT = "https://toozbudgeting-bank.michael-matusik-jr.workers.dev";
 const GIS_SRC = "https://accounts.google.com/gsi/client";
@@ -11,7 +11,10 @@ const listeners = new Set();
 export function onAccountChange(fn) { listeners.add(fn); return () => listeners.delete(fn); }
 const changed = () => listeners.forEach((fn) => { try { fn(); } catch { /* ignore */ } });
 
-export class ApiError extends Error { constructor(status, message, data) { super(message); this.status = status; this.data = data; } }
+export class ApiError extends Error { constructor(status, message, data) { super(message); this.status = status; this.data = data; this.code = data?.code || null; } }
+
+/** "Message (CODE)": the short reason code helps tell what went wrong when someone reports an error. */
+export const withCode = (message, code) => code && !String(message).includes(`(${code})`) ? `${message} (${code})` : String(message);
 
 /** Server address. Shared with bank sync, which runs on the same Worker. */
 export async function serverUrl() {
@@ -40,12 +43,13 @@ export async function api(method, path, body, { auth = true, token } = {}) {
   let res;
   try {
     res = await fetch(base + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), mode: "cors" });
-  } catch { throw new ApiError(0, navigator.onLine ? "Can’t reach the sync server" : "You’re offline"); }
+  } catch { throw new ApiError(0, navigator.onLine ? "Can’t reach the sync server (NETWORK)" : "You’re offline (OFFLINE)", { code: navigator.onLine ? "NETWORK" : "OFFLINE" }); }
   let data = null;
   try { data = await res.json(); } catch { /* empty */ }
   if (!res.ok) {
     if (auth && (res.status === 401 || data?.code === "REMOVED")) await markSignedOut(data?.error);
-    throw new ApiError(res.status, data?.error || `HTTP ${res.status}`, data);
+    const code = data?.code || (data?.error ? null : `HTTP_${res.status}`);
+    throw new ApiError(res.status, withCode(data?.error || `Server error ${res.status}`, code), data);
   }
   return data;
 }
@@ -141,8 +145,23 @@ function loadGis() {
 const isStandaloneIOS = () => /iPhone|iPad/.test(navigator.userAgent || "") && (navigator.standalone || matchMedia?.("(display-mode: standalone)")?.matches);
 
 /**
- * Put the official Sign in with Google button in host. onSignedIn(account) runs after the server accepts it.
- * The installed iPhone app uses redirect mode, because popups there don't come back to the app.
+ * The installed iPhone app can't get a popup back, and Google's button script in redirect mode depends on its own
+ * page state. So there we use a plain link: the Worker sends the app to Google's sign-in page, Google posts the
+ * ID token back to the Worker, and the Worker returns to the app with #signin=<one-time code>.
+ */
+function redirectButton(host, startUrl) {
+  const a = document.createElement("a");
+  a.className = "gsi-link";
+  a.href = startUrl;
+  a.setAttribute("role", "button");
+  a.innerHTML = '<svg viewBox="0 0 48 48" width="20" height="20" aria-hidden="true"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.6l6.8-6.8C35.8 2.4 30.3 0 24 0 14.6 0 6.6 5.4 2.7 13.3l7.9 6.1C12.5 13.6 17.8 9.5 24 9.5z"/><path fill="#4285F4" d="M46.1 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.4c-.5 2.9-2.2 5.3-4.6 6.9l7.4 5.7c4.3-4 6.9-9.9 6.9-17.1z"/><path fill="#FBBC05" d="M10.6 28.6c-.5-1.4-.8-3-.8-4.6s.3-3.2.8-4.6l-7.9-6.1C1 16.6 0 20.2 0 24s1 7.4 2.7 10.7l7.9-6.1z"/><path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.4-5.7c-2.1 1.4-4.8 2.3-8.5 2.3-6.2 0-11.5-4.1-13.4-9.9l-7.9 6.1C6.6 42.6 14.6 48 24 48z"/></svg><span>Sign in with Google</span>';
+  host.replaceChildren(a);
+  return true;
+}
+
+/**
+ * Put the Sign in with Google button in host. onSignedIn(account) runs after the server accepts it.
+ * Errors come back to onError as "Message (CODE)".
  */
 export async function renderGoogleButton(host, { onSignedIn, onError } = {}) {
   const cfg = await authConfig();
@@ -150,19 +169,22 @@ export async function renderGoogleButton(host, { onSignedIn, onError } = {}) {
     host.replaceChildren(Object.assign(document.createElement("p"), { className: "hint", textContent: cfg.error ? `${cfg.error}. Sign-in will show here when it’s back.` : "Google sign-in isn’t set up on the server yet." }));
     return false;
   }
+  if (isStandaloneIOS()) return redirectButton(host, (await serverUrl()) + "/auth/google/start");
   let google;
   try { google = await loadGis(); }
-  catch (e) { onError?.(e.message); return false; }
-  const redirect = isStandaloneIOS();
+  catch (e) { onError?.(withCode(e.message, "GSI_LOAD")); return false; }
   google.accounts.id.initialize({
     client_id: cfg.googleClientId,
     auto_select: false,
     cancel_on_tap_outside: true,
-    ux_mode: redirect ? "redirect" : "popup",
-    login_uri: redirect ? (await serverUrl()) + "/auth/google/redirect" : undefined,
+    ux_mode: "popup",
     callback: async (resp) => {
-      try { onSignedIn?.(await signInWithCredential(resp.credential)); }
-      catch (e) { onError?.(e.message); }
+      if (!resp?.credential) { onError?.(withCode("Google didn’t send a sign-in. Try again.", "NO_CREDENTIAL")); return; }
+      let acct;
+      try { acct = await signInWithCredential(resp.credential); }
+      catch (e) { onError?.(withCode(e.message, e.code || "ERROR")); return; }
+      try { await onSignedIn?.(acct); }
+      catch (e) { onError?.(withCode(`Signed in, but setting up this device failed: ${e.message}`, "AFTER_SIGNIN")); }
     },
   });
   host.replaceChildren();

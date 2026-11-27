@@ -15,11 +15,11 @@ import { plaidClient, PlaidError, LOGIN_CODES, slimTx, slimAccount } from "./pla
 import { HttpError, now, corsHeaders, json, readJson, meta, setMeta } from "./http.js";
 import {
   authSession, requireAction, signInGoogle, signInRedirect, redeemCode, signOut, meView, updateMe,
-  listMembers, createInvite, revokeInvite, updateMember, removeMember, renameHousehold, signInReady, ownerEmailCount,
+  listMembers, createInvite, revokeInvite, updateMember, removeMember, renameHousehold, signInReady, ownerEmailCount, signInStart, lastSignInError,
 } from "./auth.js";
 import { push, pull } from "./sync.js";
 
-const VERSION = "2.0.0";
+const VERSION = "2.0.1";
 const DEFAULT_CAP = 10;
 const CHUNK = 400;
 const SYNC_LOCK_MS = 5 * 60000;
@@ -29,7 +29,21 @@ const CLAIM_MS = 2 * 60000;
 const MAX_ACK_BYTES = 1500 * 1024;
 
 function serverBase(env, req) {
-  return String(env.PUBLIC_URL || new URL(req.url).origin).replace(/\/+$/, "");
+  return String(env.PUBLIC_URL || (req ? new URL(req.url).origin : "")).replace(/\/+$/, "");
+}
+
+/** Where Plaid sends webhooks for every Item. Needs PUBLIC_URL when there's no request (the cron). */
+export const webhookUrl = (env, req) => { const b = serverBase(env, req); return b ? b + "/plaid/webhook" : null; };
+
+/** Point an existing Item at the current webhook URL (/item/webhook/update) if it was registered with another one. */
+export async function ensureWebhook(env, plaid, row, url) {
+  if (!url || !row || row.webhook_url === url || row.status === "removed") return false;
+  try {
+    const accessToken = await openToken(env.TOKEN_ENC_KEY, row.item_id, row.access_enc);
+    await plaid("/item/webhook/update", { access_token: accessToken, webhook: url });
+    await env.DB.prepare("UPDATE items SET webhook_url = ? WHERE item_id = ?").bind(url, row.item_id).run();
+    return true;
+  } catch { return false; }
 }
 
 const inboxAad = (householdId) => "inbox:" + householdId;
@@ -48,6 +62,7 @@ function itemView(row) {
     createdAt: row.created_at,
     lastSyncAt: row.last_sync_at || null,
     lastWebhookAt: row.last_webhook_at || null,
+    lastWebhook: row.last_webhook_code || null,
     accounts: accounts.map((a) => ({ id: a.account_id, name: a.name, officialName: a.official_name, mask: a.mask, type: a.type, subtype: a.subtype })),
   };
 }
@@ -78,6 +93,8 @@ async function health(env) {
     itemCap: Number(env.ITEM_CAP || DEFAULT_CAP),
     lastCronAt: db ? Number(await meta(env, "last_cron_at") || 0) || null : null,
     lastCronError: db ? await meta(env, "last_cron_error") : null,
+    lastSignInError: db ? await lastSignInError(env) : null,
+    lastWebhookAt: db ? Number(await meta(env, "last_webhook_at") || 0) || null : null,
   };
 }
 
@@ -102,7 +119,7 @@ async function linkToken(env, req, plaid, session) {
     language: "en",
     country_codes: ["US"],
     user: { client_user_id: session.householdId },
-    webhook: serverBase(env, req) + "/bank/webhook",
+    webhook: webhookUrl(env, req),
   };
   let mode = "create";
   if (body.itemId) {
@@ -158,6 +175,8 @@ async function exchange(env, req, plaid, ctx, session) {
     VALUES (?, ?, ?, ?, ?, '', 'ok', ?, ?, ?)
     ON CONFLICT(item_id) DO UPDATE SET access_enc = excluded.access_enc, status = 'ok', error = NULL, accounts = excluded.accounts, household_id = excluded.household_id`)
     .bind(itemId, session.householdId, inst.institution_id ? String(inst.institution_id) : null, String(inst.name || "Bank").slice(0, 80), sealed, JSON.stringify(accounts.map(slimAccount)), now(), session.user.id).run();
+  // Link set the webhook from the link token; record it so the cron doesn't re-register it.
+  await env.DB.prepare("UPDATE items SET webhook_url = ? WHERE item_id = ?").bind(webhookUrl(env, req), itemId).run();
   const row = await env.DB.prepare("SELECT * FROM items WHERE item_id = ?").bind(itemId).first();
   ctx?.waitUntil?.(syncItem(env, plaid, itemId).catch(() => {}));
   return { item: itemView(row) };
@@ -209,6 +228,7 @@ async function syncNow(env, req, plaid, session) {
     : ((await env.DB.prepare("SELECT * FROM items WHERE household_id = ? AND status != 'removed'").bind(session.householdId).all()).results || []);
   const results = [];
   for (const row of rows) {
+    await ensureWebhook(env, plaid, row, webhookUrl(env, req));
     if (row.last_sync_at && now() - row.last_sync_at < SYNC_NOW_GAP_MS) { results.push({ itemId: row.item_id, skipped: "recent" }); continue; }
     results.push(await syncItem(env, plaid, row.item_id));
   }
@@ -379,10 +399,11 @@ async function webhook(env, req, plaid, ctx) {
   const itemId = String(body.item_id || "");
   const row = itemId ? await env.DB.prepare("SELECT * FROM items WHERE item_id = ? AND status != 'removed'").bind(itemId).first() : null;
   if (!row) return { ok: true, ignored: true };
-  await env.DB.prepare("UPDATE items SET last_webhook_at = ? WHERE item_id = ?").bind(now(), itemId).run();
   const type = body.webhook_type; const code = body.webhook_code;
+  await env.DB.prepare("UPDATE items SET last_webhook_at = ?, last_webhook_code = ? WHERE item_id = ?").bind(now(), `${type || "?"}:${code || "?"}`.slice(0, 60), itemId).run();
+  await setMeta(env, "last_webhook_at", now());
   let action = "none";
-  if (type === "TRANSACTIONS" && code === "SYNC_UPDATES_AVAILABLE") {
+  if (type === "TRANSACTIONS" && (code === "SYNC_UPDATES_AVAILABLE" || code === "INITIAL_UPDATE" || code === "HISTORICAL_UPDATE" || code === "DEFAULT_UPDATE")) {
     action = "sync";
     ctx?.waitUntil?.(syncItem(env, plaid, itemId).catch(() => {}));
   } else if (type === "ITEM") {
@@ -391,6 +412,9 @@ async function webhook(env, req, plaid, ctx) {
       await env.DB.prepare("UPDATE items SET status = ?, error = ? WHERE item_id = ?")
         .bind(LOGIN_CODES.has(ec) ? "login_required" : "error", `${ec}: ${String(body.error?.error_message || "").slice(0, 200)}`, itemId).run();
       action = "flagged";
+    } else if (code === "WEBHOOK_UPDATE_ACKNOWLEDGED") {
+      if (body.new_webhook_url) await env.DB.prepare("UPDATE items SET webhook_url = ? WHERE item_id = ?").bind(String(body.new_webhook_url), itemId).run();
+      action = "noted";
     } else if (code === "PENDING_EXPIRATION" || code === "PENDING_DISCONNECT") {
       await env.DB.prepare("UPDATE items SET status = 'expiring', consent_expires_at = ?, error = ? WHERE item_id = ?")
         .bind(body.consent_expiration_time || null, code, itemId).run();
@@ -414,6 +438,12 @@ async function webhook(env, req, plaid, ctx) {
 
 export async function runScheduled(env, plaid) {
   try {
+    const url = webhookUrl(env, null);
+    if (url) {
+      const all = (await env.DB.prepare("SELECT * FROM items WHERE status != 'removed' AND (webhook_url IS NULL OR webhook_url != ?)").bind(url).all()).results || [];
+      for (const r of all) await ensureWebhook(env, plaid, r, url);
+    }
+    // Backup to webhooks: catch anything a missed webhook would have brought.
     const rows = (await env.DB.prepare("SELECT item_id FROM items WHERE status IN ('ok', 'expiring', 'error')").all()).results || [];
     for (const r of rows) await syncItem(env, plaid, r.item_id);
     await env.DB.prepare("DELETE FROM bank_inbox WHERE created_at < ? AND held = 0").bind(now() - INBOX_KEEP_DAYS * 86400000).run();
@@ -440,8 +470,9 @@ export function makeHandler({ fetchImpl } = {}) {
     if (m === "OPTIONS") return new Response(null, { status: Object.keys(cors).length ? 204 : 403, headers: cors });
     try {
       const plaid = plaidClient(env, doFetch);
-      if (path === "/bank/webhook" && m === "POST") return json(await webhook(env, req, plaid, ctx));
+      if ((path === "/plaid/webhook" || path === "/bank/webhook") && m === "POST") return json(await webhook(env, req, plaid, ctx));
       if (path === "/auth/google/redirect" && m === "POST") return await signInRedirect(env, req, doFetch);
+      if (path === "/auth/google/start" && m === "GET") return await signInStart(env, req);
       if (origin && !Object.keys(cors).length) throw new HttpError(403, "Origin not allowed");
       if ((path === "/" || path === "/health" || path === "/bank/health") && m === "GET") return json(await health(env), 200, cors);
       if (path === "/auth/config" && m === "GET") return json(authConfig(env), 200, cors);
@@ -473,6 +504,7 @@ export function makeHandler({ fetchImpl } = {}) {
       return json(out, 200, cors);
     } catch (e) {
       if (e instanceof HttpError) return json({ error: e.message, ...(e.extra || {}) }, e.status, cors);
+      console.log("server_error", path, String(e?.stack || e).slice(0, 500));
       if (e instanceof PlaidError) return json({ error: e.message, code: e.code, requestId: e.requestId }, 502, cors);
       return json({ error: "Server error" }, 500, cors);
     }

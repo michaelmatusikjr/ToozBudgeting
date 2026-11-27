@@ -5,9 +5,9 @@
  * Plaid amounts are positive when money leaves the account (a purchase, or a charge on a card)
  * and negative when money comes in (a deposit, a refund, or a payment to a card).
  */
-import { toTitleCase, isCard, isBank, ccPayCat, makePayFrom, RTA, dateDiffDays, round2 } from "./util.js?v=140";
-import { addTransaction, updateTransaction, deleteTransactions, isLocked, touch } from "./mutate.js?v=140";
-import { displayName, payeeDefaultCategory, payeeSuggestedCategory } from "./payees.js?v=140";
+import { toTitleCase, isCard, isBank, ccPayCat, makePayFrom, RTA, dateDiffDays, round2 } from "./util.js?v=151";
+import { addTransaction, updateTransaction, deleteTransactions, isLocked, touch } from "./mutate.js?v=151";
+import { displayName, payeeDefaultCategory, payeeSuggestedCategory } from "./payees.js?v=151";
 
 export const BANK_CUTOVER_DEFAULT = "2026-11-27";
 export const bankTxId = (plaidId) => "plaid-" + plaidId;

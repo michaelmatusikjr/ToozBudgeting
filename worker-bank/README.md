@@ -98,3 +98,22 @@ node --test worker-bank/test/*.test.mjs
 ```
 
 The tests run the real handlers against an in-memory SQLite D1, a mocked Plaid, and a fake Google that signs ID tokens with a test RSA key, so no real bank logins or Google accounts are used.
+
+
+## v2.0.1: sign-in reason codes and Plaid webhooks
+
+- **Installed iPhone app sign-in** uses `GET /auth/google/start`, which sends the app to Google's OpenID Connect page
+  (`response_type=id_token`, `response_mode=form_post`). Google posts `id_token` + `state` to `/auth/google/redirect`;
+  the state is sealed with `TOKEN_ENC_KEY` and carries a nonce the ID token must repeat. The Sign in with Google button's
+  own redirect post (`credential`) is still accepted.
+- **Reason codes.** Every sign-in failure returns `{ error, code }` (JSON) or `#signin-error=…&signin-code=CODE` (redirect),
+  and the app shows "Message (CODE)". Codes: `NO_CREDENTIAL`, `BAD_TOKEN`, `BAD_ALG`, `UNKNOWN_KEY`, `BAD_SIGNATURE`,
+  `WRONG_ISSUER`, `WRONG_AUDIENCE`, `EXPIRED`, `CLOCK`, `BAD_NONCE`, `BAD_STATE`, `STATE_EXPIRED`, `EMAIL_UNVERIFIED`,
+  `NOT_INVITED`, `JWKS_UNREACHABLE`, `GOOGLE_<error>`, `CODE_EXPIRED`. `/health` shows `lastSignInError`
+  (time, code, flow, form field names, device family; never tokens). Worker logs are on (Workers Observability).
+- **Plaid webhooks** go to `POST /plaid/webhook` (`/bank/webhook` still works). Link tokens set it; Items registered with
+  another URL get `/item/webhook/update` from the cron or Sync now. Every webhook is verified (ES256 `Plaid-Verification`
+  JWT from `/webhook_verification_key/get`, fresh `iat`, body SHA-256). `SYNC_UPDATES_AVAILABLE` runs
+  `/transactions/sync` for that Item; `ITEM` `ERROR`, `PENDING_EXPIRATION`, `PENDING_DISCONNECT`, `USER_PERMISSION_REVOKED`,
+  `LOGIN_REPAIRED`, `NEW_ACCOUNTS_AVAILABLE` update the Item's status for the app. The twice-daily cron stays as a backup.
+- Migration: `migrations/0003_webhooks.sql` (adds `items.webhook_url`, `items.last_webhook_code`). `PUBLIC_URL` is set in `wrangler.toml`.

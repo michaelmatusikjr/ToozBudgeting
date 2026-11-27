@@ -7,8 +7,8 @@
  * Conflicts are last-write-wins per record (one transaction, one category, one month's amount for one
  * category), so two people editing different things never collide.
  */
-import { account, api, patchAccount, refreshMe, onAccountChange } from "./account.js?v=140";
-import { pendingRecords, markPushed, applyRemote, reloadState, markAllDirty, clearSharedRecords, exportData, deviceSet, deviceGet } from "./store.js?v=140";
+import { account, api, patchAccount, refreshMe, onAccountChange } from "./account.js?v=151";
+import { pendingRecords, markPushed, applyRemote, reloadState, markAllDirty, clearSharedRecords, exportData, deviceSet, deviceGet } from "./store.js?v=151";
 
 const PUSH_BYTES = 350 * 1024;
 const PUSH_MAX = 800;

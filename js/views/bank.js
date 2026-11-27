@@ -1,10 +1,10 @@
 /** Settings > Bank sync: connect banks through Plaid (owners), map accounts, and sync. Uses the household sign-in. */
-import { h, btn, openSheet, field, textInput, toast, confirmDialog } from "../ui.js?v=140";
-import { bankSettings, setBankLink, setBankSettings } from "../bankmap.js?v=140";
+import { h, btn, openSheet, field, textInput, toast, confirmDialog } from "../ui.js?v=151";
+import { bankSettings, setBankLink, setBankSettings } from "../bankmap.js?v=151";
 import {
   bankState, bankConfig, setBankConfig, bankAccess, listItems, linkToken, openLink,
   pendingOAuth, pullBank, requestSync, disconnectItem, rememberItems, plainBankError, bankHealth, BANK_DEFAULTS,
-} from "../banksync.js?v=140";
+} from "../banksync.js?v=151";
 
 const STATUS = {
   ok: ["Connected", ""],

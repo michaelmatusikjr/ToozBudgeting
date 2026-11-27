@@ -6,6 +6,9 @@ workers_dev = true
 keep_vars = true
 
 # Twice a day as a backup to Plaid's webhooks (11:00 and 23:00 UTC).
+[observability]
+enabled = true
+
 [triggers]
 crons = ["0 11,23 * * *"]
 
@@ -21,6 +24,8 @@ PLAID_ENV = "production"
 REDIRECT_URI = "https://michaelmatusikjr.github.io/ToozBudgeting/oauth.html"
 DAYS_REQUESTED = "30"
 ITEM_CAP = "10"
+# This Worker's own address: Plaid webhooks (/plaid/webhook) and the Google sign-in redirect.
+PUBLIC_URL = "https://toozbudgeting-bank.michael-matusik-jr.workers.dev"
 # Public OAuth Web client ID (Google Cloud project matusik-apps). Not a secret.
 GOOGLE_CLIENT_ID = "288618019760-h116l0ov0v3c5l6apiq2bofeo5u7r83o.apps.googleusercontent.com"
 

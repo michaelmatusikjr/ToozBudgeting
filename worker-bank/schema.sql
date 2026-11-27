@@ -96,6 +96,8 @@ CREATE TABLE IF NOT EXISTS items (
   added_by TEXT,
   last_sync_at INTEGER,
   last_webhook_at INTEGER,
+  last_webhook_code TEXT,
+  webhook_url TEXT,
   sync_lock INTEGER
 );
 CREATE TABLE IF NOT EXISTS bank_inbox (
