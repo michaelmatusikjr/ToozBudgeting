@@ -56,6 +56,7 @@ function showLocal(host, ctx) {
     btn("Sign up", { block: true, kind: "ghost", onClick: () => showSignup(host, ctx) }),
     btn("Log in", { block: true, kind: "quiet", onClick: () => showLogin(host, ctx) }),
     h("p", { class: "hint", text: "Guests and device accounts budget fully on this device only. Sign in with Google any time from Settings to start sharing." }),
+    h("p", { class: "hint legal-links" }, h("a", { href: "./privacy.html", text: "Privacy" }), " · ", h("a", { href: "./terms.html", text: "Terms" })),
   );
 }
 

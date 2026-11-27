@@ -125,6 +125,7 @@ export async function renderSettings(root, ctx) {
     })}),
   ]));
   root.append(h("p", { class: "hint", text: `ToozBudgeting ${APP_VERSION}` }));
+  root.append(h("p", { class: "hint legal-links" }, h("a", { href: "./privacy.html", text: "Privacy" }), " · ", h("a", { href: "./terms.html", text: "Terms" })));
   root.append(btn("What's new", { kind: "quiet", block: true, onClick: () => openWhatsNew() }));
   if (canInstall() || (isIOS() && !isStandalone())) {
     root.append(btn("Install app", { block: true, kind: "ghost", onClick: async () => {

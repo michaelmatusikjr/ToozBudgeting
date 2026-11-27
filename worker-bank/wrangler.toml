@@ -21,9 +21,9 @@ PLAID_ENV = "production"
 REDIRECT_URI = "https://michaelmatusikjr.github.io/ToozBudgeting/oauth.html"
 DAYS_REQUESTED = "30"
 ITEM_CAP = "10"
+# Public OAuth Web client ID (Google Cloud project matusik-apps). Not a secret.
+GOOGLE_CLIENT_ID = "288618019760-h116l0ov0v3c5l6apiq2bofeo5u7r83o.apps.googleusercontent.com"
 
-# Set in the Cloudflare dashboard (Workers > toozbudgeting-bank > Settings > Variables and Secrets):
-#   GOOGLE_CLIENT_ID      Text. The OAuth Web client ID from Google Cloud (not a secret).
 # Secrets (never committed):
 #   PLAID_CLIENT_ID, PLAID_SECRET, TOKEN_ENC_KEY (32 random bytes, base64url),
 #   ALLOWED_OWNER_EMAILS  comma-separated Google emails that become owners on first sign-in.

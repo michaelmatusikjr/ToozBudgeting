@@ -780,3 +780,4 @@ input, textarea, select, [contenteditable="true"] {
 .gsi-host { min-height: 44px; display: flex; justify-content: center; margin: 10px 0px; }
 .gate-or { text-align: center; color: var(--muted); font-size: 0.85rem; margin: 14px 0px 6px; }
 .person .field { margin-top: 8px; }
+.legal-links a { color: inherit; }
