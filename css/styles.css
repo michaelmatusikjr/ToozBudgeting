@@ -790,3 +790,6 @@ input, textarea, select, [contenteditable="true"] {
 .invite-who { margin: 0 0 6px; font-weight: 600; }
 .invite-row .row-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
 .invite-out { margin-top: 10px; }
+/* Shown over Plaid Link after a bank sign-in elsewhere (Safari), so Link's waiting screen is never a dead end. */
+.link-escape { position: fixed; left: 0; right: 0; bottom: calc(16px + env(safe-area-inset-bottom)); z-index: 2147483647; display: flex; justify-content: center; pointer-events: none; }
+.link-escape button { pointer-events: auto; font: 600 15px/1 system-ui, -apple-system, sans-serif; padding: 14px 20px; border-radius: 999px; border: 0; background: #1d2327; color: #fff; box-shadow: 0 6px 24px rgba(0,0,0,.25); }

@@ -1,10 +1,10 @@
 /** Settings > Bank sync: connect banks through Plaid (owners), map accounts, and sync. Uses the household sign-in. */
-import { h, btn, openSheet, field, textInput, toast, confirmDialog } from "../ui.js?v=152";
-import { bankSettings, setBankLink, setBankSettings } from "../bankmap.js?v=152";
+import { h, btn, openSheet, field, textInput, toast, confirmDialog } from "../ui.js?v=153";
+import { bankSettings, setBankLink, setBankSettings } from "../bankmap.js?v=153";
 import {
   bankState, bankConfig, setBankConfig, bankAccess, listItems, linkToken, openLink,
   pendingOAuth, pullBank, requestSync, disconnectItem, rememberItems, plainBankError, bankHealth, BANK_DEFAULTS,
-} from "../banksync.js?v=152";
+} from "../banksync.js?v=153";
 
 const STATUS = {
   ok: ["Connected", ""],
@@ -173,11 +173,11 @@ async function startLink(ctx, itemId, data, repaint) {
   try {
     const res = await linkToken(itemId);
     if (res.warning) toast(res.warning, { ms: 7000 });
-    await runLink(ctx, { token: res.linkToken, mode: res.mode, itemId, connected: (data.items || []).map((i) => i.institutionId).filter(Boolean) }, repaint);
+    await runLink(ctx, { token: res.linkToken, mode: res.mode, itemId, linkSessionId: res.linkSessionId, connected: (data.items || []).map((i) => i.institutionId).filter(Boolean) }, repaint);
   } catch (e) { toast(plainBankError(e)); }
 }
 
-async function runLink(ctx, { token, mode, itemId, connected, receivedRedirectUri }, repaint) {
+async function runLink(ctx, { token, mode, itemId, linkSessionId, connected, receivedRedirectUri }, repaint) {
   let ids = connected;
   if (!ids) {
     const s = await bankState();
@@ -185,10 +185,10 @@ async function runLink(ctx, { token, mode, itemId, connected, receivedRedirectUr
   }
   try {
     await openLink({
-      token, mode, itemId, receivedRedirectUri, connectedInstitutions: ids,
+      token, mode, itemId, linkSessionId, receivedRedirectUri, connectedInstitutions: ids,
       onDuplicate: (name) => toast(`${name || "That bank"} is already connected. Use Reconnect on it instead.`, { ms: 7000 }),
       onDone: async (r) => {
-        if (r.ok) toast(r.mode === "update" ? "Reconnected" : `${r.item?.institution || "Bank"} connected. Choose where each account goes.`, { ms: 6000 });
+        if (r.ok) toast(r.mode === "update" ? "Reconnected" : `${r.item?.institution || "Bank"} connected${r.elsewhere ? " in Safari" : ""}. Choose where each account goes.`, { ms: 6000 });
         else if (r.message) toast(r.message, { ms: 7000 });
         repaint();
       },
