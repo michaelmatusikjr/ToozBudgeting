@@ -1026,12 +1026,12 @@ function openAssignPreview(ctx, month, result, all) {
   const amounts = {};
   result.assignments.forEach((a) => { amounts[a.categoryId] = a.amount; });
   const sheet = openSheet({
-    title: `Auto-assign — ${monthLabel(month)}`,
+    title: `✨ Auto-Assign — ${monthLabel(month)}`,
     body: (host) => {
       const paint = () => {
         const total = Object.values(amounts).reduce((s, v) => s + (Number(v) || 0), 0);
         const remaining = globalFree(ctx.budget(), month) - total;
-        const kids = [h("p", { class: "lede", text: "Review the suggested amounts. Tap any amount to change it before it lands." })];
+        const kids = [h("p", { class: "lede", text: "Review the suggested amounts below. Tap any amount to adjust it before confirming." })];
         for (const a of result.assignments) {
           const cat = budget.categories.find((c) => c.id === a.categoryId);
           kids.push(h("div", { class: "line" }, h("span", { text: cat?.name || "Category" }), moneyButton(amounts[a.categoryId] || 0, (n) => {
@@ -1040,14 +1040,14 @@ function openAssignPreview(ctx, month, result, all) {
           })));
         }
         kids.push(h("div", { class: "line" },
-          h("span", { text: "Ready to Assign after this" }),
+          h("span", { text: "Remaining RTA after assignment" }),
           h("span", { class: remaining < -0.001 ? "money neg" : "money pos", text: fmt(remaining) }),
         ));
-        if (remaining < -0.001) kids.push(h("p", { class: "error", text: "That total is more than Ready to Assign. Reduce one or more amounts." }));
+        if (remaining < -0.001) kids.push(h("p", { class: "error", text: "Total exceeds your Ready to Assign — reduce one or more amounts." }));
         const ok = remaining >= -0.001 && total > 0.005;
         kids.push(h("div", { class: "row gap" },
           btn("Cancel", { kind: "ghost", onClick: () => sheet.close() }),
-          btn("Assign", { block: true, disabled: !ok, onClick: () => {
+          btn("Confirm & Assign", { kind: "primary good", block: true, disabled: !ok, onClick: () => {
             if (!ok) return;
             ctx.updateBudget((b) => applyAssignments(b, month, amounts));
             sheet.close();
@@ -1085,12 +1085,12 @@ function proceedAfter(ctx, month, all) {
 function openSavings(ctx, month, all, goals, left) {
   const amounts = {};
   const sheet = openSheet({
-    title: "Fund savings goals?",
+    title: "💰 Fund Savings Goals?",
     body: (host) => {
       const paint = () => {
         const allocated = Object.values(amounts).reduce((s, v) => s + (Number(v) || 0), 0);
         const after = left - allocated;
-        const kids = [h("p", { class: "lede", text: `${fmt(left)} is left after this month’s other goals. Savings targets aren’t filled automatically.` })];
+        const kids = [h("p", { class: "lede", text: `You have ${fmt(left)} left over after funding this month's other goals. Enter how much to put toward any savings goals below — these aren't filled automatically.` })];
         for (const g of goals) {
           kids.push(h("div", { class: "pair" },
             h("div", { class: "line" },
@@ -1104,14 +1104,14 @@ function openSavings(ctx, month, all, goals, left) {
           ));
         }
         kids.push(h("div", { class: "line" },
-          h("span", { text: "Remaining after this" }),
+          h("span", { text: "Remaining after allocations" }),
           h("span", { class: after < -0.001 ? "money neg" : "money pos", text: fmt(after) }),
         ));
         if (after < -0.001) kids.push(h("p", { class: "error", text: "That’s more than what’s available. Reduce one or more amounts." }));
         const ok = after >= -0.001 && allocated > 0.005;
         kids.push(h("div", { class: "row gap" },
           btn("Skip", { kind: "ghost", onClick: () => { sheet.close(); afterSavings(ctx, month, all, left); } }),
-          btn("Assign", { block: true, disabled: !ok, onClick: () => {
+          btn("Assign & Continue", { kind: "primary good", block: true, disabled: !ok, onClick: () => {
             if (!ok) return;
             ctx.updateBudget((b) => applyAssignments(b, month, amounts));
             sheet.close();
@@ -1139,10 +1139,10 @@ function afterSavings(ctx, month, all, left) {
 function openCascade(ctx, month, all, left) {
   const nxt = nextMonth(month);
   const sheet = openSheet({
-    title: "This month’s goals are funded",
+    title: "🎉 This Month's Goals Funded!",
     body: (host) => {
-      host.append(h("p", { class: "lede", text: `Goals for ${monthLabel(month)} are funded. ${fmt(left)} is still Ready to Assign.` }));
-      host.append(btn("Fund every later month", { block: true, onClick: () => {
+      host.append(h("p", { class: "lede" }, "All goals for ", h("strong", { text: monthLabel(month) }), " are fully funded. You still have ", h("strong", { text: fmt(left) }), " left to assign."));
+      host.append(btn("🚀 Fund All Future Months", { kind: "primary good", block: true, onClick: () => {
         ctx.updateBudget((b) => {
           let cur = b;
           let mk = nxt;
@@ -1162,11 +1162,11 @@ function openCascade(ctx, month, all, left) {
         sheet.close();
         openRecap(ctx, [...all, ...(sheet._extra || [])]);
       }}));
-      host.append(btn(`Continue with ${monthLabel(nxt)} only`, { kind: "ghost", block: true, onClick: () => {
+      host.append(btn(`Continue → ${monthLabel(nxt)} Only`, { kind: "ghost", block: true, onClick: () => {
         sheet.close();
         runAuto(ctx, nxt, all);
       }}));
-      host.append(btn("Stop here", { kind: "quiet", block: true, onClick: () => { sheet.close(); openRecap(ctx, all); } }));
+      host.append(btn("Stop Here", { kind: "ghost", block: true, onClick: () => { sheet.close(); openRecap(ctx, all); } }));
     },
   });
 }
@@ -1183,9 +1183,9 @@ function openRecap(ctx, all) {
   if (!blocks.length) { toast("Assigned"); return; }
   const grand = blocks.reduce((s, b) => s + b.items.reduce((t, i) => t + i.amount, 0), 0);
   const sheet = openSheet({
-    title: "Auto-assign recap",
+    title: "✨ Auto-Assign Recap",
     body: (host) => {
-      host.append(h("p", { class: "lede", text: "Here’s everything that was assigned." }));
+      host.append(h("p", { class: "lede", text: "Here's everything that was assigned:" }));
       for (const block of blocks) {
         host.append(h("p", { class: "kicker", text: monthLabel(block.month) }));
         for (const item of block.items) {
@@ -1194,7 +1194,7 @@ function openRecap(ctx, all) {
         const sub = block.items.reduce((s, i) => s + i.amount, 0);
         host.append(h("div", { class: "line" }, h("span", { class: "muted", text: "Subtotal" }), h("span", { text: fmt(sub) })));
       }
-      host.append(h("div", { class: "line" }, h("strong", { text: "Total assigned" }), h("strong", { text: fmt(grand) })));
+      host.append(h("div", { class: "line" }, h("strong", { text: "Total Assigned" }), h("strong", { text: fmt(grand) })));
       host.append(btn("Done", { block: true, onClick: () => sheet.close() }));
     },
   });
@@ -1632,43 +1632,62 @@ function openAllGoals(ctx) {
   const cats = (budget.categories || []).filter((c) => !c.archived && !c.creditCardId);
   const local = {};
   for (const c of cats) local[c.id] = { type: c.goal?.type || "", target: c.goal?.target || 0, targetDate: c.goal?.targetDate || "" };
+  const types = [
+    { value: "", label: "None" },
+    { value: "savings", label: "💰 Savings" },
+    { value: "monthly", label: "📅 Monthly" },
+    { value: "date", label: "🏁 By Date" },
+  ];
   const sheet = openSheet({
-    title: "All goals",
+    title: "🎯 Edit All Goals",
     body: (host) => {
-      host.append(h("p", { class: "lede", text: "Set a goal on any category. Nothing is saved until you tap Save all." }));
-      for (const c of cats) {
-        const g = local[c.id];
-        const type = h("select", { class: "input" },
-          h("option", { value: "", text: "No goal" }),
-          h("option", { value: "monthly", text: "Monthly" }),
-          h("option", { value: "date", text: "By date" }),
-          h("option", { value: "savings", text: "Savings" }),
-        );
-        type.value = g.type;
-        const extra = h("div");
-        const paint = () => {
-          extra.replaceChildren();
-          if (!g.type) return;
-          extra.append(field("Target", moneyButton(g.target, (n) => { g.target = n; })));
-          if (g.type === "date") extra.append(field("Month", h("input", { class: "input", type: "month", value: g.targetDate, onchange: (e) => { g.targetDate = e.target.value; } })));
-        };
-        type.addEventListener("change", () => { g.type = type.value; paint(); });
-        paint();
-        host.append(h("div", { class: "pair" }, h("strong", { text: c.name }), type, extra));
-      }
-      host.append(btn("Save all", { block: true, onClick: () => {
-        ctx.updateBudget((b) => ({
-          ...b,
-          categories: b.categories.map((c) => {
+      const paint = () => {
+        const kids = [h("p", { class: "lede", text: "Set or update goals for any category. Changes apply when you tap Save All." })];
+        for (const grp of (budget.categoryGroups || []).filter((g) => g.name !== "Credit Card Payments")) {
+          const gcats = cats.filter((c) => c.groupId === grp.id);
+          if (!gcats.length) continue;
+          kids.push(h("div", { class: "goals-group-h", text: grp.name }));
+          for (const c of gcats) {
             const g = local[c.id];
-            if (!g) return c;
-            const goal = g.type ? { type: g.type, target: g.target || 0, ...(g.type === "date" ? { targetDate: g.targetDate } : {}) } : null;
-            return { ...c, goal };
-          }),
-        }));
-        sheet.close();
-        toast("Goals saved");
-      }}));
+            const pills = h("div", { class: "goal-pills" });
+            for (const gt of types) {
+              pills.append(h("button", {
+                type: "button",
+                class: g.type === gt.value ? "goal-pill on" : "goal-pill",
+                text: gt.label,
+                onclick: () => { g.type = gt.value; paint(); },
+              }));
+            }
+            const extra = h("div", { class: "goal-fields" });
+            if (g.type === "savings" || g.type === "monthly") {
+              extra.append(field(g.type === "savings" ? "Target ($)" : "Monthly ($)", amountInput({ value: g.target, onCommit: (n) => { g.target = n; }, placeholder: "0.00" })));
+            }
+            if (g.type === "date") {
+              extra.append(field("Target ($)", amountInput({ value: g.target, onCommit: (n) => { g.target = n; }, placeholder: "0.00" })));
+              extra.append(field("By Date", h("input", { class: "input", type: "month", value: g.targetDate, min: monthKey(), onchange: (e) => { g.targetDate = e.target.value; } })));
+            }
+            kids.push(h("div", { class: "goal-row" }, h("div", { class: "goal-cat", text: c.name }), pills, extra));
+          }
+        }
+        kids.push(btnRow(
+          { label: "Cancel", kind: "ghost", onClick: () => sheet.close() },
+          { label: "Save All", kind: "primary good", onClick: () => {
+            ctx.updateBudget((b) => ({
+              ...b,
+              categories: b.categories.map((c) => {
+                const g = local[c.id];
+                if (!g) return c;
+                const goal = g.type ? { type: g.type, target: g.target || 0, ...(g.type === "date" ? { targetDate: g.targetDate } : {}) } : null;
+                return { ...c, goal };
+              }),
+            }));
+            sheet.close();
+            toast("Goals saved");
+          }},
+        ));
+        host.replaceChildren(...kids);
+      };
+      paint();
     },
   });
 }

@@ -1535,3 +1535,31 @@ input, textarea, select, [contenteditable="true"] {
 .btn.purple { background: var(--purple); color: #fff; border-color: var(--purple); }
 .btn-row { display: flex; gap: 8px; margin-top: 8px; }
 .btn-row .btn { flex: 1; }
+
+/* WU-14: auto-assign + edit all goals */
+.btn.good, .btn.primary.good, .sheet .btn.good, .sheet .btn.good.block, .sheet .btn.primary.good {
+  background: var(--good); color: #fff; border-color: var(--good);
+}
+.goals-group-h {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-2);
+  margin: 14px 0 8px;
+}
+.goal-row { padding: 8px 0; border-bottom: 1px solid var(--row-divider); }
+.goal-cat { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+.goal-pills { display: flex; flex-wrap: wrap; gap: 6px; }
+.goal-pill {
+  background: var(--soft);
+  border: 1.5px solid transparent;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  color: var(--ink);
+}
+.goal-pill.on { background: var(--green-bg); border-color: var(--good); font-weight: 700; }
+.goal-fields { margin-top: 8px; }
