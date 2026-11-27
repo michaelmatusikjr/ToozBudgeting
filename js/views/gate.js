@@ -1,8 +1,8 @@
-import { h, field, textInput, btn, toast, moneyButton } from "../ui.js?v=152";
-import { genUserId, guestSuffix, toTitleCase, uid } from "../util.js?v=152";
-import { DEFAULT_GROUPS, DEFAULT_CATS, finishWizard } from "../mutate.js?v=152";
-import { importData } from "../store.js?v=152";
-import { renderGoogleButton, inviteDetails, setPendingInvite, ROLE_LABEL } from "../account.js?v=152";
+import { h, field, textInput, btn, toast, moneyButton } from "../ui.js?v=153";
+import { genUserId, guestSuffix, toTitleCase, uid } from "../util.js?v=153";
+import { DEFAULT_GROUPS, DEFAULT_CATS, finishWizard } from "../mutate.js?v=153";
+import { importData } from "../store.js?v=153";
+import { renderGoogleButton, inviteDetails, setPendingInvite, ROLE_LABEL } from "../account.js?v=153";
 
 export function renderIdentity(root, ctx, { invite = null } = {}) {
   root.append(h("main", { class: "gate" },

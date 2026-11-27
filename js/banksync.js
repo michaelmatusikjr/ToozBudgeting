@@ -6,10 +6,10 @@
  * claims them, applies them to the shared budget, pushes the result, and acks. Transaction ids come from
  * Plaid (plaid-<id>), so applying the same batch twice never makes a duplicate.
  */
-import { deviceGet, deviceSet } from "./store.js?v=152";
-import { applyBankBatch, rememberBankAccounts, sumStats, statsLine } from "./bankmap.js?v=152";
-import { api, account, serverUrl, SERVER_DEFAULT, ApiError } from "./account.js?v=152";
-import { syncNow } from "./sync.js?v=152";
+import { deviceGet, deviceSet } from "./store.js?v=153";
+import { applyBankBatch, rememberBankAccounts, sumStats, statsLine } from "./bankmap.js?v=153";
+import { api, account, serverUrl, SERVER_DEFAULT, ApiError } from "./account.js?v=153";
+import { syncNow } from "./sync.js?v=153";
 
 export const BANK_DEFAULTS = { serverUrl: SERVER_DEFAULT };
 export const PLAID_LINK_SRC = "https://cdn.plaid.com/link/v2/stable/link-initialize.js";
@@ -62,12 +62,26 @@ export async function listItems() {
   return res;
 }
 export const linkToken = (itemId) => api("POST", "/bank/link-token", itemId ? { itemId } : {});
-export const exchangePublicToken = (publicToken, metadata) => api("POST", "/bank/exchange", {
+export const exchangePublicToken = (publicToken, metadata, linkSessionId) => api("POST", "/bank/exchange", {
   publicToken,
+  linkSessionId: linkSessionId || undefined,
   institution: metadata?.institution || null,
   accounts: (metadata?.accounts || []).map((a) => ({ id: a.id, name: a.name, mask: a.mask, type: a.type, subtype: a.subtype })),
 });
-export const markRepaired = (itemId) => api("POST", `/bank/items/${encodeURIComponent(itemId)}/repaired`, {});
+export const markRepaired = (itemId, linkSessionId) => api("POST", `/bank/items/${encodeURIComponent(itemId)}/repaired`, linkSessionId ? { linkSessionId } : {});
+export const pendingLinkSession = () => api("GET", "/bank/link/pending");
+export const linkSessionStatus = (id) => api("GET", `/bank/link/${encodeURIComponent(id)}`);
+export const linkSessionEvent = (id, status, reason) => id ? api("POST", `/bank/link/${encodeURIComponent(id)}/event`, { status, reason }).catch(() => null) : Promise.resolve(null);
+
+/** The Link session this browser started (same browser only; the iPhone home-screen app and Safari don't share it). */
+export function readLocalLink() {
+  try {
+    const link = JSON.parse(localStorage.getItem(LINK_KEY) || "null");
+    if (!link?.token || Date.now() - (link.at || 0) > 30 * 60000) return null;
+    return link;
+  } catch { return null; }
+}
+export function clearLocalLink() { try { localStorage.removeItem(LINK_KEY); localStorage.removeItem(OAUTH_KEY); } catch { /* ignore */ } }
 export const disconnectItem = (itemId) => api("DELETE", `/bank/items/${encodeURIComponent(itemId)}`);
 export const requestSync = (itemId) => api("POST", "/bank/sync", itemId ? { itemId } : {});
 
@@ -186,33 +200,73 @@ export function loadPlaidLink() {
  * connectedInstitutions guards the 10-login cap: picking a bank that's already connected closes Link
  * before any login is created.
  */
-export async function openLink({ token, mode, itemId, connectedInstitutions = [], receivedRedirectUri, onDone, onDuplicate }) {
+export async function openLink({ token, mode, itemId, linkSessionId, connectedInstitutions = [], receivedRedirectUri, onDone, onDuplicate }) {
   const Plaid = await loadPlaidLink();
   if (!receivedRedirectUri) {
-    try { localStorage.setItem(LINK_KEY, JSON.stringify({ token, mode, itemId: itemId || null, at: Date.now() })); } catch { /* ignore */ }
+    try { localStorage.setItem(LINK_KEY, JSON.stringify({ token, mode, itemId: itemId || null, linkSessionId: linkSessionId || null, at: Date.now() })); } catch { /* ignore */ }
   }
   let handler = null;
   let dupe = false;
+  let done = false;
+  let oauthOpen = false;
+  let poll = null;
+  let escape = null;
+  const stopWatching = () => {
+    clearInterval(poll); poll = null;
+    document.removeEventListener("visibilitychange", onVisible);
+    escape?.remove(); escape = null;
+  };
   const finish = (result) => {
-    try { localStorage.removeItem(LINK_KEY); localStorage.removeItem(OAUTH_KEY); } catch { /* ignore */ }
+    if (done) return;
+    done = true;
+    stopWatching();
+    clearLocalLink();
     try { handler?.destroy?.(); } catch { /* ignore */ }
     onDone?.(result);
   };
+  // The bank's sign-in (Chase OAuth) may finish in another browser: on iPhone the home-screen app's return opens
+  // in Safari, which completes the connection there. Back here, Link would wait on a blank screen forever, so
+  // watch the server-side session and close Link when it's done, and offer a way out.
+  const check = async () => {
+    if (!linkSessionId || done) return;
+    try {
+      const { link } = await linkSessionStatus(linkSessionId);
+      if (link.status === "done") finish({ ok: true, mode, item: link.result?.itemId ? { itemId: link.result.itemId, institution: link.result.institution } : null, elsewhere: true });
+    } catch { /* keep waiting */ }
+  };
+  function onVisible() {
+    if (document.visibilityState !== "visible" || !oauthOpen || done) return;
+    check();
+    if (!poll) { let n = 0; poll = setInterval(() => { if (++n > 60) { clearInterval(poll); poll = null; } check(); }, 3000); }
+    if (!escape) {
+      escape = document.createElement("div");
+      escape.className = "link-escape";
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = "Finished at your bank? Close this";
+      b.onclick = async () => { await check(); if (!done) { try { handler?.exit?.({ force: true }); } catch { /* ignore */ } setTimeout(() => finish({ ok: false, cancelled: true, message: "Closed. If the bank finished connecting in Safari, it shows up here in a moment (LINK_CLOSED)." }), 300); } };
+      escape.append(b);
+      document.body.append(escape);
+    }
+  }
+  document.addEventListener("visibilitychange", onVisible);
   handler = Plaid.create({
     token,
     receivedRedirectUri: receivedRedirectUri || undefined,
     onSuccess: async (publicToken, metadata) => {
       try {
-        if (mode === "update") { await markRepaired(itemId); finish({ ok: true, mode }); return; }
-        const res = await exchangePublicToken(publicToken, metadata);
+        if (mode === "update") { await markRepaired(itemId, linkSessionId); finish({ ok: true, mode }); return; }
+        const res = await exchangePublicToken(publicToken, metadata, linkSessionId);
         finish({ ok: true, mode, item: res.item });
       } catch (e) { finish({ ok: false, message: e.message, data: e.data }); }
     },
     onExit: (err) => {
+      linkSessionEvent(linkSessionId, "exited", err?.error_code || (dupe ? "DUPLICATE" : "USER_EXIT"));
       if (dupe) { finish({ ok: false, duplicate: true }); return; }
-      finish({ ok: false, cancelled: !err, message: err?.display_message || err?.error_message || null });
+      finish({ ok: false, cancelled: !err, message: err ? `${err.display_message || err.error_message || "Plaid Link stopped"} (${err.error_code || "LINK_EXIT"})` : null });
     },
     onEvent: (name, meta) => {
+      if (name === "OPEN_OAUTH") { oauthOpen = true; linkSessionEvent(linkSessionId, "oauth"); }
       if (mode !== "update" && name === "SELECT_INSTITUTION" && meta?.institution_id && connectedInstitutions.includes(meta.institution_id)) {
         dupe = true;
         onDuplicate?.(meta.institution_name);

@@ -10,7 +10,7 @@
  * (encrypted at rest with TOKEN_ENC_KEY). One signed-in device claims a batch, applies it to the shared
  * budget, pushes the result, and acks. Only owners can connect, reconnect, or remove banks.
  */
-import { sealToken, openToken, verifyEs256, jwtHeader, sha256Hex, safeEqual } from "./crypto.js";
+import { sealToken, openToken, randomToken, verifyEs256, jwtHeader, sha256Hex, safeEqual } from "./crypto.js";
 import { plaidClient, PlaidError, LOGIN_CODES, slimTx, slimAccount } from "./plaid.js";
 import { HttpError, now, corsHeaders, json, readJson, meta, setMeta } from "./http.js";
 import {
@@ -20,7 +20,7 @@ import {
 import { push, pull } from "./sync.js";
 import { appStatus, appKeys, setAppLink, removeAppLink, getPrefs, setPrefs } from "./apps.js";
 
-const VERSION = "2.1.1";
+const VERSION = "2.1.2";
 const DEFAULT_CAP = 10;
 const CHUNK = 400;
 const SYNC_LOCK_MS = 5 * 60000;
@@ -28,6 +28,8 @@ const SYNC_NOW_GAP_MS = 30000;
 const INBOX_KEEP_DAYS = 45;
 const CLAIM_MS = 2 * 60000;
 const MAX_ACK_BYTES = 1500 * 1024;
+const LINK_SESSION_MS = 30 * 60000; // Plaid link tokens last 4 hours; a bank sign-in should finish well within 30 minutes
+
 
 function serverBase(env, req) {
   return String(env.PUBLIC_URL || (req ? new URL(req.url).origin : "")).replace(/\/+$/, "");
@@ -146,7 +148,56 @@ async function linkToken(env, req, plaid, session) {
       res = await plaid("/link/token/create", request);
     } else throw e;
   }
-  return { linkToken: res.link_token, expiration: res.expiration, mode, oauthRedirect, warning };
+  // Keep the session server-side: a bank's sign-in (Chase OAuth) can return in another browser (the iPhone
+  // home-screen app's return opens in Safari), which needs the same link token to finish.
+  const id = "l_" + randomToken(12);
+  await env.DB.prepare(`INSERT INTO link_sessions (id, household_id, user_id, link_token_enc, mode, item_id, status, oauth_redirect, created_at, updated_at, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)`)
+    .bind(id, session.householdId, session.user.id, await sealToken(env.TOKEN_ENC_KEY, "link:" + id, res.link_token), mode, body.itemId ? String(body.itemId) : null,
+      oauthRedirect ? 1 : 0, now(), now(), now() + LINK_SESSION_MS).run();
+  console.log("link_token", JSON.stringify({ mode, oauthRedirect, linkSession: id }));
+  return { linkToken: res.link_token, expiration: res.expiration, mode, oauthRedirect, warning, linkSessionId: id };
+}
+
+function linkSessionView(row) {
+  let result = null;
+  try { result = row.result ? JSON.parse(row.result) : null; } catch { result = null; }
+  return { id: row.id, mode: row.mode, itemId: row.item_id || null, status: row.status, result, createdAt: row.created_at, expiresAt: row.expires_at };
+}
+
+/** GET /bank/link/pending: the household's latest unfinished Link session, with its link token, to resume after a bank OAuth return. */
+async function pendingLink(env, session) {
+  requireAction(session, "bank.manage", "Only a household owner can connect banks");
+  const row = await env.DB.prepare("SELECT * FROM link_sessions WHERE household_id = ? AND status IN ('open', 'oauth') AND expires_at > ? ORDER BY created_at DESC LIMIT 1")
+    .bind(session.householdId, now()).first();
+  if (!row) throw new HttpError(404, "There’s no bank connection waiting to finish. Start again from Settings › Bank sync.", { code: "LINK_NOT_FOUND" });
+  return { link: { ...linkSessionView(row), linkToken: await openToken(env.TOKEN_ENC_KEY, "link:" + row.id, row.link_token_enc) } };
+}
+
+/** GET /bank/link/<id>: status only (the app polls it while Link waits on a bank sign-in elsewhere). */
+async function linkStatus(env, session, id) {
+  requireAction(session, "bank.view");
+  const row = await env.DB.prepare("SELECT * FROM link_sessions WHERE id = ? AND household_id = ?").bind(String(id), session.householdId).first();
+  if (!row) throw new HttpError(404, "Unknown bank connection", { code: "LINK_NOT_FOUND" });
+  return { link: linkSessionView(row) };
+}
+
+/** POST /bank/link/<id>/event { status: "oauth" | "exited", reason }: Link's progress, for status checks and logs. */
+async function linkEvent(env, req, session, id) {
+  requireAction(session, "bank.manage", "Only a household owner can connect banks");
+  const body = await readJson(req);
+  const status = ["oauth", "exited"].includes(body.status) ? body.status : null;
+  if (!status) throw new HttpError(400, "status must be oauth or exited");
+  await env.DB.prepare("UPDATE link_sessions SET status = ?, result = COALESCE(?, result), updated_at = ? WHERE id = ? AND household_id = ? AND status IN ('open', 'oauth')")
+    .bind(status, body.reason ? JSON.stringify({ reason: String(body.reason).slice(0, 120) }) : null, now(), String(id), session.householdId).run();
+  console.log("link_event", JSON.stringify({ id, status, reason: body.reason || null }));
+  return linkStatus(env, session, id);
+}
+
+async function finishLinkSession(env, session, id, result) {
+  if (!id) return;
+  await env.DB.prepare("UPDATE link_sessions SET status = 'done', result = ?, updated_at = ? WHERE id = ? AND household_id = ?")
+    .bind(JSON.stringify(result), now(), String(id), session.householdId).run();
 }
 
 async function exchange(env, req, plaid, ctx, session) {
@@ -180,6 +231,7 @@ async function exchange(env, req, plaid, ctx, session) {
   await env.DB.prepare("UPDATE items SET webhook_url = ? WHERE item_id = ?").bind(webhookUrl(env, req), itemId).run();
   const row = await env.DB.prepare("SELECT * FROM items WHERE item_id = ?").bind(itemId).first();
   ctx?.waitUntil?.(syncItem(env, plaid, itemId).catch(() => {}));
+  await finishLinkSession(env, session, body.linkSessionId, { itemId, institution: row.institution_name });
   return { item: itemView(row) };
 }
 
@@ -207,8 +259,10 @@ async function removeItem(env, plaid, session, itemId) {
 }
 
 /** After Reconnect (Link update mode) succeeds, clear the flags and pull anything that was waiting. */
-async function repaired(env, plaid, session, itemId, ctx) {
+async function repaired(env, plaid, session, itemId, ctx, req) {
   requireAction(session, "bank.manage", "Only a household owner can reconnect banks");
+  let body = {};
+  try { body = req ? await readJson(req) : {}; } catch { body = {}; }
   const row = await householdItem(env, session, itemId);
   let accounts = null;
   try {
@@ -218,6 +272,7 @@ async function repaired(env, plaid, session, itemId, ctx) {
   await env.DB.prepare("UPDATE items SET status = 'ok', error = NULL, new_accounts = 0, consent_expires_at = NULL, accounts = COALESCE(?, accounts) WHERE item_id = ?").bind(accounts, itemId).run();
   ctx?.waitUntil?.(syncItem(env, plaid, itemId).catch(() => {}));
   const next = await env.DB.prepare("SELECT * FROM items WHERE item_id = ?").bind(itemId).first();
+  await finishLinkSession(env, session, body.linkSessionId, { itemId, institution: next.institution_name, repaired: true });
   return { item: itemView(next) };
 }
 
@@ -451,6 +506,7 @@ export async function runScheduled(env, plaid) {
     await env.DB.prepare("DELETE FROM attempts WHERE at < ?").bind(now() - 86400000).run();
     await env.DB.prepare("DELETE FROM sessions WHERE expires_at < ?").bind(now()).run();
     await env.DB.prepare("DELETE FROM login_codes WHERE expires_at < ?").bind(now()).run();
+    await env.DB.prepare("DELETE FROM link_sessions WHERE expires_at < ?").bind(now() - 86400000).run();
     await setMeta(env, "last_cron_at", now());
     await setMeta(env, "last_cron_error", null);
   } catch (e) {
@@ -497,8 +553,11 @@ export function makeHandler({ fetchImpl } = {}) {
       else if (path === "/bank/link-token" && m === "POST") out = await linkToken(env, req, plaid, s);
       else if (path === "/bank/exchange" && m === "POST") out = await exchange(env, req, plaid, ctx, s);
       else if (path === "/bank/items" && m === "GET") out = await listItems(env, s);
-      else if (/^\/bank\/items\/[^/]+\/repaired$/.test(path) && m === "POST") out = await repaired(env, plaid, s, decodeURIComponent(path.split("/")[3]), ctx);
+      else if (/^\/bank\/items\/[^/]+\/repaired$/.test(path) && m === "POST") out = await repaired(env, plaid, s, decodeURIComponent(path.split("/")[3]), ctx, req);
       else if (path.startsWith("/bank/items/") && m === "DELETE") out = await removeItem(env, plaid, s, decodeURIComponent(path.slice(12)));
+      else if (path === "/bank/link/pending" && m === "GET") out = await pendingLink(env, s);
+      else if (/^\/bank\/link\/l_[\w-]+$/.test(path) && m === "GET") out = await linkStatus(env, s, path.split("/")[3]);
+      else if (/^\/bank\/link\/l_[\w-]+\/event$/.test(path) && m === "POST") out = await linkEvent(env, req, s, path.split("/")[3]);
       else if (path === "/bank/sync" && m === "POST") out = await syncNow(env, req, plaid, s);
       else if (path === "/bank/inbox" && m === "GET") out = await inbox(env, s);
       else if (path === "/bank/ack" && m === "POST") out = await ack(env, req, s);

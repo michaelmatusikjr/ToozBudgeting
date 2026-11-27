@@ -139,3 +139,19 @@ CREATE TABLE IF NOT EXISTS app_prefs (
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (household_id, user_id, app)
 );
+
+CREATE TABLE IF NOT EXISTS link_sessions (
+  id TEXT PRIMARY KEY,
+  household_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  link_token_enc TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  item_id TEXT,
+  status TEXT NOT NULL DEFAULT 'open',
+  result TEXT,
+  oauth_redirect INTEGER DEFAULT 0,
+  created_at INTEGER,
+  updated_at INTEGER,
+  expires_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS link_sessions_household ON link_sessions (household_id, created_at);

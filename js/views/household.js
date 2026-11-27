@@ -1,10 +1,10 @@
 /** Settings > Household: who's signed in, the people in the household, invites, roles, and sync status. */
-import { h, btn, openSheet, field, textInput, toast, confirmDialog } from "../ui.js?v=152";
+import { h, btn, openSheet, field, textInput, toast, confirmDialog } from "../ui.js?v=153";
 import {
   account, renderGoogleButton, signOut, listMembers, invite, revokeInvite, setMember, removeMember, setMyName,
   renameHousehold, refreshMe, ROLE_LABEL, ROLE_HINT, shareInvite, inviteMessage,
-} from "../account.js?v=152";
-import { syncNow, syncStatus, preSyncBackup } from "../sync.js?v=152";
+} from "../account.js?v=153";
+import { syncNow, syncStatus, preSyncBackup } from "../sync.js?v=153";
 
 /** "Share invite link": the share sheet, or copy. If neither works, show the message to copy by hand. */
 function shareButton(inv, householdName, { label = "Share invite link", kind = "ghost", block = false } = {}) {
