@@ -1729,3 +1729,8 @@ input, textarea, select, [contenteditable="true"] {
 .tx-split-total { color: var(--muted); }
 
 .tx-form-actions { position: sticky; bottom: -24px; background: var(--surface); padding: 12px 0 8px; margin-top: 4px; z-index: 3; }
+
+/* WU-21: Edit Transaction */
+.tx-lock-banner { background: var(--row-divider); border: 1px solid var(--line); border-radius: 8px; padding: 10px; font-size: 12px; color: var(--ink-2); margin-bottom: 14px; line-height: 1.5; }
+.tx-approval { margin-bottom: 12px; }
+.tx-edit-actions > .btn { flex: 1; min-width: 0; }

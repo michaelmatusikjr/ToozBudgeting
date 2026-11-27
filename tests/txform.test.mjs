@@ -66,3 +66,42 @@ test("a transfer made from the form shows on both accounts", () => {
   assert.equal(after[chk], before[chk] - 75);
   assert.equal(after[sav], before[sav] + 75);
 });
+
+import { unreconcileTransaction, isLocked, reconcileAccount } from "../js/mutate.js?v=154";
+
+test("unreconcile unlocks a reconciled transaction", () => {
+  const { b, chk, groceries } = fixture();
+  let res = addTransaction(b, { date: "2026-11-20", payee: "Kroger", amount: 12, accountId: chk, categoryId: groceries });
+  const tx = res.budget.transactions.find((t) => t.payee === "Kroger");
+  let locked = { ...res.budget, transactions: res.budget.transactions.map((t) => t.id === tx.id ? { ...t, reconciled: true } : t) };
+  assert.equal(isLocked(locked, locked.transactions.find((t) => t.id === tx.id)), true);
+  const out = unreconcileTransaction(locked, tx.id);
+  assert.equal(out.error, undefined);
+  const next = out.budget.transactions.find((t) => t.id === tx.id);
+  assert.equal(next.reconciled, false);
+  assert.equal(isLocked(out.budget, next), false);
+});
+
+test("unreconcile rolls the account date back when that is what locked the row", () => {
+  const { b, chk, groceries } = fixture();
+  let res = addTransaction(b, { date: "2026-11-20", payee: "Kroger", amount: 12, accountId: chk, categoryId: groceries });
+  const tx = res.budget.transactions.find((t) => t.payee === "Kroger");
+  const dated = {
+    ...res.budget,
+    accounts: res.budget.accounts.map((a) => a.id === chk ? { ...a, reconciledDate: "2026-11-25" } : a),
+  };
+  assert.equal(isLocked(dated, dated.transactions.find((t) => t.id === tx.id)), true);
+  const out = unreconcileTransaction(dated, tx.id);
+  const acc = out.budget.accounts.find((a) => a.id === chk);
+  assert.equal(acc.reconciledDate, "2026-11-19");
+  assert.equal(isLocked(out.budget, out.budget.transactions.find((t) => t.id === tx.id)), false);
+});
+
+test("a starting balance cannot be unreconciled", () => {
+  const { b } = fixture();
+  const sb = b.transactions.find((t) => t.subtype === "starting_balance");
+  assert.ok(sb);
+  const out = unreconcileTransaction(b, sb.id);
+  assert.ok(out.error);
+  assert.equal(out.budget.transactions.find((t) => t.id === sb.id).reconciled, true);
+});

@@ -2,7 +2,7 @@ import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog,
 import { fmt, todayKey, toTitleCase, isCard, isPayFrom, ccPayCat, makePayFrom, RTA, uid, monthLabel } from "../util.js?v=154";
 import { deviceSet } from "../store.js?v=154";
 import { displayName, payeeDefaultCategory, payeeSuggestedCategory, findFuzzyDuplicates, isAccountPayee } from "../payees.js?v=154";
-import { addTransaction, deleteTransactions, isLocked, setTxCategory, updateTransaction, replaceTransaction, confirmCategories } from "../mutate.js?v=154";
+import { addTransaction, deleteTransactions, isLocked, setTxCategory, updateTransaction, replaceTransaction, confirmCategories, unreconcileTransaction } from "../mutate.js?v=154";
 import { parseCSV, guessColumnMapping, applyMapping } from "../csv.js?v=154";
 
 
@@ -713,9 +713,20 @@ function formCanSave(form, budget) {
   return true;
 }
 
-export function openTx(ctx, existing) {
+export function openTx(ctx, existing, opts = {}) {
   const budget = ctx.budget();
-  if (existing?.subtype === "starting_balance") { toast("Starting balances can’t be edited or deleted"); return; }
+  if (existing?.subtype === "starting_balance") {
+    const sheet = openSheet({
+      title: "🏦 Starting Balance",
+      body: (host) => {
+        append(host,
+          h("div", { class: "tx-lock-banner", text: "🔒 This is a Starting Balance transaction. It's permanently locked and cannot be edited or deleted." }),
+          btn("Close", { kind: "ghost", onClick: () => sheet.close() }),
+        );
+      },
+    });
+    return;
+  }
   const editing = !!(existing?.id && !existing.draft);
   const locked = editing && isLocked(budget, existing);
   const form = {
@@ -725,7 +736,14 @@ export function openTx(ctx, existing) {
     amount: existing ? Math.abs(Number(existing.amount) || 0) : 0,
     isRefund: existing?.type === "expense" && Number(existing.amount) < 0,
     accountId: existing?.accountId || "",
-    categoryId: existing?.type === "income" ? RTA : (existing?.categoryId || ""),
+    categoryId: (() => {
+      if (existing?.type === "income") return RTA;
+      if (existing?.type === "payment") {
+        if (existing.paymentFromAccountId) return makePayFrom(existing.paymentFromAccountId);
+        if (existing.categoryId) return existing.categoryId;
+      }
+      return existing?.categoryId || "";
+    })(),
     transferAccountId: existing?.transferAccountId || "",
     splits: existing?.splits ? existing.splits.map((s) => ({ ...s, amount: Math.abs(s.amount) })) : null,
     type: existing?.type || "expense",
@@ -734,8 +752,8 @@ export function openTx(ctx, existing) {
     preSplitAmount: 0,
   };
   const sheet = openSheet({
-    title: existing?.draft ? "Enter the other side" : (editing ? "Edit transaction" : "New Transaction"),
-    closeLabel: editing ? undefined : "Discard",
+    title: existing?.draft ? "Enter the other side" : (editing ? "Edit Transaction" : "New Transaction"),
+    closeLabel: "Discard",
     body: (host) => {
       if (!editing && !existing?.draft && !hasUsableAccount(budget)) {
         append(host,
@@ -804,6 +822,7 @@ export function openTx(ctx, existing) {
       const payeeField = () => {
         const wrap = h("div", { class: "tx-payee-wrap" });
         const input = textInput({ value: form.payee, placeholder: "Who was it?" });
+        if (locked) input.disabled = true;
         input.setAttribute("autocapitalize", "words");
         input.setAttribute("autocorrect", "off");
         input.setAttribute("spellcheck", "false");
@@ -905,16 +924,19 @@ export function openTx(ctx, existing) {
         const isTransfer = !!form.transferAccountId;
         const isSpecial = isIncome || isPayment || isTransfer;
         const kids = [];
+        if (opts.approval) kids.push(h("div", { class: "tx-approval" }));
+        if (locked) kids.push(h("div", { class: "tx-lock-banner", text: "🔒 This transaction is locked (reconciled). Category and note can still be edited." }));
         if (existing?.draft) {
           kids.push(h("p", { class: "lede", text: "This is the missing side of a card payment. Check the account and category, then add it." }));
         }
-        const date = h("input", { class: "input", type: "date", value: form.date });
+        const date = h("input", { class: "input", type: "date", value: form.date, disabled: locked || null });
         date.addEventListener("change", () => { form.date = date.value; });
         kids.push(field("Date", date));
         kids.push(searchableSel({
           label: "Account",
           value: form.accountId,
           placeholder: "Search accounts...",
+          disabled: locked,
           options: accountSelectOptions(budget, form.accountId),
           onChange: (v) => {
             form.accountId = v;
@@ -928,6 +950,7 @@ export function openTx(ctx, existing) {
           label: "Transfer to",
           value: form.transferAccountId || "",
           placeholder: "Search accounts...",
+          disabled: locked,
           options: transferSelectOptions(budget, form.accountId),
           onChange: (v) => {
             form.transferAccountId = v;
@@ -945,8 +968,9 @@ export function openTx(ctx, existing) {
             label: "Category",
             value: form.categoryId,
             placeholder: form.accountId ? "Search categories..." : "Select account first",
+            disabled: locked && !form.categoryId,
             options: form.accountId
-              ? catOptionsForAccount(budget, form.accountId, [{ value: RTA, label: "→ Ready to Assign (income)" }])
+              ? catOptionsForAccount(budget, form.accountId, [{ value: RTA, label: editing ? "→ Ready to Assign (convert to income)" : "→ Ready to Assign (income)" }])
               : [{ value: "", label: "Select account first" }],
             onChange: (v) => { form.categoryId = v; form.categoryConfirmed = true; paint(); },
           }));
@@ -957,17 +981,19 @@ export function openTx(ctx, existing) {
               label: "Amount",
               value: form.amount,
               placeholder: "0.00",
+              disabled: locked,
               onChange: (v) => { form.amount = Math.max(0, v); refreshActions(); },
               onCommit: (v) => { form.amount = Math.max(0, v); refreshActions(); },
             }));
           } else {
             kids.push(field("Amount", h("div", { class: "tx-amt-row" },
-              signToggle(form.isRefund, (refund) => { form.isRefund = refund; paint(); }),
+              signToggle(form.isRefund, (refund) => { if (!locked) { form.isRefund = refund; paint(); } }),
               h("div", { class: "tx-amt-box" },
                 h("span", { class: "tx-amt-prefix", text: form.isRefund ? "+" : "−" }),
                 amountInput({
                   value: form.amount ? Math.abs(form.amount) : 0,
                   placeholder: "0.00",
+                  disabled: locked,
                   onChange: (v) => { form.amount = Math.abs(v); refreshActions(); },
                   onCommit: (v) => { form.amount = Math.abs(v); refreshActions(); },
                 }),
@@ -975,7 +1001,7 @@ export function openTx(ctx, existing) {
             )));
           }
         }
-        if (!form.splits && form.accountId && !isSpecial) {
+        if (!form.splits && form.accountId && !isSpecial && !locked) {
           kids.push(h("button", {
             type: "button",
             class: "tx-split-toggle",
@@ -996,28 +1022,52 @@ export function openTx(ctx, existing) {
         note.addEventListener("input", () => { form.note = note.value; });
         kids.push(field("Note (optional)", note));
         if (locked) {
-          kids.push(h("p", { class: "hint", text: "Reconciled transactions can’t be deleted. You can still edit the note." }));
           if (!ctx.readOnly()) {
-            kids.push(h("div", { class: "tx-form-actions" }, btnRow(
-              { label: "Cancel", kind: "ghost", onClick: () => sheet.close() },
-              { label: "Save", kind: "primary", onClick: () => {
-                ctx.updateBudget((b) => updateTransaction(b, existing.id, { note: form.note }));
+            const actions = [btnRow(
+              { label: "Discard", kind: "ghost", onClick: () => sheet.close() },
+              { label: "Save & Close", kind: "primary", onClick: () => {
+                const patch = { note: form.note };
+                if (form.categoryId) patch.categoryId = form.categoryId === RTA ? null : form.categoryId;
+                ctx.updateBudget((b) => updateTransaction(b, existing.id, patch));
                 sheet.close();
                 toast("Saved", { label: "Undo", action: () => ctx.undo() });
               } },
-            )));
+            )];
+            actions.push(btn("Unreconcile", { kind: "ghost", block: true, onClick: () => {
+              confirmDialog({
+                title: "Unreconcile this transaction?",
+                message: "It will no longer be treated as reconciled, and you can edit or delete it.",
+                confirm: "Unreconcile",
+                onConfirm: () => {
+                  ctx.updateBudget((b) => {
+                    const res = unreconcileTransaction(b, existing.id);
+                    if (res.error) { toast(res.error); return b; }
+                    sheet.close();
+                    toast("Unreconciled", { label: "Undo", action: () => ctx.undo() });
+                    return res.budget;
+                  });
+                },
+              });
+            } }));
+            kids.push(h("div", { class: "tx-form-actions" }, ...actions));
           }
         } else if (!ctx.readOnly()) {
-          const actions = [btnRow(
-            { label: "Cancel", kind: "ghost", onClick: () => sheet.close() },
-            { label: editing ? "Save" : "Save Transaction", kind: "primary", disabled: !formCanSave(form, budget), onClick: save },
-          )];
+          const actions = [];
           if (editing) {
-            actions.push(btn("🗑 Delete", { kind: "danger", block: true, onClick: () => {
-              ctx.updateBudget((b) => deleteTransactions(b, [existing.id]));
-              sheet.close();
-              toast("Deleted", { label: "Undo", action: () => ctx.undo() });
-            } }));
+            actions.push(h("div", { class: "btn-row tx-edit-actions" },
+              btn("Discard", { kind: "ghost", onClick: () => sheet.close() }),
+              btn("Save & Close", { kind: "primary", disabled: !formCanSave(form, budget), onClick: save }),
+              btn("Delete", { kind: "danger", onClick: () => {
+                ctx.updateBudget((b) => deleteTransactions(b, [existing.id]));
+                sheet.close();
+                toast("Deleted", { label: "Undo", action: () => ctx.undo() });
+              } }),
+            ));
+          } else {
+            actions.push(btnRow(
+              { label: "Cancel", kind: "ghost", onClick: () => sheet.close() },
+              { label: "Save Transaction", kind: "primary", disabled: !formCanSave(form, budget), onClick: save },
+            ));
           }
           kids.push(h("div", { class: "tx-form-actions" }, ...actions));
         }

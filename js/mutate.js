@@ -1,6 +1,6 @@
 /** Budget mutations. Each function takes a budget and returns a new one. */
 import {
-  uid, toTitleCase, monthKey, todayKey, nextMonth, prevMonth, isCard, isBank, ccPayCat,
+  uid, toTitleCase, monthKey, todayKey, addDays, nextMonth, prevMonth, isCard, isBank, ccPayCat,
   isPayFrom, payFromId, round2, deepClone,
 } from "./util.js?v=154";
 import { available, readyToAssign, getGoalMetrics, globalFree, furthestMonth, accountBalances } from "./calc.js?v=154";
@@ -351,12 +351,34 @@ export function isLocked(budget, tx) {
   return false;
 }
 
+export function unreconcileTransaction(budget, txId) {
+  const tx = (budget.transactions || []).find((t) => t.id === txId);
+  if (!tx || tx.subtype === "starting_balance") return { budget, error: "Starting balances stay locked." };
+  if (!isLocked(budget, tx)) return { budget };
+  const transactions = (budget.transactions || []).map((t) => t.id === txId ? { ...t, reconciled: false } : t);
+  const roll = (list) => list.map((a) => {
+    if (a.id !== tx.accountId) return a;
+    if (a.reconciledDate && tx.date <= a.reconciledDate) return { ...a, reconciledDate: addDays(tx.date, -1) };
+    return a;
+  });
+  const card = isCard(budget, tx.accountId);
+  const patch = { transactions };
+  if (card) patch.creditCards = roll(budget.creditCards || []);
+  else patch.accounts = roll(budget.accounts || []);
+  return { budget: touch(budget, patch) };
+}
+
 export function updateTransaction(budget, txId, patch) {
   const tx = (budget.transactions || []).find((t) => t.id === txId);
   if (!tx || tx.subtype === "starting_balance") return budget;
   if (isLocked(budget, tx)) {
-    const note = patch.note != null ? String(patch.note) : tx.note;
-    return touch(budget, { transactions: budget.transactions.map((t) => t.id === txId ? { ...t, note } : t) });
+    const next = { ...tx };
+    if (patch.note != null) next.note = String(patch.note);
+    if (Object.prototype.hasOwnProperty.call(patch, "categoryId") && !tx.splits) {
+      next.categoryId = patch.categoryId;
+      if (patch.categoryConfirmed != null) next.categoryConfirmed = patch.categoryConfirmed;
+    }
+    return touch(budget, { transactions: budget.transactions.map((t) => t.id === txId ? next : t) });
   }
   let next = { ...tx, ...patch, id: tx.id };
   if (patch.payee != null) {
