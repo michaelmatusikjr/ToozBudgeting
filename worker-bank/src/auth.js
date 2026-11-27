@@ -420,7 +420,19 @@ function inviteView(row) {
 
 export async function meView(env, session) {
   const hh = await env.DB.prepare("SELECT id, name, seq FROM households WHERE id = ?").bind(session.householdId).first();
-  const count = (await env.DB.prepare("SELECT COUNT(*) AS n FROM records WHERE household_id = ? AND deleted = 0").bind(session.householdId).first())?.n || 0;
+  let count = 0;
+  if (householdRole(session) === "owner") {
+    count = (await env.DB.prepare("SELECT COUNT(*) AS n FROM records WHERE household_id = ? AND deleted = 0").bind(session.householdId).first())?.n || 0;
+  } else {
+    const ids = Object.keys(session.access || {});
+    if (ids.length) {
+      const payload = JSON.stringify(ids);
+      count = (await env.DB.prepare(`SELECT COUNT(*) AS n FROM records WHERE household_id = ? AND deleted = 0 AND (
+        budget_id IN (SELECT value FROM json_each(?))
+        OR (kind = 'budget' AND (id IN (SELECT value FROM json_each(?)) OR id IN (SELECT 'budget:' || value FROM json_each(?))))
+      )`).bind(session.householdId, payload, payload, payload).first())?.n || 0;
+    }
+  }
   return {
     user: { ...session.user, displayName: session.member.displayName },
     household: { id: hh?.id, name: hh?.name, seq: hh?.seq || 0, records: count },

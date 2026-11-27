@@ -25,7 +25,10 @@ test("push then pull: records round-trip and seq only moves forward", async () =
   assert.equal(JSON.parse(pl.data.records.find((r) => r.id === "tx:1").body).amount, 5);
   assert.equal((await t.call("GET", "/sync/pull?since=2", undefined, wife.auth)).data.records.length, 0);
   const me = await t.call("GET", "/me", undefined, owner.auth);
-  assert.equal(me.data.household.records, 2, "the app uses this to decide whether to upload its local budget");
+  assert.equal(me.data.household.records, 2, "household Owners see every live record they can read (the app uses this to decide whether to upload)");
+  const teen = await t.signIn("teen@example.com");
+  const teenMe = await t.call("GET", "/me", undefined, teen.auth);
+  assert.equal(teenMe.data.household.records, 0, "members only count records in budgets they can read");
 });
 
 test("conflict: two people edit the same transaction; the later edit wins on both devices", async () => {
