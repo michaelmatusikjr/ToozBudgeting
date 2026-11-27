@@ -1,5 +1,5 @@
-import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, keepFocus, iconBtn, bindLongPress } from "../ui.js?v=154";
-import { fmt, todayKey, toTitleCase, isCard, ccPayCat, makePayFrom, RTA, uid, monthLabel } from "../util.js?v=154";
+import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, keepFocus, iconBtn, bindLongPress, searchableSel, amountInput, btnRow, append, clear } from "../ui.js?v=154";
+import { fmt, todayKey, toTitleCase, isCard, isPayFrom, ccPayCat, makePayFrom, RTA, uid, monthLabel } from "../util.js?v=154";
 import { deviceSet } from "../store.js?v=154";
 import { displayName, payeeDefaultCategory, payeeSuggestedCategory, findFuzzyDuplicates, isAccountPayee } from "../payees.js?v=154";
 import { addTransaction, deleteTransactions, isLocked, setTxCategory, updateTransaction, replaceTransaction, confirmCategories } from "../mutate.js?v=154";
@@ -630,6 +630,89 @@ function categorySelect(budget, accountId, includeRta) {
   return sel;
 }
 
+
+function isPaymentCategory(budget, categoryId) {
+  return isPayFrom(categoryId) || (budget.categories || []).some((c) => c.id === categoryId && c.creditCardId);
+}
+
+function hasUsableAccount(budget) {
+  return (budget.accounts || []).some((a) => !a.archived) || (budget.creditCards || []).some((c) => !c.archived);
+}
+
+function accountSelectOptions(budget, includeId) {
+  const opts = [{ value: "", label: "Select..." }];
+  for (const a of budget.accounts || []) {
+    if (!a.archived || a.id === includeId) opts.push({ value: a.id, label: a.name, group: "Cash & Bank Accounts" });
+  }
+  for (const c of budget.creditCards || []) {
+    if (!c.archived || c.id === includeId) opts.push({ value: c.id, label: c.name, group: "Credit Cards" });
+  }
+  return opts;
+}
+
+function catOptionsForAccount(budget, accountId, extraTop = []) {
+  const opts = [{ value: "", label: "No category" }, ...extraTop];
+  const card = (budget.creditCards || []).some((c) => c.id === accountId);
+  if (card) {
+    for (const a of (budget.accounts || []).filter((a) => !a.archived)) {
+      opts.push({ value: makePayFrom(a.id), label: `Payment from ${a.name}`, group: "Credit Card Payments" });
+    }
+  }
+  for (const g of budget.categoryGroups || []) {
+    for (const c of (budget.categories || []).filter((c) => c.groupId === g.id && !c.archived && !(card && c.creditCardId))) {
+      opts.push({ value: c.id, label: c.name, group: g.name });
+    }
+  }
+  return opts;
+}
+
+function transferSelectOptions(budget, accountId) {
+  const opts = [{ value: "", label: "None" }];
+  for (const a of budget.accounts || []) {
+    if (a.archived || a.id === accountId) continue;
+    opts.push({ value: a.id, label: a.name, group: "Cash & Bank Accounts" });
+  }
+  for (const c of budget.creditCards || []) {
+    if (c.archived || c.id === accountId) continue;
+    opts.push({ value: c.id, label: c.name, group: "Credit Cards" });
+  }
+  return opts;
+}
+
+function splitCatOptions(budget) {
+  const opts = [{ value: "", label: "Category..." }];
+  for (const g of budget.categoryGroups || []) {
+    for (const c of (budget.categories || []).filter((c) => c.groupId === g.id && !c.archived && !c.creditCardId)) {
+      opts.push({ value: c.id, label: c.name, group: g.name });
+    }
+  }
+  return opts;
+}
+
+function payeeNames(budget) {
+  return [...new Set((budget.transactions || []).map((t) => displayName(budget, t.originalPayee || t.payee)).filter((n) => n && !isAccountPayee(budget, n)))];
+}
+
+function signToggle(isRefund, onChange) {
+  return h("div", { class: "tx-sign" },
+    h("button", { type: "button", class: `tx-sign-btn minus${isRefund ? "" : " on"}`, text: "−", onclick: () => onChange(false) }),
+    h("button", { type: "button", class: `tx-sign-btn plus${isRefund ? " on" : ""}`, text: "+", onclick: () => onChange(true) }),
+  );
+}
+
+function formCanSave(form, budget) {
+  const isPaymentTx = isPaymentCategory(budget, form.categoryId);
+  const payeeOk = isPaymentTx || !!form.transferAccountId || !!(form.payee || "").trim();
+  if (!form.accountId || !payeeOk || !(Math.abs(Number(form.amount) || 0) > 0)) return false;
+  if (form.splits) {
+    const sum = form.splits.reduce((s, sp) => s + Math.abs(Number(sp.amount) || 0), 0);
+    return form.splits.length > 0
+      && form.splits.every((sp) => sp.categoryId && Number(sp.amount) > 0)
+      && Math.abs(sum - Math.abs(Number(form.amount) || 0)) < 0.005;
+  }
+  return true;
+}
+
 export function openTx(ctx, existing) {
   const budget = ctx.budget();
   if (existing?.subtype === "starting_balance") { toast("Starting balances can’t be edited or deleted"); return; }
@@ -641,120 +724,310 @@ export function openTx(ctx, existing) {
     note: existing?.note || "",
     amount: existing ? Math.abs(Number(existing.amount) || 0) : 0,
     isRefund: existing?.type === "expense" && Number(existing.amount) < 0,
-    accountId: existing?.accountId || budget.accounts.find((a) => !a.archived)?.id || "",
+    accountId: existing?.accountId || "",
     categoryId: existing?.type === "income" ? RTA : (existing?.categoryId || ""),
     transferAccountId: existing?.transferAccountId || "",
     splits: existing?.splits ? existing.splits.map((s) => ({ ...s, amount: Math.abs(s.amount) })) : null,
     type: existing?.type || "expense",
+    categoryConfirmed: existing?.categoryConfirmed,
+    preSplitCategoryId: "",
+    preSplitAmount: 0,
   };
   const sheet = openSheet({
-    title: existing?.draft ? "Enter the other side" : (editing ? "Edit transaction" : "New transaction"),
+    title: existing?.draft ? "Enter the other side" : (editing ? "Edit transaction" : "New Transaction"),
+    closeLabel: editing ? undefined : "Discard",
     body: (host) => {
-      const date = h("input", { class: "input", type: "date", value: form.date });
-      date.addEventListener("change", () => { form.date = date.value; });
-      const payee = textInput({ value: form.payee, placeholder: "Payee" });
-      const suggest = h("div", { class: "suggest" });
-      const refreshSug = () => {
-        suggest.replaceChildren();
-        const q = payee.value.trim().toLowerCase();
-        if (q.length < 1) return;
-        const names = [...new Set((budget.transactions || []).map((t) => displayName(budget, t.originalPayee || t.payee)).filter((n) => n && !isAccountPayee(budget, n)))];
-        for (const n of names.filter((n) => n.toLowerCase().includes(q)).slice(0, 6)) {
-          suggest.append(h("button", { type: "button", class: "sug", text: n, onclick: () => {
-            payee.value = n; form.payee = n;
-            const def = payeeDefaultCategory(budget, n) || payeeSuggestedCategory(budget, n);
-            if (def) { form.categoryId = def; form.categoryConfirmed = !!payeeDefaultCategory(budget, n); cat.value = def; }
-            suggest.replaceChildren();
-          }}));
+      if (!editing && !existing?.draft && !hasUsableAccount(budget)) {
+        append(host,
+          h("p", { class: "tx-empty-acct", text: "Every transaction needs to be tied to an account or credit card, so the app can keep a running balance. Add one in Settings first." }),
+          btn("Go to Settings", { block: true, onClick: () => { sheet.close(); ctx.go("settings"); } }),
+        );
+        return;
+      }
+
+      const applyPayeeCategory = (name) => {
+        const displayed = displayName(budget, name.trim());
+        const def = payeeDefaultCategory(budget, displayed);
+        const sug = payeeSuggestedCategory(budget, displayed);
+        const autoCat = def || sug || "";
+        if (!form.splits && !form.categoryId && autoCat) {
+          form.categoryId = autoCat;
+          form.categoryConfirmed = !!def;
         }
       };
-      payee.addEventListener("input", () => { form.payee = payee.value; refreshSug(); });
-      const acct = h("select", { class: "input" });
-      for (const a of budget.accounts) if (!a.archived || a.id === form.accountId) acct.append(h("option", { value: a.id, text: a.name }));
-      for (const c of budget.creditCards) if (!c.archived || c.id === form.accountId) acct.append(h("option", { value: c.id, text: c.name + " (card)" }));
-      acct.value = form.accountId;
-      const catSlot = h("div", { class: "cat-slot" });
-      let cat = categorySelect(budget, form.accountId, true);
-      const bindCat = (node, prev) => {
-        cat = node;
-        if (prev) cat.value = prev;
-        form.categoryId = cat.value;
-        cat.addEventListener("change", () => { form.categoryId = cat.value; });
-        catSlot.replaceChildren(cat);
-      };
-      bindCat(cat, form.categoryId || "");
-      const transfer = h("select", { class: "input" });
-      const fillTransfer = () => {
-        transfer.replaceChildren(h("option", { value: "", text: "Not a transfer" }));
-        for (const a of [...budget.accounts, ...budget.creditCards]) {
-          if (a.archived || a.id === form.accountId) continue;
-          transfer.append(h("option", { value: a.id, text: a.name }));
+
+      const save = () => {
+        if (!formCanSave(form, budget)) return;
+        if (form.splits?.length) {
+          const sum = form.splits.reduce((s, sp) => s + Math.abs(Number(sp.amount) || 0), 0);
+          if (Math.abs(sum - Math.abs(form.amount)) > 0.02) { toast("Splits have to add up to the amount"); return; }
+          if (form.splits.some((sp) => !sp.categoryId)) { toast("Each split needs a category"); return; }
         }
-        transfer.value = form.transferAccountId || "";
+        const payload = { ...form, payee: form.payee, type: form.transferAccountId ? "transfer" : (form.categoryId === RTA ? "income" : form.type) };
+        ctx.updateBudget((b) => {
+          const res = editing ? replaceTransaction(b, existing.id, payload) : addTransaction(b, payload);
+          if (res.error) { toast(res.error); return b; }
+          sheet.close();
+          toast(editing ? "Saved" : "Added", { label: "Undo", action: () => ctx.undo() });
+          return res.budget;
+        });
       };
-      acct.addEventListener("change", () => {
-        form.accountId = acct.value;
-        bindCat(categorySelect(budget, form.accountId, true), form.categoryId);
-        fillTransfer();
-      });
-      fillTransfer();
-      transfer.addEventListener("change", () => { form.transferAccountId = transfer.value; form.type = transfer.value ? "transfer" : "expense"; });
-      const splitsBox = h("div");
-      const paintSplits = () => {
-        splitsBox.replaceChildren();
-        if (!form.splits) return;
-        for (const sp of form.splits) {
-          const sel = categorySelect(budget, form.accountId, false);
-          sel.value = sp.categoryId || "";
-          sel.addEventListener("change", () => { sp.categoryId = sel.value; });
-          splitsBox.append(h("div", { class: "line" }, sel, moneyButton(sp.amount, (n) => { sp.amount = n; })));
-        }
-        splitsBox.append(btn("Add split line", { kind: "quiet", onClick: () => { form.splits.push({ categoryId: "", amount: 0 }); paintSplits(); } }));
+
+      const cancelSplit = () => {
+        form.categoryId = form.preSplitCategoryId || (form.splits?.[0]?.categoryId || "");
+        form.amount = form.preSplitAmount || form.amount || 0;
+        form.splits = null;
+        form.preSplitCategoryId = "";
+        form.preSplitAmount = 0;
+        paint();
       };
-      host.append(
-        existing?.draft ? h("p", { class: "lede", text: "This is the missing side of a card payment. Check the account and category, then add it." }) : null,
-        field("Date", date),
-        field("Payee", payee),
-        suggest,
-        field("Account", acct),
-        field("Category", catSlot),
-        field("Transfer to", transfer),
-        field("Amount", moneyButton(form.amount, (n) => { form.amount = Math.abs(n); form.isRefund = n < 0; })),
-        h("p", { class: "hint", text: "Use the pad’s math keys, or toggle refund for a negative expense." }),
-        btn(form.splits ? "Use one category" : "Split", { kind: "ghost", onClick: () => {
-          form.splits = form.splits ? null : [{ categoryId: form.categoryId, amount: form.amount }];
-          paintSplits();
-        }}),
-        splitsBox,
-        field("Note", (() => { const t = h("textarea", { class: "input", rows: "2" }); t.value = form.note; t.addEventListener("input", () => { form.note = t.value; }); return t; })()),
-      );
-      paintSplits();
-        if (!locked) {
-        host.append(btn(editing ? "Save" : "Add", { block: true, onClick: () => {
-          if (form.splits?.length) {
-            const sum = form.splits.reduce((s, sp) => s + Math.abs(Number(sp.amount) || 0), 0);
-            if (Math.abs(sum - Math.abs(form.amount)) > 0.02) { toast("Splits have to add up to the amount"); return; }
-            if (form.splits.some((sp) => !sp.categoryId)) { toast("Each split needs a category"); return; }
+
+      const paintBalance = () => {
+        const el = host.querySelector(".tx-split-bal");
+        if (!el || !form.splits) return;
+        const splitSum = form.splits.reduce((s, sp) => s + (Number(sp.amount) || 0), 0);
+        const remaining = Math.round((Math.abs(form.amount) - splitSum) * 100) / 100;
+        const balanced = Math.abs(remaining) < 0.005;
+        el.classList.toggle("ok", balanced);
+        el.querySelector(".tx-split-remain").textContent = balanced ? "✓ Balanced" : `${fmt(remaining)} remaining`;
+        el.querySelector(".tx-split-total").textContent = `Total: ${form.isRefund ? "+" : "−"}${fmt(Math.abs(form.amount))}`;
+      };
+
+      const refreshActions = () => {
+        const saveBtn = host.querySelector(".btn-row .btn.primary");
+        if (saveBtn) saveBtn.disabled = !formCanSave(form, budget) || !!ctx.readOnly();
+        const splitBtn = host.querySelector(".tx-split-toggle");
+        if (splitBtn) splitBtn.disabled = !form.amount;
+        paintBalance();
+      };
+
+      const payeeField = () => {
+        const wrap = h("div", { class: "tx-payee-wrap" });
+        const input = textInput({ value: form.payee, placeholder: "Who was it?" });
+        input.setAttribute("autocapitalize", "words");
+        input.setAttribute("autocorrect", "off");
+        input.setAttribute("spellcheck", "false");
+        const drop = h("div", { class: "tx-payee-drop" });
+        const closeDrop = () => { drop.replaceChildren(); drop.classList.remove("open"); };
+        const openDrop = () => {
+          const q = input.value.trim().toLowerCase();
+          drop.replaceChildren();
+          if (!q) { drop.classList.remove("open"); return; }
+          const matches = payeeNames(budget).filter((n) => n.toLowerCase().includes(q)).slice(0, 8);
+          if (!matches.length) { drop.classList.remove("open"); return; }
+          for (const name of matches) {
+            drop.append(h("button", { type: "button", class: "tx-payee-opt", text: name, onmousedown: (e) => {
+              e.preventDefault();
+              input.value = name;
+              form.payee = name;
+              applyPayeeCategory(name);
+              closeDrop();
+              paint();
+            }}));
           }
-          const payload = { ...form, payee: form.payee, type: form.transferAccountId ? "transfer" : (form.categoryId === RTA ? "income" : form.type) };
-          ctx.updateBudget((b) => {
-            const res = editing ? replaceTransaction(b, existing.id, payload) : addTransaction(b, payload);
-            if (res.error) { toast(res.error); return b; }
-            sheet.close();
-            toast(editing ? "Saved" : "Added", { label: "Undo", action: () => ctx.undo() });
-            return res.budget;
-          });
-        }}));
-      } else host.append(h("p", { class: "hint", text: "Reconciled transactions can’t be deleted. You can still edit the note." }));
-      if (editing && !locked) host.append(btn("Delete", { kind: "danger", block: true, onClick: () => {
-        ctx.updateBudget((b) => deleteTransactions(b, [existing.id]));
-        sheet.close();
-        toast("Deleted", { label: "Undo", action: () => ctx.undo() });
-      }}));
+          drop.classList.add("open");
+        };
+        input.addEventListener("input", () => {
+          form.payee = input.value;
+          applyPayeeCategory(input.value);
+          openDrop();
+          refreshActions();
+        });
+        input.addEventListener("focus", openDrop);
+        input.addEventListener("blur", () => setTimeout(() => {
+          closeDrop();
+          const before = form.categoryId;
+          applyPayeeCategory(form.payee || "");
+          if (form.categoryId !== before) paint();
+        }, 150));
+        wrap.append(input, drop);
+        return field("Payee", wrap);
+      };
+
+      const splitEditor = () => {
+        const box = h("div", { class: "tx-split-ed" });
+        box.append(h("label", { class: "field-label", text: "Split Categories" }));
+        box.append(field("Total Transaction Amount", h("div", { class: "tx-amt-row" },
+          signToggle(form.isRefund, (refund) => { form.isRefund = refund; paint(); }),
+          h("div", { class: "tx-amt-box" },
+            h("span", { class: "tx-amt-prefix", text: form.isRefund ? "+" : "−" }),
+            amountInput({
+              value: Math.abs(form.amount) || 0,
+              placeholder: "0.00",
+              onChange: (v) => { form.amount = Math.abs(v); refreshActions(); },
+              onCommit: (v) => { form.amount = Math.abs(v); refreshActions(); },
+            }),
+          ),
+        )));
+        form.splits.forEach((sp, i) => {
+          const row = h("div", { class: "tx-split-ed-row" },
+            h("div", { class: "tx-split-ed-cat" }, searchableSel({
+              value: sp.categoryId,
+              placeholder: "Search...",
+              options: splitCatOptions(budget),
+              onChange: (v) => { sp.categoryId = v; refreshActions(); },
+            })),
+            h("div", { class: "tx-split-ed-amt" }, amountInput({
+              value: sp.amount || 0,
+              placeholder: "0.00",
+              onChange: (v) => { sp.amount = Math.abs(v); refreshActions(); },
+              onCommit: (v) => { sp.amount = Math.abs(v); refreshActions(); },
+            })),
+            h("button", {
+              type: "button", class: "tx-split-x", text: "×", "aria-label": "Remove split",
+              onclick: () => {
+                if (form.splits.length <= 1) return;
+                const next = form.splits.filter((_, j) => j !== i);
+                if (next.length === 1) cancelSplit();
+                else { form.splits = next; paint(); }
+              },
+            }),
+          );
+          box.append(row);
+        });
+        box.append(h("div", { class: "tx-split-ed-actions" },
+          h("button", { type: "button", class: "tx-split-add", text: "+ Add Category", onclick: () => { form.splits.push({ categoryId: "", amount: 0 }); paint(); } }),
+          h("button", { type: "button", class: "tx-split-cancel", text: "✕ Cancel Split", onclick: cancelSplit }),
+        ));
+        const splitSum = form.splits.reduce((s, sp) => s + (Number(sp.amount) || 0), 0);
+        const remaining = Math.round((Math.abs(form.amount) - splitSum) * 100) / 100;
+        const balanced = Math.abs(remaining) < 0.005;
+        box.append(h("div", { class: `tx-split-bal${balanced ? " ok" : ""}` },
+          h("span", { class: "tx-split-remain", text: balanced ? "✓ Balanced" : `${fmt(remaining)} remaining` }),
+          h("span", { class: "tx-split-total", text: `Total: ${form.isRefund ? "+" : "−"}${fmt(Math.abs(form.amount))}` }),
+        ));
+        return box;
+      };
+
+      const paint = () => {
+        const isPayment = isPaymentCategory(budget, form.categoryId);
+        const isIncome = form.categoryId === RTA;
+        const isTransfer = !!form.transferAccountId;
+        const isSpecial = isIncome || isPayment || isTransfer;
+        const kids = [];
+        if (existing?.draft) {
+          kids.push(h("p", { class: "lede", text: "This is the missing side of a card payment. Check the account and category, then add it." }));
+        }
+        const date = h("input", { class: "input", type: "date", value: form.date });
+        date.addEventListener("change", () => { form.date = date.value; });
+        kids.push(field("Date", date));
+        kids.push(searchableSel({
+          label: "Account",
+          value: form.accountId,
+          placeholder: "Search accounts...",
+          options: accountSelectOptions(budget, form.accountId),
+          onChange: (v) => {
+            form.accountId = v;
+            form.categoryId = "";
+            form.splits = null;
+            if (form.transferAccountId === v) form.transferAccountId = "";
+            paint();
+          },
+        }));
+        kids.push(searchableSel({
+          label: "Transfer to",
+          value: form.transferAccountId || "",
+          placeholder: "Search accounts...",
+          options: transferSelectOptions(budget, form.accountId),
+          onChange: (v) => {
+            form.transferAccountId = v;
+            if (v) {
+              form.type = "transfer";
+              form.categoryId = "";
+              form.splits = null;
+            } else if (form.type === "transfer") form.type = "expense";
+            paint();
+          },
+        }));
+        if (!isPayment) kids.push(payeeField());
+        if (!form.splits && !isTransfer) {
+          kids.push(searchableSel({
+            label: "Category",
+            value: form.categoryId,
+            placeholder: form.accountId ? "Search categories..." : "Select account first",
+            options: form.accountId
+              ? catOptionsForAccount(budget, form.accountId, [{ value: RTA, label: "→ Ready to Assign (income)" }])
+              : [{ value: "", label: "Select account first" }],
+            onChange: (v) => { form.categoryId = v; form.categoryConfirmed = true; paint(); },
+          }));
+        }
+        if (!form.splits) {
+          if (isSpecial) {
+            kids.push(amountInput({
+              label: "Amount",
+              value: form.amount,
+              placeholder: "0.00",
+              onChange: (v) => { form.amount = Math.max(0, v); refreshActions(); },
+              onCommit: (v) => { form.amount = Math.max(0, v); refreshActions(); },
+            }));
+          } else {
+            kids.push(field("Amount", h("div", { class: "tx-amt-row" },
+              signToggle(form.isRefund, (refund) => { form.isRefund = refund; paint(); }),
+              h("div", { class: "tx-amt-box" },
+                h("span", { class: "tx-amt-prefix", text: form.isRefund ? "+" : "−" }),
+                amountInput({
+                  value: form.amount ? Math.abs(form.amount) : 0,
+                  placeholder: "0.00",
+                  onChange: (v) => { form.amount = Math.abs(v); refreshActions(); },
+                  onCommit: (v) => { form.amount = Math.abs(v); refreshActions(); },
+                }),
+              ),
+            )));
+          }
+        }
+        if (!form.splits && form.accountId && !isSpecial) {
+          kids.push(h("button", {
+            type: "button",
+            class: "tx-split-toggle",
+            disabled: !form.amount,
+            text: "🔀 Split into multiple categories",
+            onclick: () => {
+              if (!form.amount) return;
+              form.preSplitCategoryId = form.categoryId;
+              form.preSplitAmount = form.amount;
+              form.splits = [{ categoryId: form.categoryId || "", amount: 0 }, { categoryId: "", amount: 0 }];
+              form.categoryId = "";
+              paint();
+            },
+          }));
+        }
+        if (form.splits) kids.push(splitEditor());
+        const note = h("input", { class: "input", type: "text", placeholder: "Add a note...", value: form.note || "" });
+        note.addEventListener("input", () => { form.note = note.value; });
+        kids.push(field("Note (optional)", note));
+        if (locked) {
+          kids.push(h("p", { class: "hint", text: "Reconciled transactions can’t be deleted. You can still edit the note." }));
+          if (!ctx.readOnly()) {
+            kids.push(h("div", { class: "tx-form-actions" }, btnRow(
+              { label: "Cancel", kind: "ghost", onClick: () => sheet.close() },
+              { label: "Save", kind: "primary", onClick: () => {
+                ctx.updateBudget((b) => updateTransaction(b, existing.id, { note: form.note }));
+                sheet.close();
+                toast("Saved", { label: "Undo", action: () => ctx.undo() });
+              } },
+            )));
+          }
+        } else if (!ctx.readOnly()) {
+          const actions = [btnRow(
+            { label: "Cancel", kind: "ghost", onClick: () => sheet.close() },
+            { label: editing ? "Save" : "Save Transaction", kind: "primary", disabled: !formCanSave(form, budget), onClick: save },
+          )];
+          if (editing) {
+            actions.push(btn("🗑 Delete", { kind: "danger", block: true, onClick: () => {
+              ctx.updateBudget((b) => deleteTransactions(b, [existing.id]));
+              sheet.close();
+              toast("Deleted", { label: "Undo", action: () => ctx.undo() });
+            } }));
+          }
+          kids.push(h("div", { class: "tx-form-actions" }, ...actions));
+        }
+        clear(host);
+        append(host, ...kids);
+      };
+      paint();
     },
   });
 }
-
 
 function txFilterPanel(ctx, budget, f, clearAllFilters) {
   const setF = (patch) => { ctx.ui.txFilter = { ...ctx.ui.txFilter, ...patch }; ctx.render(); };
