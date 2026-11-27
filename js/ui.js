@@ -184,63 +184,7 @@ export function btn(label, opts = {}) {
 
 let padState = null;
 export function openAmountPad({ title = "Amount", value = 0, onCommit, allowNegative = false }) {
-  let expr = value ? String(round2(value)) : "";
-  let negative = Number(value) < 0;
-  let replace = expr.length > 0;
-  const display = h("div", { class: "pad-display", text: expr || "0" });
-  const preview = h("div", { class: "pad-preview", text: "" });
-  const paint = () => {
-    display.textContent = (negative && expr && !expr.startsWith("-") ? "−" : "") + (expr || "0");
-    preview.textContent = hasOp(expr) ? fmt(signed(evalMath(expr))) : "";
-  };
-  const signed = (n) => (negative ? -Math.abs(n) : n);
-  const push = (ch) => {
-    if (replace && /[0-9.]/.test(ch)) { expr = ""; negative = false; }
-    replace = false;
-    if (ch === "." && expr.split(/[-+*/]/).pop().includes(".")) return;
-    expr += ch;
-    paint();
-  };
-  const keys = ["7", "8", "9", "/", "4", "5", "6", "*", "1", "2", "3", "-", "0", ".", "⌫", "+"];
-  const grid = h("div", { class: "pad-grid" });
-  for (const k of keys) {
-    grid.append(h("button", {
-      type: "button", class: `pad-key ${"+-*/".includes(k) ? "op" : ""}`, text: k,
-      onclick: () => {
-        if (k === "⌫") { replace = false; expr = expr.slice(0, -1); paint(); return; }
-        push(k);
-      },
-    }));
-  }
-  const commit = () => {
-    window.removeEventListener("keydown", onKey, true);
-    const n = signed(evalMath(expr || "0"));
-    sheet.close();
-    onCommit?.(round2(n));
-  };
-  const onKey = (e) => {
-    if (e.key === "Escape" || e.metaKey || e.ctrlKey || e.altKey) return;
-    const tag = e.target?.tagName;
-    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-    if (/^[0-9]$/.test(e.key) || e.key === "." || "+-*/".includes(e.key)) { e.preventDefault(); e.stopPropagation(); push(e.key); }
-    else if (e.key === "Backspace") { e.preventDefault(); e.stopPropagation(); replace = false; expr = expr.slice(0, -1); paint(); }
-    else if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); commit(); }
-  };
-  const sheet = openSheet({
-    title,
-    onClose: () => window.removeEventListener("keydown", onKey, true),
-    body: (root) => {
-      root.append(display, preview, grid);
-      const row = h("div", { class: "row gap" });
-      if (allowNegative) row.append(btn(negative ? "Spending" : "Refund", { kind: "ghost", onClick: () => { negative = !negative; paint(); } }));
-      row.append(btn("Done", { block: true, onClick: commit }));
-      root.append(row);
-      paint();
-    },
-  });
-  window.addEventListener("keydown", onKey, true);
-  padState = sheet;
-  return sheet;
+  return openPad({ title, value, onCommit, allowNegative });
 }
 
 export function moneyButton(value, onCommit, { allowNegative = false, label } = {}) {
@@ -295,3 +239,410 @@ function bindKeyboard() {
 }
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", bindKeyboard);
 else bindKeyboard();
+
+/* ---------- WU-03 context menu + long-press ---------- */
+
+export function isTouchUi() {
+  return !!(navigator.maxTouchPoints > 0 || window.matchMedia?.("(pointer: coarse)")?.matches);
+}
+
+function suppressNextClick(el) {
+  const stop = (e) => { e.preventDefault(); e.stopPropagation(); el.removeEventListener("click", stop, true); };
+  el.addEventListener("click", stop, true);
+  setTimeout(() => el.removeEventListener("click", stop, true), 700);
+}
+
+export function openContextMenu(items = [], { readOnly = false } = {}) {
+  const list = (items || []).filter((it) => it && !(readOnly && it.edit));
+  const scrim = h("div", {
+    class: "ctx-scrim",
+    oncontextmenu: (e) => { e.preventDefault(); dismissCtx(); },
+    onclick: (e) => { if (e.target === scrim) dismissCtx(); },
+  });
+  const menu = h("div", { class: "ctx-menu", role: "menu", onclick: (e) => e.stopPropagation() });
+  for (const item of list) {
+    menu.append(h("button", {
+      type: "button",
+      class: `ctx-item${item.danger ? " danger" : ""}`,
+      role: "menuitem",
+      disabled: !!item.disabled,
+      onclick: () => { if (item.disabled) return; dismissCtx(); item.onClick?.(); },
+      text: item.label,
+    }));
+  }
+  menu.append(h("button", { type: "button", class: "ctx-cancel", text: "Cancel", onclick: () => dismissCtx() }));
+  scrim.append(menu);
+  const onKey = (e) => {
+    if (e.key === "Escape") { e.preventDefault(); dismissCtx(); }
+  };
+  const dismissCtx = () => {
+    window.removeEventListener("keydown", onKey, true);
+    scrim.remove();
+  };
+  document.body.append(scrim);
+  window.addEventListener("keydown", onKey, true);
+  menu.querySelector("button:not([disabled])")?.focus?.();
+  return { close: dismissCtx };
+}
+
+export function bindLongPress(el, fn, { ms = 500 } = {}) {
+  let timer = null;
+  let startX = 0, startY = 0;
+  const clearTimer = () => { if (timer) { clearTimeout(timer); timer = null; } };
+  const start = (x, y) => {
+    clearTimer();
+    startX = x; startY = y;
+    timer = setTimeout(() => {
+      timer = null;
+      suppressNextClick(el);
+      fn();
+    }, ms);
+  };
+  el.addEventListener("touchstart", (e) => {
+    const t = e.changedTouches[0];
+    if (t) start(t.clientX, t.clientY);
+  }, { passive: true });
+  el.addEventListener("touchmove", (e) => {
+    const t = e.changedTouches[0];
+    if (!t || !timer) return;
+    if (Math.hypot(t.clientX - startX, t.clientY - startY) > 10) clearTimer();
+  }, { passive: true });
+  el.addEventListener("touchend", clearTimer);
+  el.addEventListener("touchcancel", clearTimer);
+  el.addEventListener("pointerdown", (e) => {
+    if (e.pointerType === "touch" || e.pointerType === "pen") return;
+    if (e.button !== 0) return;
+    start(e.clientX, e.clientY);
+  });
+  el.addEventListener("pointermove", (e) => {
+    if (!timer) return;
+    if (Math.hypot(e.clientX - startX, e.clientY - startY) > 10) clearTimer();
+  });
+  el.addEventListener("pointerup", clearTimer);
+  el.addEventListener("pointercancel", clearTimer);
+  el.addEventListener("pointerleave", clearTimer);
+  return { unbind: clearTimer };
+}
+
+export function bindContextMenu(el, getItems, { readOnly = false } = {}) {
+  if (el.tabIndex < 0) el.tabIndex = 0;
+  const open = (e) => {
+    e?.preventDefault?.();
+    const items = typeof getItems === "function" ? getItems() : getItems;
+    if (!items || !items.length) return;
+    openContextMenu(items, { readOnly });
+  };
+  bindLongPress(el, () => open());
+  el.addEventListener("contextmenu", (e) => { e.preventDefault(); open(e); });
+  el.addEventListener("keydown", (e) => {
+    if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
+      e.preventDefault();
+      open(e);
+    }
+  });
+}
+
+/* ---------- WU-04 SearchableSel ---------- */
+
+export function searchableSel({ label, value, onChange, options = [], placeholder = "Search...", disabled, autoOpen } = {}) {
+  const wrap = (el) => (label ? field(label, el) : el);
+
+  if (options.length < 6) {
+    const sel = h("select", {
+      class: "input",
+      value: value ?? "",
+      disabled: !!disabled,
+      onchange: (e) => onChange?.(e.target.value),
+    }, ...options.map((o) => h("option", { value: o.value, text: o.label, selected: o.value === value })));
+    if (value != null) sel.value = value;
+    return wrap(sel);
+  }
+
+  const selected = () => options.find((o) => o.value === value);
+  const root = h("div", { class: "ssel" });
+  const trigger = h("button", {
+    type: "button",
+    class: "input ssel-trigger",
+    disabled: !!disabled,
+    onclick: () => { if (!disabled) toggle(); },
+  });
+  const paintTrigger = () => {
+    const sel = selected();
+    clear(trigger);
+    append(trigger,
+      h("span", { class: "ssel-value", text: sel ? sel.label : (placeholder || "Select...") }),
+      h("span", { class: "ssel-caret", text: open ? "▲" : "▼" }),
+    );
+    trigger.classList.toggle("placeholder", !sel);
+  };
+
+  let open = false;
+  let q = "";
+  let overlay = null;
+
+  const close = () => {
+    open = false;
+    overlay?.remove();
+    overlay = null;
+    paintTrigger();
+  };
+
+  const openOverlay = () => {
+    open = true;
+    q = "";
+    overlay = h("div", { class: "ssel-overlay", onclick: (e) => { if (e.target === overlay) close(); } });
+    const panel = h("div", { class: "ssel-panel", onclick: (e) => e.stopPropagation() });
+    const input = h("input", {
+      class: "input ssel-search",
+      type: "text",
+      placeholder,
+      value: "",
+      autocomplete: "off",
+      autocapitalize: "off",
+      spellcheck: "false",
+    });
+    const list = h("div", { class: "ssel-list" });
+    const paintList = () => {
+      const qLow = q.trim().toLowerCase();
+      const filtered = qLow
+        ? options.filter((o) => o.label.toLowerCase().includes(qLow) || (o.group || "").toLowerCase().includes(qLow))
+        : options;
+      clear(list);
+      if (!filtered.length) {
+        list.append(h("div", { class: "ssel-empty", text: "No matches" }));
+        return;
+      }
+      const groups = [];
+      for (const o of filtered) {
+        const g = o.group || "";
+        let grp = groups.find((x) => x.label === g);
+        if (!grp) { grp = { label: g, items: [] }; groups.push(grp); }
+        grp.items.push(o);
+      }
+      for (const grp of groups) {
+        const block = h("div", { class: "ssel-group" });
+        if (grp.label) block.append(h("div", { class: "ssel-group-label", text: grp.label }));
+        for (const o of grp.items) {
+          block.append(h("button", {
+            type: "button",
+            class: `ssel-option${o.value === value ? " on" : ""}`,
+            text: o.label,
+            onclick: () => { onChange?.(o.value); close(); },
+          }));
+        }
+        list.append(block);
+      }
+    };
+    input.addEventListener("input", () => { q = input.value; paintList(); });
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { e.preventDefault(); close(); }
+      if (e.key === "Enter") {
+        e.preventDefault();
+        const qLow = q.trim().toLowerCase();
+        const first = options.find((o) => !qLow || o.label.toLowerCase().includes(qLow) || (o.group || "").toLowerCase().includes(qLow));
+        if (first) { onChange?.(first.value); close(); }
+      }
+    });
+    panel.append(
+      h("div", { class: "ssel-search-row" },
+        input,
+        h("button", { type: "button", class: "ssel-x", text: "×", "aria-label": "Close", onclick: close }),
+      ),
+      list,
+    );
+    overlay.append(panel);
+    document.body.append(overlay);
+    paintList();
+    paintTrigger();
+    queueMicrotask(() => input.focus());
+  };
+
+  const toggle = () => { if (open) close(); else openOverlay(); };
+  paintTrigger();
+  root.append(trigger);
+  if (autoOpen && !disabled) queueMicrotask(() => openOverlay());
+  return wrap(root);
+}
+
+/* ---------- WU-05 amount input + docked pad ---------- */
+
+let dockedPad = null;
+
+function formatPlainAmount(s) {
+  if (s === "" || s === "-") return s;
+  const neg = String(s).startsWith("-");
+  const raw = String(s).replace(/^-/, "");
+  if (raw === "" || raw === ".") return (neg ? "-" : "") + raw;
+  const [w, frac] = raw.split(".");
+  const n = Number(w || "0");
+  if (!Number.isFinite(n)) return s;
+  const whole = Math.abs(n).toLocaleString("en-US");
+  const out = frac !== undefined ? `${whole}.${frac}` : whole;
+  return (neg || n < 0 ? "-" : "") + out;
+}
+
+export function closePad() {
+  dockedPad?.remove();
+  dockedPad = null;
+}
+
+export function openPad({ title = "Amount", value = 0, onCommit, onChange, allowNegative = false, sign, onToggleSign, fieldEl } = {}) {
+  closePad();
+  let expr = value && Number(value) ? String(round2(value)) : "";
+  let negative = Number(value) < 0 || sign === "−" || sign === "-";
+  let replace = expr.length > 0;
+  const signed = (n) => (negative ? -Math.abs(n) : Math.abs(n));
+
+  const display = h("div", { class: "dock-raw" });
+  const preview = h("div", { class: "dock-preview" });
+  const paint = () => {
+    const shown = hasOp(expr) ? `$${expr}` : (expr ? formatPlainAmount(expr) : "");
+    display.textContent = shown || "0.00";
+    display.classList.toggle("empty", !expr);
+    const pv = hasOp(expr) && expr.trim() ? evalMath(expr) : null;
+    preview.textContent = pv != null && pv !== (parseFloat(expr) || 0) ? `= ${fmt(pv)}` : "";
+  };
+
+  const press = (val) => {
+    if (replace) {
+      const isOp = /[+\-*/]/.test(val);
+      expr = isOp ? (expr + val) : (val === "." ? "0." : val);
+      replace = false;
+      if (onChange && !hasOp(expr)) onChange(parseFloat(expr) || 0);
+      paint();
+      return;
+    }
+    if (val === ".") {
+      const opMatch = expr.match(/[+\-*/](?=[^+\-*/]*$)/);
+      const segment = opMatch ? expr.slice(expr.lastIndexOf(opMatch[0]) + 1) : expr;
+      if (segment.includes(".")) return;
+    }
+    if (/[0-9]/.test(val)) {
+      const opMatch = expr.match(/[+\-*/](?=[^+\-*/]*$)/);
+      const segment = opMatch ? expr.slice(expr.lastIndexOf(opMatch[0]) + 1) : expr;
+      const dotIdx = segment.indexOf(".");
+      if (dotIdx !== -1 && segment.length - dotIdx > 2) return;
+    }
+    expr = (expr + val).replace(/[^0-9+\-*/.()]/g, "");
+    if (onChange && !hasOp(expr)) onChange(parseFloat(expr) || 0);
+    paint();
+  };
+
+  const commit = () => {
+    const n = signed(hasOp(expr) ? (evalMath(expr) || 0) : (parseFloat(expr) || 0));
+    closePad();
+    onCommit?.(round2(n));
+  };
+
+  const backdrop = h("div", { class: "dock-backdrop", onpointerdown: (e) => { e.preventDefault(); e.stopPropagation(); commit(); } });
+  const pad = h("div", { class: "dock-pad", onpointerdown: (e) => e.stopPropagation(), onclick: (e) => e.stopPropagation() });
+  const signBtn = (allowNegative || onToggleSign || sign)
+    ? h("button", {
+      type: "button", class: "dock-sign",
+      text: negative ? "−" : "+",
+      onpointerdown: (e) => {
+        e.preventDefault();
+        negative = !negative;
+        e.currentTarget.textContent = negative ? "−" : "+";
+        e.currentTarget.classList.toggle("neg", negative);
+        onToggleSign?.();
+      },
+    })
+    : null;
+  if (signBtn && negative) signBtn.classList.add("neg");
+
+  pad.append(
+    h("div", { class: "dock-mirror" },
+      title ? h("div", { class: "dock-label", text: title }) : null,
+      h("div", { class: "dock-row" },
+        signBtn,
+        display,
+        preview,
+        h("button", { type: "button", class: "dock-x", text: "✕", "aria-label": "Discard", onpointerdown: (e) => { e.preventDefault(); e.stopPropagation(); closePad(); } }),
+      ),
+    ),
+  );
+
+  const rows = [
+    [["7", "7"], ["8", "8"], ["9", "9"], ["÷", "/"]],
+    [["4", "4"], ["5", "5"], ["6", "6"], ["×", "*"]],
+    [["1", "1"], ["2", "2"], ["3", "3"], ["−", "-"]],
+    [[".", "."], ["0", "0"], ["⌫", "BACK"], ["+", "+"]],
+  ];
+  const grid = h("div", { class: "dock-grid" });
+  for (const row of rows) {
+    const r = h("div", { class: "dock-keys" });
+    for (const [lab, val] of row) {
+      r.append(h("button", {
+        type: "button",
+        class: `dock-key${val === "BACK" ? " back" : (/^[+\-*/]$/.test(val) ? " op" : "")}`,
+        text: lab,
+        onpointerdown: (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          if (val === "BACK") { replace = false; expr = expr.slice(0, -1); paint(); return; }
+          press(val);
+        },
+      }));
+    }
+    grid.append(r);
+  }
+  grid.append(h("div", { class: "dock-keys dock-actions" },
+    h("button", { type: "button", class: "dock-key back", text: "Clear", onpointerdown: (e) => { e.preventDefault(); expr = ""; replace = false; onChange?.(0); paint(); } }),
+    h("button", { type: "button", class: "dock-key done", text: "✓  Done", onpointerdown: (e) => { e.preventDefault(); commit(); } }),
+  ));
+  pad.append(grid);
+  const host = h("div", { class: "dock-host" }, backdrop, pad);
+  document.body.append(host);
+  dockedPad = host;
+  paint();
+  if (fieldEl?.scrollIntoView) fieldEl.scrollIntoView({ block: "center", behavior: "smooth" });
+  return { close: closePad, commit };
+}
+
+export function amountInput({ value = 0, onCommit, onChange, label, allowNegative = false, disabled, placeholder } = {}) {
+  let raw = value && Number(value) ? String(round2(value)) : "";
+  const input = h("input", {
+    class: "input amount-input",
+    type: "text",
+    inputmode: "decimal",
+    placeholder: placeholder || "0.00",
+    value: raw ? formatPlainAmount(raw) : "",
+    disabled: !!disabled,
+    autocomplete: "off",
+  });
+  const commitFromRaw = () => {
+    const n = hasOp(raw) ? (evalMath(raw) || 0) : (parseFloat(raw) || 0);
+    onCommit?.(round2(n));
+  };
+  input.addEventListener("focus", (e) => {
+    if (disabled) return;
+    if (isTouchUi()) {
+      e.preventDefault();
+      input.blur();
+      openPad({
+        title: label || "Amount",
+        value: hasOp(raw) ? (evalMath(raw) || 0) : (parseFloat(raw) || 0),
+        allowNegative,
+        fieldEl: input,
+        onChange,
+        onCommit: (n) => {
+          raw = n ? String(round2(n)) : "";
+          input.value = raw ? formatPlainAmount(raw) : "";
+          onCommit?.(n);
+        },
+      });
+    }
+  });
+  input.addEventListener("input", () => {
+    const cleaned = input.value.replace(/[$,]/g, "");
+    raw = hasOp(cleaned) ? cleaned.replace(/[^0-9+\-*/.() ]/g, "") : cleaned.replace(/[^0-9.+\-]/g, "");
+    if (onChange && !hasOp(raw)) onChange(parseFloat(raw) || 0);
+  });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); commitFromRaw(); }
+    if (e.key === "Escape") input.blur();
+  });
+  input.addEventListener("blur", () => { if (!isTouchUi()) commitFromRaw(); });
+  return label ? field(label, input) : input;
+}
