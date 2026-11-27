@@ -1,4 +1,5 @@
 /** DOM helpers, toasts, sheets, and the amount pad. User text always goes through textContent. */
+export const devHooks = {}; // filled by js/dev/testtools.js when test tools are on
 import { evalMath, fmt, hasOp, round2 } from "./util.js?v=154";
 
 export function h(tag, attrs, ...kids) {

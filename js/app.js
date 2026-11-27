@@ -17,6 +17,7 @@ import { paintTheme, resolveTheme } from "./theme.js?v=154";
 import { monthAccessible } from "./calc.js?v=154";
 import { account, redeemSignInCode, onAccountChange, signOut, withCode, setPendingInvite, pendingInvite, isInviteId } from "./account.js?v=154";
 import { startAutoSync, syncSoon, syncNow, syncStatus, onSyncChange } from "./sync.js?v=154";
+await import("./dev/testtools.js?v=152").catch(() => {}); // 🧪 TEST TOOLS: delete this line to remove Load Test Data + Test Wizard
 
 const root = document.getElementById("app");
 const undoStack = [];
