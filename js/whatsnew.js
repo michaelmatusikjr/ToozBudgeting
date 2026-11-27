@@ -1,7 +1,7 @@
 /** What's new: toast on a real version change, then a carousel of short animated recreations. */
-import { h, openSheet, btn, icon, toast } from "./ui.js?v=138";
-import { APP_VERSION } from "./util.js?v=138";
-import { deviceGet, deviceSet } from "./store.js?v=138";
+import { h, openSheet, btn, icon, toast } from "./ui.js?v=139";
+import { APP_VERSION } from "./util.js?v=139";
+import { deviceGet, deviceSet } from "./store.js?v=139";
 
 const RELEASES = [
   {

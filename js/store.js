@@ -5,8 +5,8 @@
  * Device-only settings (theme, push credentials, fired reminders, session chrome)
  * live in a separate store and are never part of the budget export.
  */
-import { SCHEMA_VERSION, deepClone, randomDeviceId, b64url } from "./util.js?v=138";
-import { emptyApp, normalizeBudget } from "./mutate.js?v=138";
+import { SCHEMA_VERSION, deepClone, randomDeviceId, b64url } from "./util.js?v=139";
+import { emptyApp, normalizeBudget } from "./mutate.js?v=139";
 
 const DB_NAME = "toozbudgeting";
 const DB_VER = 1;
@@ -117,6 +117,7 @@ function explode(state) {
       rejectedMerges: b.rejectedMerges || [],
       moneyMoveLog: b.moneyMoveLog || [],
       csvMappings: b.csvMappings || {},
+      bankLinks: b.bankLinks || {},
       pendingDuplicates: b.pendingDuplicates || [],
     };
     put(rec("budget", "budget:" + b.id, b.id, header, memoryRecords.get("budget:" + b.id)));

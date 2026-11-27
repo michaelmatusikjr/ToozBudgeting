@@ -1,19 +1,20 @@
-import { APP_VERSION, monthKey, prevMonth, nextMonth, deepClone } from "./util.js?v=138";
-import { loadState, saveState, subscribe, exportData, importData, deviceGet, deviceSet } from "./store.js?v=138";
-import { h, clear, icon, toast, closeAllModals, btn } from "./ui.js?v=138";
-import { renderIdentity, renderWizard } from "./views/gate.js?v=138";
-import { renderBudget, openInbox } from "./views/budget.js?v=138";
-import { renderTransactions, openTx } from "./views/transactions.js?v=138";
-import { renderAccounts } from "./views/accounts.js?v=138";
-import { renderPayees } from "./views/payees.js?v=138";
-import { renderSettings } from "./views/settings.js?v=138";
-import { registerSW, activateWaiting } from "./pwa.js?v=138";
-import { scheduleLocal, collectReminders } from "./notify.js?v=138";
-import { pushOnOpen } from "./push.js?v=138";
-import { normalizeBudget } from "./mutate.js?v=138";
-import { announceIfUpdated } from "./whatsnew.js?v=138";
-import { paintTheme, resolveTheme } from "./theme.js?v=138";
-import { monthAccessible } from "./calc.js?v=138";
+import { APP_VERSION, monthKey, prevMonth, nextMonth, deepClone } from "./util.js?v=139";
+import { loadState, saveState, subscribe, exportData, importData, deviceGet, deviceSet } from "./store.js?v=139";
+import { h, clear, icon, toast, closeAllModals, btn } from "./ui.js?v=139";
+import { renderIdentity, renderWizard } from "./views/gate.js?v=139";
+import { renderBudget, openInbox } from "./views/budget.js?v=139";
+import { renderTransactions, openTx } from "./views/transactions.js?v=139";
+import { renderAccounts } from "./views/accounts.js?v=139";
+import { renderPayees } from "./views/payees.js?v=139";
+import { renderSettings } from "./views/settings.js?v=139";
+import { registerSW, activateWaiting } from "./pwa.js?v=139";
+import { scheduleLocal, collectReminders } from "./notify.js?v=139";
+import { pushOnOpen } from "./push.js?v=139";
+import { bankOnOpen } from "./banksync.js?v=139";
+import { normalizeBudget } from "./mutate.js?v=139";
+import { announceIfUpdated } from "./whatsnew.js?v=139";
+import { paintTheme, resolveTheme } from "./theme.js?v=139";
+import { monthAccessible } from "./calc.js?v=139";
 
 const root = document.getElementById("app");
 const undoStack = [];
@@ -111,6 +112,7 @@ function applyHash() {
   if (nav === "budget" && /^\d{4}-\d{2}$/.test(a)) ctx.month = a;
   if (nav === "budget" && b) ctx.ui.focusCat = b;
   if (nav === "accounts" && a) ctx.ui.focusAccount = a;
+  if (nav === "settings" && a === "bank") ctx.ui.openBank = true;
   if (nav === "open") {
     ctx.nav = a === "tx" ? "transactions" : "budget";
   }
@@ -239,7 +241,11 @@ async function boot() {
   if (ctx.budget()) {
     scheduleLocal(ctx.budget(), ctx.month);
     pushOnOpen(ctx.budget());
+    bankOnOpen(ctx);
   }
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && ctx.budget() && ctx.state?.activeUserId) bankOnOpen(ctx);
+  });
   document.title = `ToozBudgeting ${APP_VERSION}`;
   if (ctx.state?.setupComplete) setTimeout(() => announceIfUpdated(ctx), 700);
 }

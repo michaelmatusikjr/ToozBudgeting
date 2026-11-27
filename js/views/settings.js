@@ -1,12 +1,13 @@
-import { h, btn, openSheet, field, textInput, toast, confirmDialog } from "../ui.js?v=138";
-import { APP_VERSION, toTitleCase, uid } from "../util.js?v=138";
-import { exportData, deviceGet, deviceSet, importData } from "../store.js?v=138";
-import { freshBudgetShell, copyCategories, addAccount, addCreditCard } from "../mutate.js?v=138";
-import { pushConfig, setPushConfig, pushStatus, enablePush, disablePush, DEFAULTS, syncSchedule } from "../push.js?v=138";
-import { requestPermission, scheduleLocal } from "../notify.js?v=138";
-import { isIOS, isStandalone, canInstall, promptInstall } from "../pwa.js?v=138";
-import { openWhatsNew } from "../whatsnew.js?v=138";
-import { THEMES, paintTheme, deriveCustom, resolveTheme, customFrom } from "../theme.js?v=138";
+import { h, btn, openSheet, field, textInput, toast, confirmDialog } from "../ui.js?v=139";
+import { APP_VERSION, toTitleCase, uid } from "../util.js?v=139";
+import { exportData, deviceGet, deviceSet, importData } from "../store.js?v=139";
+import { freshBudgetShell, copyCategories, addAccount, addCreditCard } from "../mutate.js?v=139";
+import { pushConfig, setPushConfig, pushStatus, enablePush, disablePush, DEFAULTS, syncSchedule } from "../push.js?v=139";
+import { requestPermission, scheduleLocal } from "../notify.js?v=139";
+import { isIOS, isStandalone, canInstall, promptInstall } from "../pwa.js?v=139";
+import { openWhatsNew } from "../whatsnew.js?v=139";
+import { THEMES, paintTheme, deriveCustom, resolveTheme, customFrom } from "../theme.js?v=139";
+import { bankSection, openBankSheet } from "./bank.js?v=139";
 
 export async function renderSettings(root, ctx) {
   const budget = ctx.budget();
@@ -59,6 +60,11 @@ export async function renderSettings(root, ctx) {
       confirm: "Erase", danger: true, onConfirm: () => ctx.reset(),
     })),
   ]));
+  root.append(section("Bank sync", await bankSection(ctx)));
+  if (ctx.ui.openBank) {
+    ctx.ui.openBank = false;
+    setTimeout(() => openBankSheet(ctx), 0);
+  }
   const stored = resolveTheme(theme);
   const customSaved = await deviceGet("customTheme");
   const phoneDark = matchMedia("(prefers-color-scheme: dark)").matches;
@@ -255,7 +261,7 @@ function importFile(ctx) {
     const f = input.files?.[0]; if (!f) return;
     try {
       const parsed = JSON.parse(await f.text());
-      ctx.restore(parsed.budgets ? (await import("../store.js?v=138")).importData(parsed) : parsed);
+      ctx.restore(parsed.budgets ? (await import("../store.js?v=139")).importData(parsed) : parsed);
       toast("Imported");
     } catch (e) { toast(e.message || "Couldn’t import that file"); }
   });
