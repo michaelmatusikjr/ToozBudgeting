@@ -887,7 +887,7 @@ function openAddCategory(ctx) {
   });
 }
 
-function openHistory(ctx) {
+export function openHistory(ctx) {
   const budget = ctx.budget();
   const series = historySeries(budget);
   const sheet = openSheet({

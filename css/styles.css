@@ -10,7 +10,7 @@
   --zero: #C4C0CC; --zero-group: #B5B0BD; --rta-neg: #FF6B6B; --activity-neg-on-navy: #FF9999; --disabled: #ccc;
   --scrim: rgba(0,0,0,0.45); --scrim-light: rgba(0,0,0,0.25); --scrim-select: rgba(0,0,0,0.35);
   --shadow: 0 18px 50px rgba(28, 25, 21, 0.08); --btn-shadow: 0 1px 0 rgba(28, 25, 21, 0.05), 0 1px 2px rgba(28, 25, 21, 0.06); --card-shadow: 0 1px 2px rgba(28, 25, 21, 0.05);
-  --radius: 16px; --tap: 44px; --font: -apple-system, BlinkMacSystemFont, sans-serif; --display: "Fraunces", Georgia, serif; --tabh: 64px; --kb: 0px; color-scheme: light;
+  --radius: 16px; --tap: 44px; --font: -apple-system, BlinkMacSystemFont, sans-serif; --display: "Fraunces", Georgia, serif; --tabh: 76px; --kb: 0px; color-scheme: light;
 }
 :root[data-theme="standard"] {
   --navy: #1A2B4A; --good: #27AE60; --good-on-navy: #5DDF9A; --danger: #E74C3C; --gold: #D4A853; --purple: #7B5EE8; --amber: #F39C12;
@@ -21,7 +21,7 @@
   --zero: #C4C0CC; --zero-group: #B5B0BD; --rta-neg: #FF6B6B; --activity-neg-on-navy: #FF9999; --disabled: #ccc;
   --scrim: rgba(0,0,0,0.45); --scrim-light: rgba(0,0,0,0.25); --scrim-select: rgba(0,0,0,0.35);
   --shadow: 0 18px 50px rgba(28, 25, 21, 0.08); --btn-shadow: 0 1px 0 rgba(28, 25, 21, 0.05), 0 1px 2px rgba(28, 25, 21, 0.06); --card-shadow: 0 1px 2px rgba(28, 25, 21, 0.05);
-  --radius: 16px; --tap: 44px; --font: -apple-system, BlinkMacSystemFont, sans-serif; --display: "Fraunces", Georgia, serif; --tabh: 64px; --kb: 0px; color-scheme: light;
+  --radius: 16px; --tap: 44px; --font: -apple-system, BlinkMacSystemFont, sans-serif; --display: "Fraunces", Georgia, serif; --tabh: 76px; --kb: 0px; color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme]) {
@@ -911,3 +911,164 @@ input, textarea, select, [contenteditable="true"] {
 .dock-key.back { background: #8A93A6; color: #fff; font-size: 20px; }
 .dock-key.done { background: var(--good); color: #fff; font-size: 17px; font-weight: 800; }
 .dock-actions .dock-key.back { font-size: 17px; }
+
+/* WU-06: navy JSX header + emoji bottom nav */
+.shell .topbar {
+  display: block;
+  align-items: stretch;
+  justify-content: unset;
+  gap: 0;
+  padding: env(safe-area-inset-top) 0 0;
+  background: var(--navy);
+  color: var(--on-navy);
+  border-bottom: none;
+  backdrop-filter: none;
+  z-index: 20;
+}
+.hdr-row {
+  display: flex;
+  align-items: center;
+  padding: 6px 10px;
+  gap: 8px;
+}
+.hdr-bell {
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.15);
+  border: none;
+  border-radius: 10px;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 800;
+  padding: 4px 8px;
+  cursor: pointer;
+  font-family: inherit;
+  line-height: 1.4;
+  min-width: 32px;
+  text-align: center;
+}
+.hdr-bell.has { background: var(--danger); color: #fff; }
+.hdr-month {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-width: 0;
+}
+.hdr-mo-btn {
+  background: rgba(255, 255, 255, 0.12);
+  border: 1.5px solid rgba(255, 255, 255, 0.2);
+  border-radius: 7px;
+  color: #fff;
+  font-size: 16px;
+  font-weight: 700;
+  padding: 3px 9px;
+  line-height: 1;
+  font-family: inherit;
+}
+.hdr-mo-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+.hdr-mo-label {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1.5px solid rgba(255, 255, 255, 0.2);
+  border-radius: 7px;
+  color: #fff;
+  min-width: 110px;
+  max-width: 100%;
+  text-align: center;
+  padding: 3px 10px;
+  font-family: inherit;
+  line-height: 1.2;
+}
+.hdr-mo-label.today {
+  background: rgba(255, 255, 255, 0.2);
+  border-color: rgba(255, 255, 255, 0.5);
+}
+.hdr-mo-name { font-size: 14px; font-weight: 800; color: #fff; }
+.hdr-title { flex: 1; text-align: center; min-width: 0; }
+.hdr-page { font-size: 14px; font-weight: 800; color: #fff; opacity: 0.9; }
+.hdr-budget-name {
+  font-size: 9px;
+  opacity: 0.45;
+  margin-top: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hdr-rta { flex-shrink: 0; text-align: right; }
+.hdr-rta-kicker {
+  font-size: 9px;
+  opacity: 0.55;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  line-height: 1;
+}
+.hdr-rta-amt { font-size: 16px; font-weight: 800; line-height: 1.2; }
+.hdr-ahead {
+  padding: 0 12px 5px;
+  text-align: center;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+/* Month picker moved to the header (NAV-03); hide the in-view copy. */
+.view > .month-nav { display: none; }
+
+.tabs {
+  display: flex;
+  align-items: stretch;
+  grid-template-columns: unset;
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+  z-index: 30;
+}
+.tabs .nav-btn,
+.side .nav-btn {
+  flex: 1;
+  position: relative;
+  min-height: 0;
+  padding: 10px 4px 8px;
+  background: none;
+  border: none;
+  box-shadow: none;
+  gap: 2px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--muted);
+}
+.tabs .nav-btn.on,
+.side .nav-btn.on,
+.tabs .nav-btn.on .nav-label,
+.side .nav-btn.on .nav-label {
+  background: none;
+  box-shadow: none;
+  color: var(--navy);
+  font-weight: 700;
+}
+.nav-emoji { font-size: 20px; line-height: 1; }
+.nav-gold-badge {
+  position: absolute;
+  top: 4px;
+  right: 28%;
+  background: var(--gold);
+  color: #fff;
+  border-radius: 8px;
+  font-size: 9px;
+  font-weight: 800;
+  padding: 1px 5px;
+  line-height: 1.3;
+}
+.nav-undo {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  padding: 6px 8px;
+  border-left: 1px solid var(--line);
+}
+.side .nav-undo {
+  margin-top: auto;
+  border-left: none;
+  padding: 12px 8px;
+  flex-direction: row;
+  justify-content: flex-start;
+}

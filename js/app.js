@@ -1,8 +1,8 @@
-import { APP_VERSION, monthKey, prevMonth, nextMonth, deepClone } from "./util.js?v=154";
+import { APP_VERSION, monthKey, prevMonth, nextMonth, deepClone, fmt, monthLabel } from "./util.js?v=154";
 import { loadState, saveState, subscribe, exportData, importData, deviceGet, deviceSet } from "./store.js?v=154";
 import { h, clear, icon, toast, closeAllModals, btn } from "./ui.js?v=154";
 import { renderIdentity, renderWizard, renderLoading } from "./views/gate.js?v=154";
-import { renderBudget, openInbox } from "./views/budget.js?v=154";
+import { renderBudget, openInbox, openHistory } from "./views/budget.js?v=154";
 import { renderTransactions, openTx } from "./views/transactions.js?v=154";
 import { renderAccounts } from "./views/accounts.js?v=154";
 import { renderPayees } from "./views/payees.js?v=154";
@@ -14,7 +14,7 @@ import { bankOnOpen } from "./banksync.js?v=154";
 import { normalizeBudget } from "./mutate.js?v=154";
 import { announceIfUpdated } from "./whatsnew.js?v=154";
 import { paintTheme, resolveTheme } from "./theme.js?v=154";
-import { monthAccessible } from "./calc.js?v=154";
+import { monthAccessible, globalFree, assignedAhead } from "./calc.js?v=154";
 import { account, redeemSignInCode, onAccountChange, signOut, withCode, setPendingInvite, pendingInvite, isInviteId } from "./account.js?v=154";
 import { startAutoSync, syncSoon, syncNow, syncStatus, onSyncChange } from "./sync.js?v=154";
 await import("./dev/testtools.js?v=152").catch(() => {}); // 🧪 TEST TOOLS: delete this line to remove Load Test Data + Test Wizard
@@ -224,30 +224,89 @@ async function paintInner() {
   const shell = h("div", { class: "shell" });
   const side = h("nav", { class: "side", "aria-label": "Primary" });
   const main = h("div", { class: "main" });
-  const notes = ctx.budget() ? collectReminders(ctx.budget(), ctx.month) : [];
+  const budget = ctx.budget();
+  const notes = collectReminders(budget, ctx.month);
+  const free = globalFree(budget, ctx.month);
+  const ahead = assignedAhead(budget, ctx.month);
+  const rtaColor = free < -0.005 ? "var(--rta-neg)" : Math.abs(free) < 0.005 ? "color-mix(in srgb, var(--on-navy) 35%, transparent)" : "var(--good-on-navy)";
+  const bell = h("button", {
+    class: notes.length ? "hdr-bell has" : "hdr-bell",
+    type: "button",
+    "aria-label": notes.length ? `${notes.length} alerts` : "Alerts",
+    onclick: () => openInbox(ctx),
+  }, notes.length ? `🔔 ${notes.length}` : "🔔");
+  let center;
+  if (ctx.nav === "budget") {
+    const prevMk = prevMonth(ctx.month);
+    const nextMk = nextMonth(ctx.month);
+    const prevOk = monthAccessible(budget, prevMk);
+    const nextOk = monthAccessible(budget, nextMk);
+    const isToday = ctx.month === monthKey();
+    center = h("div", { class: "hdr-month" },
+      h("button", { class: "hdr-mo-btn", type: "button", "aria-label": "Previous month", text: "‹", disabled: !prevOk, onclick: () => { if (prevOk) ctx.setMonth(prevMk); } }),
+      h("button", { class: isToday ? "hdr-mo-label today" : "hdr-mo-label", type: "button", "aria-label": monthLabel(ctx.month), onclick: () => openHistory(ctx) },
+        h("div", { class: "hdr-mo-name", text: monthLabel(ctx.month) }),
+        h("div", { class: "hdr-budget-name", text: budget.name }),
+      ),
+      h("button", { class: "hdr-mo-btn", type: "button", "aria-label": "Next month", text: "›", disabled: !nextOk, onclick: () => {
+        if (!nextOk) { toast("Assign money in the previous month first"); return; }
+        ctx.setMonth(nextMk);
+      } }),
+    );
+  } else {
+    const titles = { accounts: "Accounts", transactions: "Transactions", payees: "Payees", settings: "Settings" };
+    center = h("div", { class: "hdr-title" },
+      h("div", { class: "hdr-page", text: titles[ctx.nav] || "" }),
+      h("div", { class: "hdr-budget-name", text: budget.name }),
+    );
+  }
+  const rtaBox = h("div", { class: "hdr-rta" },
+    h("div", { class: "hdr-rta-kicker", text: "Ready to Assign" }),
+    h("div", { class: "hdr-rta-amt", style: `color:${rtaColor}`, text: fmt(free) }),
+  );
   const top = h("header", { class: "topbar" },
-    h("div", { class: "brand" }, h("span", { class: "brand-mark", text: "Tooz" }), h("span", { class: "brand-name", text: ctx.budget().name })),
-    h("div", { class: "top-actions" },
-      h("button", { class: "icon-btn", type: "button", "aria-label": "Undo", disabled: !undoStack.length, onclick: () => ctx.undo() }, icon("undo")),
-      h("button", { class: "icon-btn", type: "button", "aria-label": "Redo", disabled: !redoStack.length, onclick: () => ctx.redo() }, icon("redo")),
-      h("button", { class: "icon-btn", type: "button", "aria-label": notes.length ? `${notes.length} notices` : "Notices", onclick: () => openInbox(ctx) }, icon("bell"), notes.length ? h("span", { class: "badge", text: notes.length > 9 ? "9+" : String(notes.length) }) : null),
-    ),
+    h("div", { class: "hdr-row" }, bell, center, rtaBox),
+    (ctx.nav === "budget" && ahead > 0.001)
+      ? h("div", { class: "hdr-ahead", text: `📅 ${fmt(ahead)} assigned in future months` })
+      : null,
   );
   const view = h("div", { class: "view", id: "view" });
   const tabs = h("nav", { class: "tabs", "aria-label": "Primary" });
   const items = [
-    ["budget", "Plan", "budget"],
-    ["transactions", "Activity", "tx"],
-    ["accounts", "Accounts", "accounts"],
-    ["payees", "Payees", "payees"],
-    ["settings", "Settings", "settings"],
+    ["accounts", "🏦", "Accounts"],
+    ["budget", "📊", "Budget"],
+    ["transactions", "💸", "Transactions"],
+    ["payees", "👥", "Payees"],
+    ["settings", "⚙️", "Settings"],
   ];
-  for (const [id, label, ic] of items) {
+  const openCount = (budget.transactions || []).filter((tx) =>
+    !tx.accountId
+    || (tx.type === "expense" && !tx.categoryId && !tx.splits)
+    || (tx.type === "expense" && tx.categoryId && !tx.splits && tx.categoryConfirmed === false)
+  ).length;
+  const navBtn = (id, emoji, label) => {
     const current = ctx.nav === id;
-    const mk = (extra) => h("button", { class: `nav-btn ${current ? "on" : ""}`, type: "button", "aria-current": current ? "page" : null, onclick: () => ctx.go(id) }, icon(ic), h("span", { text: label }));
-    side.append(mk());
-    tabs.append(mk());
+    const badge = (id === "transactions" && openCount > 0)
+      ? h("span", { class: "nav-gold-badge", text: String(openCount) })
+      : null;
+    return h("button", {
+      class: current ? "nav-btn on" : "nav-btn",
+      type: "button",
+      "aria-current": current ? "page" : null,
+      onclick: () => ctx.go(id),
+    }, h("span", { class: "nav-emoji", text: emoji }), h("span", { class: "nav-label", text: label }), badge);
+  };
+  const undoRedo = () => h("div", { class: "nav-undo" },
+    h("button", { class: "ico-btn", type: "button", "aria-label": "Undo", title: "Undo", disabled: !undoStack.length, onclick: () => ctx.undo() }, "↩"),
+    h("button", { class: "ico-btn", type: "button", "aria-label": "Redo", title: "Redo", disabled: !redoStack.length, onclick: () => ctx.redo() }, "↪"),
+  );
+  for (const [id, emoji, label] of items) {
+    side.append(navBtn(id, emoji, label));
+    tabs.append(navBtn(id, emoji, label));
   }
+  // Desktop keeps Undo/Redo in the sidebar until WU-07 restyles it; phone puts them in the bottom nav.
+  side.append(undoRedo());
+  tabs.append(undoRedo());
   main.append(top, view);
   shell.append(side, main, tabs);
   root.append(shell);
