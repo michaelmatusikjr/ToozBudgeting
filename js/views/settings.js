@@ -1,14 +1,14 @@
-import { h, btn, openSheet, field, textInput, toast, confirmDialog } from "../ui.js?v=153";
-import { APP_VERSION, toTitleCase, uid } from "../util.js?v=153";
-import { exportData, deviceGet, deviceSet, importData } from "../store.js?v=153";
-import { freshBudgetShell, copyCategories, addAccount, addCreditCard } from "../mutate.js?v=153";
-import { pushConfig, setPushConfig, pushStatus, enablePush, disablePush, DEFAULTS, syncSchedule } from "../push.js?v=153";
-import { requestPermission, scheduleLocal } from "../notify.js?v=153";
-import { isIOS, isStandalone, canInstall, promptInstall } from "../pwa.js?v=153";
-import { openWhatsNew } from "../whatsnew.js?v=153";
-import { THEMES, paintTheme, deriveCustom, resolveTheme, customFrom } from "../theme.js?v=153";
-import { bankSection, openBankSheet } from "./bank.js?v=153";
-import { householdSection } from "./household.js?v=153";
+import { h, btn, openSheet, field, textInput, toast, confirmDialog } from "../ui.js?v=154";
+import { APP_VERSION, toTitleCase, uid } from "../util.js?v=154";
+import { exportData, deviceGet, deviceSet, importData } from "../store.js?v=154";
+import { freshBudgetShell, copyCategories, addAccount, addCreditCard } from "../mutate.js?v=154";
+import { pushConfig, setPushConfig, pushStatus, enablePush, disablePush, DEFAULTS, syncSchedule } from "../push.js?v=154";
+import { requestPermission, scheduleLocal } from "../notify.js?v=154";
+import { isIOS, isStandalone, canInstall, promptInstall } from "../pwa.js?v=154";
+import { openWhatsNew } from "../whatsnew.js?v=154";
+import { THEMES, paintTheme, deriveCustom, resolveTheme, customFrom } from "../theme.js?v=154";
+import { bankSection, openBankSheet } from "./bank.js?v=154";
+import { householdSection } from "./household.js?v=154";
 
 export async function renderSettings(root, ctx) {
   const budget = ctx.budget();
@@ -268,7 +268,7 @@ function importFile(ctx) {
     const f = input.files?.[0]; if (!f) return;
     try {
       const parsed = JSON.parse(await f.text());
-      ctx.restore(parsed.budgets ? (await import("../store.js?v=153")).importData(parsed) : parsed);
+      ctx.restore(parsed.budgets ? (await import("../store.js?v=154")).importData(parsed) : parsed);
       toast("Imported");
     } catch (e) { toast(e.message || "Couldn’t import that file"); }
   });

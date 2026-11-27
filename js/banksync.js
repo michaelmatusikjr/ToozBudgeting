@@ -6,10 +6,10 @@
  * claims them, applies them to the shared budget, pushes the result, and acks. Transaction ids come from
  * Plaid (plaid-<id>), so applying the same batch twice never makes a duplicate.
  */
-import { deviceGet, deviceSet } from "./store.js?v=153";
-import { applyBankBatch, rememberBankAccounts, sumStats, statsLine } from "./bankmap.js?v=153";
-import { api, account, serverUrl, SERVER_DEFAULT, ApiError } from "./account.js?v=153";
-import { syncNow } from "./sync.js?v=153";
+import { deviceGet, deviceSet } from "./store.js?v=154";
+import { applyBankBatch, rememberBankAccounts, sumStats, statsLine } from "./bankmap.js?v=154";
+import { api, account, serverUrl, SERVER_DEFAULT, ApiError } from "./account.js?v=154";
+import { syncNow } from "./sync.js?v=154";
 
 export const BANK_DEFAULTS = { serverUrl: SERVER_DEFAULT };
 export const PLAID_LINK_SRC = "https://cdn.plaid.com/link/v2/stable/link-initialize.js";
@@ -200,10 +200,10 @@ export function loadPlaidLink() {
  * connectedInstitutions guards the 10-login cap: picking a bank that's already connected closes Link
  * before any login is created.
  */
-export async function openLink({ token, mode, itemId, linkSessionId, connectedInstitutions = [], receivedRedirectUri, onDone, onDuplicate }) {
+export async function openLink({ token, mode, itemId, linkSessionId, from = "app", connectedInstitutions = [], receivedRedirectUri, onDone, onDuplicate }) {
   const Plaid = await loadPlaidLink();
   if (!receivedRedirectUri) {
-    try { localStorage.setItem(LINK_KEY, JSON.stringify({ token, mode, itemId: itemId || null, linkSessionId: linkSessionId || null, at: Date.now() })); } catch { /* ignore */ }
+    try { localStorage.setItem(LINK_KEY, JSON.stringify({ token, mode, itemId: itemId || null, linkSessionId: linkSessionId || null, from, at: Date.now() })); } catch { /* ignore */ }
   }
   let handler = null;
   let dupe = false;
@@ -234,8 +234,10 @@ export async function openLink({ token, mode, itemId, linkSessionId, connectedIn
       if (link.status === "done") finish({ ok: true, mode, item: link.result?.itemId ? { itemId: link.result.itemId, institution: link.result.institution } : null, elsewhere: true });
     } catch { /* keep waiting */ }
   };
+  // Start watching as soon as Link hands off to the bank, not only when this page becomes visible again: on
+  // iPhone the bank window can sit over the page, so visibility events never come.
   function onVisible() {
-    if (document.visibilityState !== "visible" || !oauthOpen || done) return;
+    if (!oauthOpen || done) return;
     check();
     if (!poll) { let n = 0; poll = setInterval(() => { if (++n > 60) { clearInterval(poll); poll = null; } check(); }, 3000); }
     if (!escape) {
@@ -266,7 +268,7 @@ export async function openLink({ token, mode, itemId, linkSessionId, connectedIn
       finish({ ok: false, cancelled: !err, message: err ? `${err.display_message || err.error_message || "Plaid Link stopped"} (${err.error_code || "LINK_EXIT"})` : null });
     },
     onEvent: (name, meta) => {
-      if (name === "OPEN_OAUTH") { oauthOpen = true; linkSessionEvent(linkSessionId, "oauth"); }
+      if (name === "OPEN_OAUTH") { oauthOpen = true; linkSessionEvent(linkSessionId, "oauth"); setTimeout(onVisible, 1500); }
       if (mode !== "update" && name === "SELECT_INSTITUTION" && meta?.institution_id && connectedInstitutions.includes(meta.institution_id)) {
         dupe = true;
         onDuplicate?.(meta.institution_name);

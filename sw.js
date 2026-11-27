@@ -1,4 +1,4 @@
-const CACHE = "tooz-shell-v16";
+const CACHE = "tooz-shell-v17";
 const SHELL = [
   "./",
   "./index.html",
@@ -13,7 +13,6 @@ const SHELL = [
   "./js/mutate.js",
   "./js/notify.js",
   "./js/oauth.js",
-  "./oauth.html",
   "./js/payees.js",
   "./js/push.js",
   "./js/pwa.js",
@@ -63,6 +62,8 @@ self.addEventListener("fetch", (event) => {
   if (req.method !== "GET") return;
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
+  // The bank-return and Safari connect pages always come straight from the network, never from this cache.
+  if (/\/(oauth|connect)\.html$/.test(url.pathname)) return;
   event.respondWith(networkFirst(req));
 });
 
