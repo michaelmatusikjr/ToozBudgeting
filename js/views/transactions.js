@@ -1143,114 +1143,292 @@ function txFilterPanel(ctx, budget, f, clearAllFilters) {
   return h("div", { class: "tx-filter-panel" }, ...kids);
 }
 
+
+export function prepareImportRows(rows, headers, mapping, existingTxs, accountId) {
+  const existing = (existingTxs || []).filter((tx) => tx.accountId === accountId);
+  const parsed = [];
+  for (const row of (rows || []).slice(1)) {
+    const mapped = applyMapping(row, headers, mapping);
+    if (!mapped.date) continue;
+    const payee = (mapped.payee || "").trim();
+    const amount = Number(mapped.amount) || 0;
+    if (!amount) continue;
+    const named = toTitleCase(payee);
+    const isDup = existing.some((tx) => tx.date === mapped.date
+      && Math.abs(Math.abs(tx.amount) - Math.abs(amount)) < 0.005
+      && (tx.originalPayee || tx.payee || "").trim().toLowerCase() === payee.toLowerCase());
+    parsed.push({
+      date: mapped.date,
+      payee,
+      amount,
+      categoryId: "",
+      duplicate: isDup,
+      skip: isDup || !named,
+    });
+  }
+  return parsed;
+}
+
 function openImport(ctx) {
+  if (ctx.readOnly()) { toast("View only — importing is turned off"); return; }
   const budget = ctx.budget();
-  const sheet = openSheet({
-    title: "Import CSV",
+  const st = {
+    step: "select",
+    rows: [],
+    headers: [],
+    fileName: "",
+    accountId: "",
+    dateCol: "",
+    payeeCol: "",
+    amountMode: "single",
+    amountCol: "",
+    signConvention: "neg-expense",
+    debitCol: "",
+    creditCol: "",
+    mappingSource: "none",
+    parsedTxs: [],
+  };
+
+  let sheet;
+  sheet = openSheet({
+    title: "📥 Import Transactions",
+    closeLabel: "Discard",
     body: (host) => {
-      const acct = h("select", { class: "input" });
-      for (const a of [...budget.accounts, ...budget.creditCards].filter((a) => !a.archived)) acct.append(h("option", { value: a.id, text: a.name }));
-      const file = h("input", { type: "file", accept: ".csv,text/csv" });
-      const mapBox = h("div");
-      host.append(field("Account", acct), field("CSV file", file), mapBox);
-      file.addEventListener("change", async () => {
-        const f = file.files?.[0]; if (!f) return;
-        const rows = parseCSV(await f.text());
-        if (rows.length < 2) { toast("No rows in that file"); return; }
-        const headers = rows[0];
-        const remembered = budget.csvMappings?.[acct.value];
-        const mapping = remembered || guessColumnMapping(headers);
-        mapBox.replaceChildren();
-        const selects = {};
-        const make = (label, key) => {
-          const sel = h("select", { class: "input" }, h("option", { value: "", text: "—" }));
-          headers.forEach((hd) => sel.append(h("option", { value: hd, text: hd })));
-          sel.value = mapping[key] || "";
-          selects[key] = sel;
-          mapBox.append(field(label, sel));
-        };
-        make("Date", "dateCol"); make("Payee", "payeeCol"); make("Amount", "amountCol"); make("Debit", "debitCol"); make("Credit", "creditCol");
-        const sign = h("select", { class: "input" },
-          h("option", { value: "neg-expense", text: "Negative amounts are expenses" }),
-          h("option", { value: "pos-expense", text: "Positive amounts are expenses" }),
-        );
-        sign.value = mapping.signConvention || "neg-expense";
-        const mode = h("select", { class: "input" },
-          h("option", { value: "single", text: "One amount column" }),
-          h("option", { value: "split", text: "Separate debit and credit" }),
-        );
-        mode.value = mapping.amountMode || "single";
-        mapBox.append(field("Amount style", mode), field("Sign", sign));
-        const review = h("div", { class: "stack" });
-        mapBox.append(h("p", { class: "kicker", text: "Review" }), review);
-        const mappingNow = () => ({
-          dateCol: selects.dateCol.value, payeeCol: selects.payeeCol.value, amountCol: selects.amountCol.value,
-          debitCol: selects.debitCol.value, creditCol: selects.creditCol.value,
-          amountMode: mode.value, signConvention: sign.value,
-        });
-        const parsedRows = () => rows.slice(1).map((r) => applyMapping(r, headers, mappingNow())).filter((p) => p.date && p.amount);
-        let draft = [];
-        const paintReview = () => {
-          review.replaceChildren();
-          draft = parsedRows();
-          if (!draft.length) { review.append(h("p", { class: "hint", text: "No dated amounts with the columns selected." })); return; }
-          draft.forEach((p, i) => {
-            const expense = p.amount > 0;
-            const named = toTitleCase((p.payee || "").trim());
-            const guessed = named ? (payeeDefaultCategory(budget, named) || payeeSuggestedCategory(budget, named) || "") : "";
-            p._named = named;
-            p._skip = !named;
-            p._categoryId = expense ? guessed : RTA;
-            if (i >= 12) return;
-            const cat = categorySelect(budget, acct.value, true);
-            cat.value = p._categoryId;
-            cat.addEventListener("change", () => { p._categoryId = cat.value; });
-            const skip = h("input", { type: "checkbox", checked: !named });
-            skip.addEventListener("change", () => { p._skip = skip.checked; });
-            const row = h("div", { class: "pair" },
-              h("p", { text: `${p.date} · ${named || "No payee"} · ${fmt(p.amount)}` }),
-              h("label", { class: "choice" }, skip, h("span", { text: named ? "Skip this row" : "Skipped — no payee" })),
-            );
-            if (named) row.append(cat);
-            review.append(row);
-          });
-          if (draft.length > 12) review.append(h("p", { class: "hint", text: `${draft.length - 12} more rows use each payee’s default category.` }));
-        };
-        for (const sel of Object.values(selects)) sel.addEventListener("change", paintReview);
-        mode.addEventListener("change", paintReview);
-        sign.addEventListener("change", paintReview);
-        paintReview();
-        mapBox.append(btn("Import", { block: true, onClick: () => {
-          const map = mappingNow();
-          let b = { ...budget, csvMappings: { ...(budget.csvMappings || {}), [acct.value]: map } };
-          let added = 0; let dup = 0; let skipped = 0;
-          const seen = new Set((b.transactions || []).map((t) => `${t.accountId}|${t.date}|${Math.abs(t.amount)}|${(t.originalPayee || t.payee || "").toLowerCase()}`));
-          for (const parsed of draft) {
-            const named = parsed._named || toTitleCase((parsed.payee || "").trim());
-            if (!named || parsed._skip) { skipped++; continue; }
-            const key = `${acct.value}|${parsed.date}|${Math.abs(parsed.amount)}|${named.toLowerCase()}`;
-            if (seen.has(key)) { skipped++; continue; }
-            seen.add(key);
-            const expense = parsed.amount > 0;
-            const chosen = parsed._categoryId || "";
-            const confirmed = chosen ? chosen === (payeeDefaultCategory(b, named) || "") : true;
-            const res = addTransaction(b, {
-              date: parsed.date, payee: named, amount: Math.abs(parsed.amount),
-              accountId: acct.value,
-              categoryId: expense ? chosen : RTA,
-              type: expense ? "expense" : "income",
-              categoryConfirmed: confirmed,
-            });
-            if (res.error) continue;
-            b = res.budget;
-            added++;
-            if ((b.pendingDuplicates || []).length > dup) dup = b.pendingDuplicates.length;
-          }
-          ctx.updateBudget(() => b);
-          sheet.close();
-          toast(`Imported ${added}${skipped ? `, skipped ${skipped}` : ""}${dup ? `, ${dup} possible duplicates` : ""}`);
-        }}));
+      const setTitle = (t) => {
+        const el = host.closest(".sheet")?.querySelector(".sheet-title");
+        if (el) el.textContent = t;
+      };
+
+      const mappingNow = () => ({
+        dateCol: st.dateCol, payeeCol: st.payeeCol, amountCol: st.amountCol,
+        debitCol: st.debitCol, creditCol: st.creditCol,
+        amountMode: st.amountMode, signConvention: st.signConvention,
       });
+
+      const colSelect = (label, key) => {
+        const sel = h("select", { class: "input" }, h("option", { value: "", text: "Select..." }));
+        for (const hd of st.headers) sel.append(h("option", { value: hd, text: hd }));
+        sel.value = st[key] || "";
+        sel.addEventListener("change", () => { st[key] = sel.value; });
+        return field(label, sel);
+      };
+
+      const goToMap = () => {
+        if (st.rows.length < 2 || !st.accountId) return;
+        const remembered = budget.csvMappings?.[st.accountId];
+        const needed = remembered
+          ? [remembered.dateCol, remembered.payeeCol, ...(remembered.amountMode === "split" ? [remembered.debitCol, remembered.creditCol] : [remembered.amountCol])]
+          : [];
+        const templateValid = remembered && needed.every((col) => col && st.headers.includes(col));
+        const mapping = templateValid ? remembered : guessColumnMapping(st.headers);
+        Object.assign(st, {
+          dateCol: mapping.dateCol || "",
+          payeeCol: mapping.payeeCol || "",
+          amountMode: mapping.amountMode || "single",
+          amountCol: mapping.amountCol || "",
+          signConvention: mapping.signConvention || "neg-expense",
+          debitCol: mapping.debitCol || "",
+          creditCol: mapping.creditCol || "",
+          mappingSource: templateValid ? "template" : ((mapping.dateCol || mapping.payeeCol) ? "guess" : "none"),
+          step: "map",
+        });
+        paint();
+      };
+
+      const goToReview = () => {
+        const map = mappingNow();
+        const ready = st.dateCol && st.payeeCol && (st.amountMode === "single" ? st.amountCol : (st.debitCol && st.creditCol));
+        if (!ready) return;
+        const parsed = prepareImportRows(st.rows, st.headers, map, budget.transactions, st.accountId);
+        for (const p of parsed) {
+          if (p.skip || p.duplicate) continue;
+          const named = toTitleCase(p.payee);
+          const displayed = displayName(budget, named);
+          const expense = p.amount > 0;
+          p.categoryId = expense ? (payeeDefaultCategory(budget, displayed) || payeeSuggestedCategory(budget, displayed) || "") : RTA;
+        }
+        st.parsedTxs = parsed;
+        st.step = "review";
+        paint();
+      };
+
+      const finishImport = () => {
+        const map = mappingNow();
+        let b = { ...budget, csvMappings: { ...(budget.csvMappings || {}), [st.accountId]: map } };
+        let added = 0; let skipped = 0; let dup = 0;
+        const seen = new Set((b.transactions || []).map((t) => `${t.accountId}|${t.date}|${Math.abs(t.amount)}|${(t.originalPayee || t.payee || "").toLowerCase()}`));
+        for (const parsed of st.parsedTxs) {
+          const named = toTitleCase((parsed.payee || "").trim());
+          if (parsed.skip || !named) { skipped++; continue; }
+          const key = `${st.accountId}|${parsed.date}|${Math.abs(parsed.amount)}|${named.toLowerCase()}`;
+          if (parsed.duplicate || seen.has(key)) { skipped++; continue; }
+          seen.add(key);
+          const chosen = parsed.categoryId || "";
+          const isRta = chosen === RTA;
+          const expense = !isRta && parsed.amount > 0;
+          const defCat = payeeDefaultCategory(b, named) || "";
+          const sugCat = payeeSuggestedCategory(b, named) || "";
+          const confirmed = !chosen || isRta || chosen === defCat || (chosen !== sugCat);
+          const res = addTransaction(b, {
+            date: parsed.date, payee: named, amount: Math.abs(parsed.amount),
+            accountId: st.accountId,
+            categoryId: isRta ? RTA : chosen,
+            type: isRta ? "income" : (expense ? "expense" : "income"),
+            isRefund: !isRta && parsed.amount < 0,
+            categoryConfirmed: !!confirmed,
+          });
+          if (res.error) continue;
+          b = res.budget;
+          added++;
+          if ((b.pendingDuplicates || []).length > dup) dup = (b.pendingDuplicates || []).length;
+        }
+        ctx.updateBudget(() => b);
+        sheet.close();
+        toast(`Imported ${added}${skipped ? `, skipped ${skipped}` : ""}${dup ? `, ${dup} possible duplicates` : ""}`);
+      };
+
+      const paintSelect = () => {
+        setTitle("📥 Import Transactions");
+        const file = h("input", { class: "input", type: "file", accept: ".csv,text/csv" });
+        file.addEventListener("change", async () => {
+          const f = file.files?.[0]; if (!f) return;
+          const rows = parseCSV(await f.text());
+          st.rows = rows;
+          st.headers = rows[0] || [];
+          st.fileName = f.name;
+          paint();
+        });
+        const kids = [
+          h("p", { class: "tx-import-lede", text: "Import a CSV export from your bank. You'll map the columns and review categories before anything is added." }),
+          field("CSV File", file),
+        ];
+        if (st.fileName) kids.push(h("div", { class: "tx-import-fileok", text: `✓ ${st.fileName} — ${Math.max(0, st.rows.length - 1)} rows found` }));
+        kids.push(searchableSel({
+          label: "Import into",
+          value: st.accountId,
+          placeholder: "Select an account or card...",
+          options: [{ value: "", label: "Select an account or card..." }, ...accountSelectOptions(budget).filter((o) => o.value)],
+          onChange: (v) => { st.accountId = v; paint(); },
+        }));
+        kids.push(btnRow(
+          { label: "Cancel", kind: "ghost", onClick: () => sheet.close() },
+          { label: "Next: Map Columns", kind: "primary", disabled: st.rows.length < 2 || !st.accountId, onClick: goToMap },
+        ));
+        append(host, ...kids);
+      };
+
+      const paintMap = () => {
+        setTitle("Map Columns");
+        const kids = [];
+        if (st.mappingSource === "template") kids.push(h("div", { class: "tx-import-info", text: "✓ Pre-filled using the mapping you used last time for this account. Adjust if needed." }));
+        if (st.mappingSource === "guess") kids.push(h("div", { class: "tx-import-info", text: "✓ Pre-filled based on your file's column names. Double-check these look right." }));
+        if (st.rows[1]) {
+          const preview = st.rows[1].slice(0, 4).join(" · ") + (st.rows[1].length > 4 ? "…" : "");
+          kids.push(h("p", { class: "tx-import-preview", text: `Preview of row 1: ${preview}` }));
+        }
+        kids.push(colSelect("Date Column", "dateCol"));
+        kids.push(colSelect("Payee / Description Column", "payeeCol"));
+        const modeBox = h("div", { class: "tx-import-modes" },
+          btn("One Amount Column", { kind: st.amountMode === "single" ? "primary small" : "ghost small", onClick: () => { st.amountMode = "single"; paint(); } }),
+          btn("Separate Debit/Credit", { kind: st.amountMode === "split" ? "primary small" : "ghost small", onClick: () => { st.amountMode = "split"; paint(); } }),
+        );
+        kids.push(field("Amount Format", modeBox));
+        if (st.amountMode === "single") {
+          kids.push(colSelect("Amount Column", "amountCol"));
+          const signs = h("div", { class: "tx-import-signs" });
+          for (const [val, label] of [["neg-expense", "Negative numbers are expenses"], ["pos-expense", "Positive numbers are expenses"]]) {
+            const input = h("input", { type: "radio", name: "signconv", checked: st.signConvention === val || null });
+            input.addEventListener("change", () => { st.signConvention = val; paint(); });
+            signs.append(h("label", { class: "tx-import-sign" }, input, h("span", { text: label })));
+          }
+          kids.push(field("Sign Convention", signs));
+        } else {
+          kids.push(colSelect("Debit Column (expenses)", "debitCol"));
+          kids.push(colSelect("Credit Column (income)", "creditCol"));
+        }
+        const ready = st.dateCol && st.payeeCol && (st.amountMode === "single" ? st.amountCol : (st.debitCol && st.creditCol));
+        kids.push(h("div", { class: "tx-form-actions" }, btnRow(
+          { label: "Back", kind: "ghost", onClick: () => { st.step = "select"; paint(); } },
+          { label: "Next: Review", kind: "primary", disabled: !ready, onClick: goToReview },
+        )));
+        append(host, ...kids);
+      };
+
+      const paintReview = () => {
+        setTitle("Review Import");
+        const toImport = st.parsedTxs.filter((p) => !p.skip);
+        const dupCount = st.parsedTxs.filter((p) => p.duplicate).length;
+        const kids = [];
+        kids.push(h("p", { class: "tx-import-summary" },
+          h("strong", { text: String(toImport.length) }),
+          h("span", { text: ` transaction${toImport.length !== 1 ? "s" : ""} ready to import` }),
+          dupCount ? h("span", {}, h("span", { text: ", " }), h("strong", { text: String(dupCount) }), h("span", { text: ` flagged as duplicate${dupCount !== 1 ? "s" : ""}` })) : null,
+          h("span", { text: "." }),
+        ));
+        const list = h("div", { class: "tx-import-list" });
+        if (!st.parsedTxs.length) {
+          list.append(h("div", { class: "tx-import-empty", text: "Nothing to import." }));
+        } else {
+          const catOpts = catOptionsForAccount(budget, st.accountId, [{ value: RTA, label: "→ Ready to Assign (record as income)" }]);
+          st.parsedTxs.forEach((p, i) => {
+            const named = displayName(budget, toTitleCase(p.payee || ""));
+            const defCat = named ? payeeDefaultCategory(budget, named) : "";
+            const sugCat = named ? payeeSuggestedCategory(budget, named) : "";
+            const isRTA = p.categoryId === RTA;
+            const isPositive = p.amount > 0;
+            const amtClass = isRTA || !isPositive ? "in" : "out";
+            const meta = [];
+            try {
+              meta.push(new Date(p.date + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }));
+            } catch { meta.push(p.date); }
+            if (isRTA) meta.push("→ Income / RTA");
+            else if (!isPositive) meta.push("→ Refund / Return");
+            else meta.push("expense");
+            if ((defCat || sugCat) && !isRTA && isPositive) meta.push(`${defCat ? "Default" : "Suggested"} pre-filled`);
+            const skip = h("input", { type: "checkbox", checked: !!p.skip });
+            skip.addEventListener("change", () => { p.skip = skip.checked; paint(); });
+            const row = h("div", { class: `tx-import-row${p.duplicate ? " dup" : ""}${p.skip ? " skipped" : ""}` },
+              h("div", { class: "tx-import-row-top" },
+                h("span", { class: "tx-import-payee", text: p.payee || "No payee" }),
+                h("span", { class: `tx-import-amt ${amtClass}`, text: fmt(p.amount) }),
+              ),
+              h("div", { class: "tx-import-meta", text: meta.join(" · ") }),
+              p.duplicate ? h("div", { class: "tx-import-dup", text: "Possible duplicate of an existing transaction" }) : null,
+              h("label", { class: "tx-import-skip" }, skip, h("span", { text: p.duplicate ? "Skip (duplicate)" : (p.payee ? "Skip this row" : "Skipped — no payee") })),
+            );
+            if (!p.skip) {
+              row.append(searchableSel({
+                value: p.categoryId || "",
+                placeholder: "Search categories...",
+                options: catOpts,
+                onChange: (v) => { p.categoryId = v; paint(); },
+              }));
+            }
+            list.append(row);
+          });
+        }
+        kids.push(list);
+        const actions = h("div", { class: "tx-form-actions" });
+        if (toImport.length === 0) {
+          actions.append(btn(st.parsedTxs.some((p) => p.duplicate) && !st.parsedTxs.some((p) => !p.duplicate && !p.skip) ? "Dismiss" : "Dismiss", { kind: "primary", onClick: () => sheet.close() }));
+          if (st.parsedTxs.length) actions.prepend(btn("Back", { kind: "ghost", onClick: () => { st.step = "map"; paint(); } }));
+        } else {
+          actions.append(btnRow(
+            { label: "Back", kind: "ghost", onClick: () => { st.step = "map"; paint(); } },
+            { label: `Import ${toImport.length} Transaction${toImport.length !== 1 ? "s" : ""}`, kind: "primary", onClick: finishImport },
+          ));
+        }
+        kids.push(actions);
+        append(host, ...kids);
+      };
+
+      const paint = () => {
+        clear(host);
+        if (st.step === "select") paintSelect();
+        else if (st.step === "map") paintMap();
+        else paintReview();
+      };
+      paint();
     },
   });
 }
