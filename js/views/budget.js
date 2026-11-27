@@ -1,4 +1,4 @@
-import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, openAmountPad } from "../ui.js?v=154";
+import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, openAmountPad, isTouchUi } from "../ui.js?v=154";
 import { fmt, monthLabel, monthKey, prevMonth, nextMonth, todayKey, toTitleCase, uid, round2 } from "../util.js?v=154";
 import {
   budgetSnapshot, getGoalMetrics, trailingAvg, monthAccessible, historySeries,
@@ -10,7 +10,7 @@ import {
   deleteCategory, setMonthNote, addGroup, renameGroup, deleteGroup, moveGroup, moveCategory,
 } from "../mutate.js?v=154";
 import { collectReminders } from "../notify.js?v=154";
-import { openMissingSide } from "./transactions.js?v=154";
+import { openMissingSide, openTx } from "./transactions.js?v=154";
 
 function noteOf(budget, month, cat) {
   return budget.categoryNotes?.[month]?.[cat.id] || "";
@@ -49,6 +49,77 @@ export function withGoalChange(note, oldGoal, newGoal) {
   return joinGoalNote(parts.editable, changes);
 }
 
+
+function showActivityCol() {
+  return !isTouchUi();
+}
+
+function budgetGridClass() {
+  return showActivityCol() ? "bud-grid has-activity" : "bud-grid";
+}
+
+function goalMetricsFor(cat, snap, month) {
+  const avail = Number(snap.available[cat.id] || 0);
+  const budgeted = Number(snap.budgeted[cat.id] || 0);
+  return getGoalMetrics(cat, avail, budgeted, month);
+}
+
+function openGoalCategories(budget, snap, month) {
+  return (budget.categories || []).filter((cat) => {
+    if (!cat.goal?.type || cat.archived) return false;
+    const m = goalMetricsFor(cat, snap, month);
+    if (!m) return false;
+    if (m.type === "savings") return !m.complete;
+    if (m.type === "monthly") return m.underfunded;
+    if (m.type === "date") return !m.onTrack;
+    return false;
+  });
+}
+
+function underfundedGoalCats(budget, snap, month) {
+  return (budget.categories || []).filter((cat) => {
+    if (!cat.goal?.type || cat.archived) return false;
+    const m = goalMetricsFor(cat, snap, month);
+    if (!m || m.complete) return false;
+    return (m.type === "monthly" && m.underfunded) || (m.type === "date" && !m.onTrack);
+  });
+}
+
+function totalGoalNeeded(cats, snap, month) {
+  return cats.reduce((s, cat) => {
+    const m = goalMetricsFor(cat, snap, month);
+    if (!m) return s;
+    if (m.type === "monthly") return s + m.needed;
+    if (m.type === "date") return s + Math.max(0, m.monthlyNeeded - Number(snap.budgeted[cat.id] || 0));
+    return s;
+  }, 0);
+}
+
+function tile(kind, icon, label, onClick) {
+  return h("button", { class: `bud-tile ${kind}`, type: "button", onclick: onClick },
+    h("span", { class: "bud-tile-ico", text: icon }),
+    h("span", { class: "bud-tile-lbl", text: label }),
+  );
+}
+
+function openAddGroup(ctx) {
+  const nm = textInput({ placeholder: "New group" });
+  const sheet = openSheet({
+    title: "New Category Group",
+    body: (host) => {
+      host.append(
+        field("Name", nm),
+        btn("Add", { block: true, onClick: () => {
+          if (!nm.value.trim()) return;
+          ctx.updateBudget((b) => addGroup(b, nm.value));
+          sheet.close();
+        }}),
+      );
+      nm.focus();
+    },
+  });
+}
+
 export function renderBudget(root, ctx) {
   const budget = ctx.budget();
   if (!budget) { root.append(h("p", { text: "No budget selected." })); return; }
@@ -56,35 +127,40 @@ export function renderBudget(root, ctx) {
   const today = monthKey();
   const snap = budgetSnapshot(budget, month, today);
   const collapsed = ctx.ui.collapsed;
+  const ro = ctx.readOnly();
+  const showAct = showActivityCol();
+  const showAssign = snap.free > 0 && openGoalCategories(budget, snap, month).length > 0;
+  const showHistory = (budget.moneyMoveLog || []).some((e) => e.month === month);
+  const underfunded = underfundedGoalCats(budget, snap, month);
+  const needed = totalGoalNeeded(underfunded, snap, month);
+  const totalBudgeted = Object.values(snap.budgeted).reduce((s, v) => s + Number(v), 0);
+  const totalActivity = Object.values(snap.activity).reduce((s, v) => s + Number(v), 0);
+  const totalAvailable = (budget.categories || []).reduce((s, c) => s + Number(snap.available[c.id] || 0), 0);
 
-  const prevMk = prevMonth(month);
-  const nextMk = nextMonth(month);
-  const prevOk = monthAccessible(budget, prevMk, today);
-  const nextOk = monthAccessible(budget, nextMk, today);
-  const head = h("div", { class: "month-nav" },
-    h("button", { class: "icon-btn", type: "button", "aria-label": "Previous month", text: "‹", disabled: !prevOk, onclick: () => { if (prevOk) ctx.setMonth(prevMk); } }),
-    h("button", { class: "month-label", type: "button", text: monthLabel(month), onclick: () => ctx.setMonth(today) }),
-    h("button", { class: "icon-btn", type: "button", "aria-label": "Next month", text: "›", disabled: !nextOk, onclick: () => {
-      if (!nextOk) { toast("Assign money in the previous month first"); return; }
-      ctx.setMonth(nextMk);
-    } }),
-  );
-  const planLinks = h("nav", { class: "link-row plan-actions", "aria-label": "Plan" },
-    h("button", { class: "text-link", type: "button", text: "Auto-assign", onclick: () => openAuto(ctx) }),
-    h("button", { class: "text-link", type: "button", text: "Move", onclick: () => openMove(ctx, null, null) }),
-    h("button", { class: "text-link", type: "button", text: "Add", onclick: () => openAddCategory(ctx) }),
-    h("button", { class: "text-link", type: "button", text: "Goals", onclick: () => openAllGoals(ctx) }),
-    h("button", { class: "text-link", type: "button", text: "History", onclick: () => openHistory(ctx) }),
-    h("button", { class: "text-link", type: "button", text: "Log", onclick: () => openLog(ctx) }),
-    h("button", { class: "text-link", type: "button", text: ctx.ui.showArchived ? "Hide archived" : "Archived", onclick: () => { ctx.ui.showArchived = !ctx.ui.showArchived; ctx.render(); } }),
-  );
+  const tiles = h("div", { class: "bud-tiles" });
+  if (!ro) {
+    tiles.append(
+      tile("txn", "＋", "Txn", () => openTx(ctx, null)),
+      tile("cat", "＋", "Category", () => openAddCategory(ctx)),
+      tile("grp", "＋", "Group", () => openAddGroup(ctx)),
+      tile("goals", "🎯", "Goals", () => openAllGoals(ctx)),
+    );
+    if (showAssign) tiles.append(tile("assign", "✨", "Assign", () => openAuto(ctx)));
+  }
+  if (showHistory) tiles.append(tile("history", "📋", "History", () => openLog(ctx)));
 
-  const rtaClass = snap.free < -0.005 ? "rta bad" : snap.free < 0.005 ? "rta zero" : "rta";
-  const returned = snap.returned > 0.005 ? ` · ${fmt(snap.returned)} returned` : "";
-  const rta = h("section", { class: rtaClass },
-    h("p", { class: "kicker", text: "Ready to Assign" }),
-    h("p", { class: "rta-num", text: fmt(snap.free) }),
-    h("p", { class: "muted", text: month === today ? `This month ${fmt(snap.rta)} · ${fmt(snap.ahead)} assigned ahead${returned}` : `Showing ${monthLabel(month)}${returned}` }),
+  const banner = underfunded.length
+    ? h("div", { class: "bud-underfund" },
+      h("strong", { text: `⚠️ ${underfunded.length} goal${underfunded.length !== 1 ? "s" : ""} need${underfunded.length === 1 ? "s" : ""} funding` }),
+      h("span", { class: "bud-needed", text: `· ${fmt(needed)} still needed` }),
+    )
+    : null;
+
+  const cols = h("div", { class: budgetGridClass() + " bud-cols" },
+    h("span", { text: "Category" }),
+    h("span", { text: "Budgeted" }),
+    showAct ? h("span", { text: "Activity" }) : null,
+    h("span", { text: "Available" }),
   );
 
   const overs = overspentMonths(budget, today).filter((o) => o.month <= today);
@@ -143,15 +219,29 @@ export function renderBudget(root, ctx) {
     ));
     if (open) {
       for (const cat of cats) sec.append(categoryRow(ctx, cat, snap, month, today));
-      sec.append(h("div", { class: "group-foot" },
-        h("button", { class: "quiet-link", type: "button", text: "Activity", onclick: (e) => { e.stopPropagation(); ctx.go("transactions", { groupId: g.id, month }); } }),
-        g.name === "Credit Card Payments" ? null : h("button", { class: "quiet-link", type: "button", text: "Edit", onclick: (e) => { e.stopPropagation(); openGroup(ctx, g); } }),
-      ));
     }
     groups.append(sec);
   }
 
-  root.append(head, h("div", { class: "plan-stick" }, rta, planLinks), notices, groups);
+  const actSign = totalActivity < 0 ? "+" : "-";
+  const totals = h("div", { class: "bud-totals" },
+    h("div", { class: "bud-totals-row" },
+      h("div", { class: "bud-tot" },
+        h("span", { class: "bud-tot-k", text: "Budgeted " }),
+        h("span", { class: "bud-tot-n", text: fmt(totalBudgeted) }),
+      ),
+      showAct ? h("div", { class: "bud-tot mid" },
+        h("span", { class: "bud-tot-k", text: "Activity " }),
+        h("span", { class: `bud-tot-n ${totalActivity < 0 ? "in" : "out"}`, text: `${actSign}${fmt(Math.abs(totalActivity))}` }),
+      ) : null,
+      h("div", { class: "bud-tot end" },
+        h("span", { class: "bud-tot-k", text: "Available " }),
+        h("span", { class: "bud-tot-n", text: fmt(totalAvailable) }),
+      ),
+    ),
+  );
+
+  root.append(h("div", { class: "bud-view" }, tiles, banner, cols, notices, groups, totals));
   if (ctx.ui.focusCat) {
     const id = ctx.ui.focusCat;
     ctx.ui.focusCat = null;
