@@ -1,4 +1,4 @@
-import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, openAmountPad, isTouchUi, amountInput, bindContextMenu } from "../ui.js?v=154";
+import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, openAmountPad, isTouchUi, amountInput, bindContextMenu, btnRow } from "../ui.js?v=154";
 import { fmt, monthLabel, monthKey, prevMonth, nextMonth, todayKey, toTitleCase, uid, round2 } from "../util.js?v=154";
 import {
   budgetSnapshot, getGoalMetrics, trailingAvg, monthAccessible, historySeries,
@@ -103,20 +103,64 @@ function tile(kind, icon, label, onClick) {
   );
 }
 
+
+const ROLLOVER_OPTS = [
+  { value: "rollover", title: "Roll Over", desc: "Leftover carries into next month" },
+  { value: "return", title: "Return to Ready to Assign", desc: "Leftover returns to your unassigned pool" },
+  { value: "max", title: "Roll Over up to a Maximum", desc: "Excess above the limit returns to Ready to Assign" },
+];
+const GOAL_TYPES = [
+  { value: "", label: "No goal", desc: "" },
+  { value: "savings", label: "💰 Savings Target", desc: "Save toward a total amount" },
+  { value: "monthly", label: "📅 Monthly Funding", desc: "Fund by a set amount each month" },
+  { value: "date", label: "🏁 Target by Date", desc: "Reach a total amount by a specific date" },
+];
+
+function optCard({ name, value, checked, disabled, title, desc, onChange }) {
+  return h("label", { class: `opt-card${checked ? " on" : ""}${disabled ? " disabled" : ""}` },
+    h("input", { type: "radio", name, value, checked: !!checked, disabled: !!disabled, onchange: () => { if (!disabled) onChange(value); } }),
+    h("div", {},
+      h("div", { class: "opt-title", text: title }),
+      desc ? h("div", { class: "opt-desc", text: desc }) : null,
+    ),
+  );
+}
+
+function errLine(text) {
+  return text ? h("div", { class: "form-error", text }) : null;
+}
+
 function openAddGroup(ctx) {
-  const nm = textInput({ placeholder: "New group" });
+  const budget = ctx.budget();
+  let name = "";
+  let nameError = "";
   const sheet = openSheet({
     title: "New Category Group",
+    closeLabel: "Discard",
     body: (host) => {
-      host.append(
-        field("Name", nm),
-        btn("Add", { block: true, onClick: () => {
-          if (!nm.value.trim()) return;
-          ctx.updateBudget((b) => addGroup(b, nm.value));
-          sheet.close();
-        }}),
-      );
-      nm.focus();
+      const paint = () => {
+        const nm = textInput({ placeholder: "e.g. Kids, Business, Medical...", value: name });
+        nm.addEventListener("input", () => { name = nm.value; nameError = ""; });
+        host.replaceChildren(
+          field("Group Name", nm),
+          errLine(nameError),
+          btnRow(
+            { label: "Cancel", kind: "ghost", onClick: () => sheet.close() },
+            { label: "Add Group", onClick: () => {
+              if (!name.trim()) return;
+              if ((ctx.budget().categoryGroups || []).some((g) => g.name.toLowerCase() === name.trim().toLowerCase())) {
+                nameError = `A group named "${name.trim()}" already exists. Choose a different name.`;
+                paint();
+                return;
+              }
+              ctx.updateBudget((b) => addGroup(b, name));
+              sheet.close();
+            }, disabled: !name.trim() },
+          ),
+        );
+        nm.focus();
+      };
+      paint();
     },
   });
 }
@@ -1158,111 +1202,158 @@ function openCategory(ctx, cat) {
   const month = ctx.month;
   const today = monthKey();
   const past = month < today;
+  let tab = cat.creditCardId ? "note" : "goal";
   let name = cat.name;
+  let nameError = "";
   let groupId = cat.groupId;
-  let rollover = cat.rollover || "rollover";
+  let note = cat.note || "";
   const changes = cat.rolloverChanges || [];
   const applicable = changes.filter((c) => c.month <= month).sort((a, b) => b.month.localeCompare(a.month));
-  rollover = applicable[0]?.type || rollover;
+  let rollover = applicable[0]?.type || cat.rollover || "rollover";
   let rolloverMax = cat.rolloverMax || 0;
   let goalType = cat.goal?.type || "";
   let goalTarget = cat.goal?.target || 0;
   let goalDate = cat.goal?.targetDate || "";
-  let note = cat.note || "";
-  const goalNote = splitGoalNote(note);
+  let deleteConfirm = false;
+  const used = (budget.transactions || []).some((t) => t.categoryId === cat.id || t.splits?.some((s) => s.categoryId === cat.id));
+  const tabs = cat.creditCardId ? [["note", "📝 Note"]] : [["goal", "🎯 Goal"], ["rollover", "🔄 Rollover"], ["note", "📝 Note"]];
   const sheet = openSheet({
-    title: "Category",
+    title: "Category Settings",
+    closeLabel: "Discard",
     body: (host) => {
-      const nm = textInput({ value: name });
-      nm.addEventListener("input", () => { name = nm.value; });
-      const group = h("select", { class: "input" });
-      for (const g of budget.categoryGroups) {
-        if (cat.creditCardId && g.name !== "Credit Card Payments" && g.id !== cat.groupId) continue;
-        group.append(h("option", { value: g.id, text: g.name }));
-      }
-      group.value = groupId;
-      group.disabled = !!cat.creditCardId;
-      group.addEventListener("change", () => { groupId = group.value; });
-      const goal = h("select", { class: "input" },
-        h("option", { value: "", text: "No goal" }),
-        h("option", { value: "monthly", text: "Monthly funding" }),
-        h("option", { value: "date", text: "Target by date" }),
-        h("option", { value: "savings", text: "Savings target" }),
-      );
-      goal.value = goalType;
-      goal.disabled = !!cat.creditCardId;
-      const goalBox = h("div");
-      const rollBox = h("div");
-      const paintExtra = () => {
-        goalBox.replaceChildren();
-        if (goalType === "monthly" || goalType === "savings" || goalType === "date") {
-          goalBox.append(field("Target", moneyButton(goalTarget, (n) => { goalTarget = n; })));
+      const paint = () => {
+        const nm = textInput({ value: name });
+        nm.addEventListener("input", () => { name = nm.value; nameError = ""; });
+        const group = h("select", { class: "input", disabled: !!cat.creditCardId });
+        for (const g of budget.categoryGroups || []) {
+          if (!cat.creditCardId && g.name === "Credit Card Payments") continue;
+          if (cat.creditCardId && g.name !== "Credit Card Payments" && g.id !== cat.groupId) continue;
+          group.append(h("option", { value: g.id, text: g.name }));
         }
-        if (goalType === "date") goalBox.append(field("Target month", h("input", { class: "input", type: "month", value: goalDate, min: today, onchange: (e) => { goalDate = e.target.value; } })));
-        rollBox.replaceChildren();
-        if (cat.creditCardId) { rollBox.append(h("p", { class: "hint", text: "Payment categories roll the full balance and don’t take goals." })); return; }
-        if (goalType === "date") { rollBox.append(h("p", { class: "hint", text: "By-date goals carry up to the target and return the rest to Ready to Assign." })); return; }
-        if (past) rollBox.append(h("p", { class: "hint", text: "Rollover changes apply from the current month forward. This past month is read-only." }));
-        const opts = [
-          ["rollover", "Roll over", "Leftover carries forward"],
-          ["return", "Return to Ready to Assign", "Leftover goes back to Ready to Assign"],
-          ["max", "Cap", "Carry up to a maximum"],
-        ].filter((o) => !(goalType === "savings" && o[0] === "return"));
-        for (const [val, title, desc] of opts) {
-          const lab = h("label", { class: `choice ${rollover === val ? "on" : ""}` },
-            h("input", { type: "radio", name: "roll", value: val, checked: rollover === val, disabled: past, onchange: () => { rollover = val; paintExtra(); } }),
-            h("span", {}, h("strong", { text: title }), h("span", { class: "muted", text: desc })),
-          );
-          rollBox.append(lab);
+        group.value = groupId;
+        group.addEventListener("change", () => { groupId = group.value; });
+        const tabBar = h("div", { class: "cat-tabs" });
+        for (const [id, lbl] of tabs) {
+          tabBar.append(h("button", {
+            type: "button",
+            class: tab === id ? "cat-tab on" : "cat-tab",
+            text: lbl,
+            onclick: () => { tab = id; paint(); },
+          }));
         }
-        if (!past && rollover === "max") {
-          const min = goalType === "savings" ? goalTarget : 0;
-          rollBox.append(field(min ? `Cap (minimum ${fmt(min)})` : "Cap", moneyButton(Math.max(rolloverMax, min), (n) => { rolloverMax = Math.max(n, min); })));
+        const kids = [
+          field("Category Name", nm),
+          errLine(nameError),
+          field("Group", group),
+        ];
+        if (cat.creditCardId) kids.push(h("div", { class: "form-muted", text: "Credit card payment categories can't be moved." }));
+        kids.push(tabBar);
+        if (cat.creditCardId && tab !== "note") {
+          kids.push(h("div", { class: "soft-box", text: "Credit card payment categories automatically roll over their full balance each month and don't support goals. The available amount always reflects what you owe on the card." }));
         }
+        if (tab === "goal" && !cat.creditCardId) {
+          const list = h("div", { class: "opt-list" });
+          for (const gt of GOAL_TYPES) {
+            list.append(optCard({
+              name: "goal-type", value: gt.value, checked: goalType === gt.value,
+              title: gt.label, desc: gt.desc,
+              onChange: (v) => { goalType = v; paint(); },
+            }));
+          }
+          kids.push(field("Goal Type", list));
+          if (goalType === "savings") kids.push(field("Savings Target ($)", amountInput({ value: goalTarget, onCommit: (n) => { goalTarget = n; }, placeholder: "e.g. 1000" })));
+          if (goalType === "monthly") kids.push(field("Monthly Amount ($)", amountInput({ value: goalTarget, onCommit: (n) => { goalTarget = n; }, placeholder: "e.g. 500" })));
+          if (goalType === "date") {
+            kids.push(field("Total Target ($)", amountInput({ value: goalTarget, onCommit: (n) => { goalTarget = n; }, placeholder: "e.g. 3000" })));
+            kids.push(field("Target Date", h("input", { class: "input", type: "month", value: goalDate, min: today, onchange: (e) => { goalDate = e.target.value; } })));
+          }
+        }
+        if (tab === "rollover" && !cat.creditCardId) {
+          if (goalType === "date") {
+            kids.push(h("div", { class: "soft-box", text: "🏁 By-date goal categories automatically roll over up to your target amount each month, and return any excess to Ready to Assign. This can't be changed." }));
+          } else {
+            const filtered = goalType === "savings" ? ROLLOVER_OPTS.filter((o) => o.value !== "return") : ROLLOVER_OPTS;
+            const effectiveMin = goalType === "savings" ? (goalTarget || 0) : 0;
+            if (past) kids.push(h("div", { class: "warn-box", text: "🔒 Rollover changes apply from the current month forward. Viewing a past month — rollover shown is read-only." }));
+            const label = `Rollover Behavior${(!past && month) ? ` (effective from ${monthLabel(month)})` : ""}`;
+            const list = h("div", { class: "opt-list" });
+            for (const opt of filtered) {
+              list.append(optCard({
+                name: "roll", value: opt.value, checked: rollover === opt.value, disabled: past,
+                title: opt.title, desc: opt.desc,
+                onChange: (v) => { rollover = v; paint(); },
+              }));
+            }
+            kids.push(field(label, list));
+            if (!past && rollover === "max") {
+              kids.push(field(
+                "Maximum rollover ($)" + (effectiveMin > 0 ? " — minimum " + fmt(effectiveMin) : ""),
+                amountInput({
+                  value: Math.max(rolloverMax, effectiveMin),
+                  onCommit: (v) => { rolloverMax = Math.max(v, effectiveMin); },
+                  placeholder: "e.g. 200",
+                }),
+              ));
+              if (goalType === "savings" && rolloverMax < effectiveMin) {
+                kids.push(h("div", { class: "gold-note", text: `Cap can't be less than your savings target (${fmt(effectiveMin)}). It will be set to ${fmt(effectiveMin)}.` }));
+              }
+            }
+          }
+        }
+        if (tab === "note") {
+          const parts = splitGoalNote(note);
+          const ta = h("textarea", { class: "input note-area", rows: "6", placeholder: "Add a note about this category..." });
+          ta.value = parts.editable;
+          ta.addEventListener("input", () => { note = joinGoalNote(ta.value, parts.changes); });
+          kids.push(field("Note", ta));
+          if (parts.changes) {
+            kids.push(h("div", { class: "goal-log" },
+              h("div", { class: "goal-log-h", text: "Goal Changes (auto-recorded)" }),
+              h("div", { class: "goal-log-b", text: parts.changes }),
+            ));
+          }
+        }
+        kids.push(btnRow(
+          { label: "Cancel", kind: "ghost", onClick: () => sheet.close() },
+          { label: "Save Changes", onClick: () => {
+            const titled = toTitleCase(name.trim());
+            if (!titled) { nameError = "Category name can't be empty."; paint(); return; }
+            if (ctx.budget().categories.some((c) => c.id !== cat.id && c.name.toLowerCase() === titled.toLowerCase())) {
+              nameError = `A category named "${name.trim()}" already exists.`;
+              paint();
+              return;
+            }
+            const goalObj = cat.creditCardId ? (cat.goal || null) : (goalType ? { type: goalType, target: goalTarget, ...(goalType === "date" ? { targetDate: goalDate } : {}) } : null);
+            const nextNote = cat.creditCardId ? note : withGoalChange(note, cat.goal, goalObj);
+            let rolloverChanges = [...(cat.rolloverChanges || [])];
+            const effectiveMonth = past ? today : month;
+            const cur = (cat.rolloverChanges || []).filter((c) => c.month <= effectiveMonth).sort((a, b) => b.month.localeCompare(a.month))[0]?.type || cat.rollover || "rollover";
+            if (!past && rollover !== cur && goalType !== "date") {
+              rolloverChanges = rolloverChanges.filter((c) => c.month !== effectiveMonth);
+              rolloverChanges.push({ month: effectiveMonth, type: rollover });
+            }
+            const max = goalType === "savings" ? Math.max(rolloverMax, goalTarget || 0) : rolloverMax;
+            ctx.updateBudget((b) => setCategory(b, { ...cat, name: titled, groupId, note: nextNote, rollover: cat.rollover || "rollover", rolloverChanges, rolloverMax: rollover === "max" ? max : 0, goal: goalObj }));
+            sheet.close();
+          }},
+        ));
+        const foot = h("div", { class: "cat-foot" });
+        foot.append(btn(cat.archived ? "↩ Restore Category" : "🗂 Archive Category", { kind: "ghost amber", onClick: () => { ctx.updateBudget((b) => archiveCategory(b, cat.id, month)); sheet.close(); } }));
+        if (!cat.archived) foot.append(h("div", { class: "form-muted center", text: "Archiving moves this to \"Uncategorized\" and tags the name with today's date" }));
+        if (deleteConfirm) {
+          foot.append(h("div", { class: "danger-note", text: `Delete "${cat.name}"? Any money assigned to it (in any month) returns to Ready to Assign. This cannot be undone.` }));
+          foot.append(h("div", { class: "row gap" },
+            btn("Cancel", { kind: "ghost", onClick: () => { deleteConfirm = false; paint(); } }),
+            btn("Confirm Delete", { kind: "danger", onClick: () => { ctx.updateBudget((b) => deleteCategory(b, cat.id)); sheet.close(); } }),
+          ));
+        } else {
+          foot.append(btn("🗑 Delete Category", { kind: "ghost danger", disabled: used, onClick: () => { if (used) return; deleteConfirm = true; paint(); } }));
+          if (used) foot.append(h("div", { class: "form-muted center", text: "Has transactions (incl. splits) — archive instead, or move its transactions to another category first" }));
+        }
+        kids.push(foot);
+        host.replaceChildren(...kids.filter(Boolean));
       };
-      goal.addEventListener("change", () => { goalType = goal.value; paintExtra(); });
-      const nt = h("textarea", { class: "input", rows: "3" });
-      nt.value = goalNote.editable;
-      nt.addEventListener("input", () => { note = joinGoalNote(nt.value, goalNote.changes); });
-      host.append(field("Name", nm), field("Group", group), field("Goal", goal), goalBox, h("p", { class: "kicker", text: "Rollover" }), rollBox, field("Category note", nt));
-      if (goalNote.changes) host.append(h("p", { class: "kicker", text: "Goal changes" }), h("p", { class: "hint", text: goalNote.changes }));
-      host.append(btn("Save", { block: true, onClick: () => {
-        const titled = toTitleCase(name.trim());
-        if (!titled) return;
-        if (budget.categories.some((c) => c.id !== cat.id && c.name.toLowerCase() === titled.toLowerCase())) { toast("That category name already exists"); return; }
-        const goalObj = cat.creditCardId ? (cat.goal || null) : (goalType ? { type: goalType, target: goalTarget, ...(goalType === "date" ? { targetDate: goalDate } : {}) } : null);
-        const nextNote = cat.creditCardId ? note : withGoalChange(note, cat.goal, goalObj);
-        let rolloverChanges = [...(cat.rolloverChanges || [])];
-        const effectiveMonth = past ? today : month;
-        const cur = (cat.rolloverChanges || []).filter((c) => c.month <= effectiveMonth).sort((a, b) => b.month.localeCompare(a.month))[0]?.type || cat.rollover || "rollover";
-        if (!past && rollover !== cur && goalType !== "date") {
-          rolloverChanges = rolloverChanges.filter((c) => c.month !== effectiveMonth);
-          rolloverChanges.push({ month: effectiveMonth, type: rollover });
-        }
-        const max = goalType === "savings" ? Math.max(rolloverMax, goalTarget || 0) : rolloverMax;
-        ctx.updateBudget((b) => setCategory(b, { ...cat, name: titled, groupId, note: nextNote, rollover: cat.rollover || "rollover", rolloverChanges, rolloverMax: rollover === "max" ? max : 0, goal: goalObj }));
-        sheet.close();
-      }}));
-      host.append(btn("Note for this month", { kind: "ghost", block: true, onClick: () => { sheet.close(); openNote(ctx, cat); } }));
-      if (!cat.creditCardId) {
-        host.append(btn(cat.archived ? "Restore" : "Archive", { kind: "ghost", block: true, onClick: () => { ctx.updateBudget((b) => archiveCategory(b, cat.id, month)); sheet.close(); } }));
-        host.append(btn("Delete", { kind: "danger", block: true, onClick: () => {
-          const used = (budget.transactions || []).some((t) => t.categoryId === cat.id || t.splits?.some((s) => s.categoryId === cat.id));
-          if (used) { toast("This category has transactions. Archive it instead."); return; }
-          confirmDialog({
-            title: `Delete ${cat.name}?`,
-            message: "This removes the category and its assignments. You can undo it from the top bar.",
-            confirm: "Delete",
-            danger: true,
-            onConfirm: () => {
-              ctx.updateBudget((b) => deleteCategory(b, cat.id));
-              sheet.close();
-              toast("Deleted", { label: "Undo", action: () => ctx.undo() });
-            },
-          });
-        }}));
-      }
-      paintExtra();
+      paint();
     },
   });
 }
@@ -1286,46 +1377,60 @@ function openNote(ctx, cat) {
 function openAddCategory(ctx) {
   const budget = ctx.budget();
   let name = "";
-  let groupId = budget.categoryGroups.find((g) => g.name !== "Credit Card Payments")?.id || budget.categoryGroups[0]?.id;
+  let nameError = "";
+  let groupId = (budget.categoryGroups || []).find((g) => g.name !== "Credit Card Payments")?.id || budget.categoryGroups[0]?.id || "";
   let rollover = "rollover";
   let rolloverMax = 0;
-  let primed = false;
   const sheet = openSheet({
-    title: "New category",
+    title: "New Category",
+    closeLabel: "Discard",
     body: (host) => {
       const paint = () => {
-        const nm = textInput({ placeholder: "Groceries", value: name });
-        nm.addEventListener("input", () => { name = nm.value; });
+        const nm = textInput({ placeholder: "e.g. Coffee", value: name });
+        nm.addEventListener("input", () => { name = nm.value; nameError = ""; });
         const group = h("select", { class: "input" });
-        for (const g of budget.categoryGroups) if (g.name !== "Credit Card Payments") group.append(h("option", { value: g.id, text: g.name }));
+        for (const g of budget.categoryGroups || []) if (g.name !== "Credit Card Payments") group.append(h("option", { value: g.id, text: g.name }));
         group.value = groupId || "";
         group.addEventListener("change", () => { groupId = group.value; });
-        const rolls = h("div");
-        for (const [val, title, desc] of [
-          ["rollover", "Roll over", "Leftover carries into next month"],
-          ["return", "Return to Ready to Assign", "Leftover returns to your unassigned pool"],
-          ["max", "Roll over up to a maximum", "Excess above the limit returns to Ready to Assign"],
-        ]) {
-          rolls.append(h("label", { class: `choice ${rollover === val ? "on" : ""}` },
-            h("input", { type: "radio", name: "new-roll", value: val, checked: rollover === val, onchange: () => { rollover = val; paint(); } }),
-            h("span", {}, h("strong", { text: title }), h("span", { class: "muted", text: desc })),
-          ));
+        const picker = h("div");
+        for (const opt of ROLLOVER_OPTS) {
+          picker.append(optCard({
+            name: "new-roll", value: opt.value, checked: rollover === opt.value,
+            title: opt.title, desc: opt.desc,
+            onChange: (v) => { rollover = v; paint(); },
+          }));
         }
-        host.replaceChildren(field("Name", nm), field("Group", group), h("p", { class: "kicker", text: "Rollover" }), rolls);
-        if (rollover === "max") host.append(field("Maximum rollover", moneyButton(rolloverMax, (n) => { rolloverMax = n; }, { label: "Maximum rollover" })));
-        host.append(btn("Add", { block: true, onClick: () => {
-          if (!name.trim() || !groupId) return;
-          const res = addCategory(ctx.budget(), { name, groupId, rollover, rolloverMax });
-          if (res.error) { toast(res.error); return; }
-          ctx.updateBudget(() => res.budget);
-          sheet.close();
-        }}));
-        if (!primed) { primed = true; nm.focus(); }
+        const kids = [
+          h("div", { class: "two-col" }, field("Name", nm), field("Group", group)),
+          errLine(nameError),
+          field("Rollover Behavior", picker),
+        ];
+        if (rollover === "max") {
+          kids.push(field("Maximum rollover ($)", amountInput({ value: rolloverMax, onCommit: (n) => { rolloverMax = n; }, placeholder: "e.g. 200" })));
+        }
+        kids.push(btnRow(
+          { label: "Cancel", kind: "ghost", onClick: () => sheet.close() },
+          { label: "Add Category", kind: "primary purple", disabled: !name.trim() || !groupId, onClick: () => {
+            if (!name.trim() || !groupId) return;
+            if ((ctx.budget().categories || []).some((c) => c.name.toLowerCase() === name.trim().toLowerCase())) {
+              nameError = `A category named "${name.trim()}" already exists. Choose a different name.`;
+              paint();
+              return;
+            }
+            const res = addCategory(ctx.budget(), { name, groupId, rollover, rolloverMax: rollover === "max" ? rolloverMax : 0 });
+            if (res.error) { nameError = res.error; paint(); return; }
+            ctx.updateBudget(() => res.budget);
+            sheet.close();
+          }},
+        ));
+        host.replaceChildren(...kids.filter(Boolean));
+        nm.focus();
       };
       paint();
     },
   });
 }
+
 
 export function openHistory(ctx) {
   const budget = ctx.budget();
@@ -1469,46 +1574,55 @@ function openLog(ctx) {
 function openGroup(ctx, group) {
   const budget = ctx.budget();
   let name = group.name;
+  let nameError = "";
+  let deleteConfirm = false;
   const locked = group.name === "Credit Card Payments";
+  const isUncategorized = group.name === "Uncategorized";
+  const catCount = (budget.categories || []).filter((c) => c.groupId === group.id).length;
   const sheet = openSheet({
-    title: "Group",
+    title: "Edit Group",
+    closeLabel: "Discard",
     body: (host) => {
-      const input = textInput({ value: name });
-      input.addEventListener("input", () => { name = input.value; });
-      host.append(field("Name", input));
-      host.append(h("div", { class: "row gap wrap" },
-        btn("Up", { kind: "ghost", onClick: () => { ctx.updateBudget((b) => moveGroup(b, group.id, -1)); sheet.close(); } }),
-        btn("Down", { kind: "ghost", onClick: () => { ctx.updateBudget((b) => moveGroup(b, group.id, 1)); sheet.close(); } }),
-      ));
-      const cats = (budget.categories || []).filter((c) => c.groupId === group.id && !c.archived);
-      for (const c of cats) {
-        host.append(h("div", { class: "line" }, h("span", { text: c.name }),
-          h("button", { class: "quiet-link", type: "button", text: "Up", onclick: () => { ctx.updateBudget((b) => moveCategory(b, c.id, -1)); sheet.close(); openGroup(ctx, ctx.budget().categoryGroups.find((g) => g.id === group.id)); } }),
-          h("button", { class: "quiet-link", type: "button", text: "Down", onclick: () => { ctx.updateBudget((b) => moveCategory(b, c.id, 1)); sheet.close(); openGroup(ctx, ctx.budget().categoryGroups.find((g) => g.id === group.id)); } }),
+      const paint = () => {
+        const input = textInput({ value: name });
+        input.disabled = locked;
+        input.addEventListener("input", () => { name = input.value; nameError = ""; });
+        const kids = [field("Group Name", input), errLine(nameError)];
+        kids.push(btnRow(
+          { label: "Cancel", kind: "ghost", onClick: () => sheet.close() },
+          { label: "Save", disabled: locked || !name.trim(), onClick: () => {
+            if (locked || !name.trim()) return;
+            if ((ctx.budget().categoryGroups || []).some((g) => g.id !== group.id && g.name.toLowerCase() === name.trim().toLowerCase())) {
+              nameError = `A group named "${name.trim()}" already exists. Choose a different name.`;
+              paint();
+              return;
+            }
+            ctx.updateBudget((b) => renameGroup(b, group.id, name));
+            sheet.close();
+          }},
         ));
-      }
-      host.append(btn("Save", { block: true, disabled: locked, onClick: () => {
-        ctx.updateBudget((b) => renameGroup(b, group.id, name));
-        sheet.close();
-      }}));
-      if (!locked) host.append(btn("Delete group", { kind: "danger", block: true, onClick: () => {
-        confirmDialog({
-          title: `Delete ${group.name}?`,
-          message: "Categories in this group move to Uncategorized.",
-          confirm: "Delete",
-          danger: true,
-          onConfirm: () => { ctx.updateBudget((b) => deleteGroup(b, group.id)); sheet.close(); toast("Group deleted", { label: "Undo", action: () => ctx.undo() }); },
-        });
-      }}));
-      host.append(btn("New group", { kind: "ghost", block: true, onClick: () => {
-        const nm = textInput({ placeholder: "New group" });
-        openSheet({ title: "New group", body: (h2) => {
-          h2.append(field("Name", nm), btn("Add", { block: true, onClick: () => { ctx.updateBudget((b) => addGroup(b, nm.value)); toast("Group added"); } }));
-        }});
-      }}));
+        if (!isUncategorized && !locked) {
+          const box = h("div", { class: "cat-foot" });
+          if (deleteConfirm) {
+            const extra = catCount > 0 ? ` Its ${catCount} categor${catCount !== 1 ? "ies" : "y"} will move to "Uncategorized".` : "";
+            box.append(h("div", { class: "danger-note", text: `Delete "${group.name}"?${extra} This cannot be undone.` }));
+            box.append(h("div", { class: "row gap" },
+              btn("No, Cancel", { kind: "ghost", onClick: () => { deleteConfirm = false; paint(); } }),
+              btn("Yes, Delete", { kind: "danger", onClick: () => { ctx.updateBudget((b) => deleteGroup(b, group.id)); sheet.close(); } }),
+            ));
+          } else {
+            box.append(btn("Delete Group", { kind: "ghost danger", onClick: () => { deleteConfirm = true; paint(); } }));
+          }
+          kids.push(box);
+        }
+        host.replaceChildren(...kids.filter(Boolean));
+        if (!locked) input.focus();
+      };
+      paint();
     },
   });
 }
+
 
 function openAllGoals(ctx) {
   const budget = ctx.budget();
