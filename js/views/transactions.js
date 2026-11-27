@@ -1,80 +1,331 @@
-import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, keepFocus } from "../ui.js?v=154";
-import { fmt, todayKey, toTitleCase, isCard, ccPayCat, makePayFrom, RTA } from "../util.js?v=154";
+import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, keepFocus, iconBtn } from "../ui.js?v=154";
+import { fmt, todayKey, toTitleCase, isCard, ccPayCat, makePayFrom, RTA, uid, monthLabel } from "../util.js?v=154";
+import { deviceSet } from "../store.js?v=154";
 import { displayName, payeeDefaultCategory, payeeSuggestedCategory, findFuzzyDuplicates, isAccountPayee } from "../payees.js?v=154";
 import { addTransaction, deleteTransactions, isLocked, setTxCategory, updateTransaction, replaceTransaction, confirmCategories } from "../mutate.js?v=154";
 import { parseCSV, guessColumnMapping, applyMapping } from "../csv.js?v=154";
 
+
+export const UNCONFIRMED_FILTER = "__unconfirmed__";
+
+export function blankTxFilters() {
+  return { accountId: "", categoryId: "", categoryIds: null, categoryLabel: "", payee: "", type: "", dateFrom: "", dateTo: "", amountGT: false, amountLT: false, amountEQ: true, amountVal: "" };
+}
+
+export function needsAttention(tx) {
+  return !tx.accountId || (tx.type === "expense" && !tx.categoryId && !tx.splits) || (tx.type === "expense" && tx.categoryId && !tx.splits && tx.categoryConfirmed === false);
+}
+
+function matchesUnconfirmed(tx) {
+  return !tx.accountId || (tx.type === "expense" && !tx.categoryId && !tx.splits) || tx.categoryConfirmed === false;
+}
+
+export function applyTxNav(ctx, patch = {}) {
+  const budget = ctx.budget() || { accounts: [], creditCards: [], categories: [], categoryGroups: [] };
+  const f = blankTxFilters();
+  const chips = [];
+  const add = (type, label, value) => {
+    if (value == null || value === "") return;
+    chips.push({ id: uid(), type, label, value });
+  };
+  if (patch.month) add("month", monthLabel(patch.month), patch.month);
+  if (patch.categoryId) {
+    const cat = (budget.categories || []).find((c) => c.id === patch.categoryId);
+    add("category", cat?.name || "Category", patch.categoryId);
+  }
+  if (patch.accountId) {
+    const a = [...(budget.accounts || []), ...(budget.creditCards || [])].find((x) => x.id === patch.accountId);
+    add("account", a?.name || "Account", patch.accountId);
+  }
+  if (patch.groupId) {
+    const g = (budget.categoryGroups || []).find((x) => x.id === patch.groupId);
+    f.categoryIds = (budget.categories || []).filter((c) => c.groupId === patch.groupId).map((c) => c.id);
+    f.categoryLabel = g?.name || "Group";
+  }
+  if (patch.attention) f.categoryId = UNCONFIRMED_FILTER;
+  if (patch.type) add("txtype", patch.type === "expense" ? "Expenses" : toTitleCase(patch.type), patch.type);
+  if (patch.payee) add("payee", patch.payee, patch.payee);
+  if (patch.dateFrom) f.dateFrom = patch.dateFrom;
+  if (patch.dateTo) f.dateTo = patch.dateTo;
+  ctx.ui.txFilter = f;
+  ctx.ui.txChips = chips;
+  ctx.ui.txQuery = "";
+  ctx.ui.showTxFilters = true;
+}
+
+export function filterTxRows(budget, { query = "", chips = [], filters = {}, showReconciled = false } = {}) {
+  const search = (query || "").trim().toLowerCase();
+  const f = { ...blankTxFilters(), ...filters };
+  const amountVal = parseFloat(f.amountVal);
+  const rows = [...(budget.transactions || [])].sort((a, b) => b.date.localeCompare(a.date) || String(b.id || "").localeCompare(String(a.id || "")));
+  return rows.filter((tx) => {
+    if (!showReconciled && isLocked(budget, tx)) return false;
+    if (search) {
+      const name = displayName(budget, tx.originalPayee || tx.payee) || "";
+      if (!`${name} ${tx.note || ""} ${tx.date || ""}`.toLowerCase().includes(search)) return false;
+    }
+    if (f.accountId && tx.accountId !== f.accountId) return false;
+    if (f.categoryId === UNCONFIRMED_FILTER) {
+      if (!matchesUnconfirmed(tx)) return false;
+    } else if (f.categoryId) {
+      const cats = tx.splits ? tx.splits.map((s) => s.categoryId) : [tx.categoryId];
+      if (!cats.includes(f.categoryId)) return false;
+    }
+    if (f.categoryIds) {
+      const cats = tx.splits ? tx.splits.map((s) => s.categoryId) : [tx.categoryId];
+      if (!cats.some((id) => f.categoryIds.includes(id))) return false;
+    }
+    if (f.payee && displayName(budget, tx.originalPayee || tx.payee) !== f.payee) return false;
+    if (f.type && tx.type !== f.type) return false;
+    if (f.dateFrom && tx.date < f.dateFrom) return false;
+    if (f.dateTo && tx.date > f.dateTo) return false;
+    if (f.month && !String(tx.date || "").startsWith(f.month)) return false;
+    if (f.amountOp && f.amount != null && f.amount !== "") {
+      const n = Number(f.amount);
+      const a = Math.abs(Number(tx.amount) || 0);
+      if (f.amountOp === ">" && !(a > n + 0.001)) return false;
+      if (f.amountOp === "<" && !(a < n - 0.001)) return false;
+      if (f.amountOp === "=" && !(Math.abs(a - n) < 0.02)) return false;
+    } else if ((f.amountGT || f.amountEQ || f.amountLT) && !Number.isNaN(amountVal) && amountVal >= 0) {
+      const A = amountVal;
+      let pass = false;
+      if (f.amountEQ && (Math.abs(tx.amount - A) < 0.005 || Math.abs(tx.amount + A) < 0.005)) pass = true;
+      if (f.amountGT && (tx.amount > A + 0.005 || tx.amount < -A - 0.005)) pass = true;
+      if (f.amountLT && (tx.amount > -A + 0.005 && tx.amount < A - 0.005)) pass = true;
+      if (!pass) return false;
+    }
+    for (const chip of chips) {
+      if (chip.type === "payee" && displayName(budget, tx.originalPayee || tx.payee) !== chip.value) return false;
+      if (chip.type === "category") {
+        const cats = tx.splits ? tx.splits.map((s) => s.categoryId) : [tx.categoryId];
+        if (!cats.includes(chip.value)) return false;
+      }
+      if (chip.type === "account" && tx.accountId !== chip.value) return false;
+      if (chip.type === "amount_digits") {
+        const txDigits = Math.abs(Number(tx.amount) || 0).toFixed(2).replace(/[^0-9]/g, "");
+        if (!txDigits.includes(chip.value)) return false;
+      }
+      if (chip.type === "month" && !String(tx.date || "").startsWith(chip.value)) return false;
+      if (chip.type === "txtype" && tx.type !== chip.value) return false;
+    }
+    return true;
+  });
+}
+
+function netOfRows(budget, rows) {
+  return rows.reduce((s, tx) => {
+    const isCardTx = (budget.creditCards || []).some((c) => c.id === tx.accountId);
+    if (tx.type === "income") return s + Math.abs(tx.amount);
+    if (tx.type === "expense") return s - Number(tx.amount);
+    if (tx.type === "payment") return isCardTx ? s + Math.abs(tx.amount) : s - Math.abs(tx.amount);
+    return s;
+  }, 0);
+}
+
+function filtersAreActive(query, chips, f) {
+  const blank = blankTxFilters();
+  if ((query || "").trim() || (chips || []).length) return true;
+  return Object.keys(blank).some((k) => {
+    const bv = blank[k];
+    const fv = f[k];
+    if (Array.isArray(bv) || Array.isArray(fv)) return JSON.stringify(fv || null) !== JSON.stringify(bv);
+    return (fv ?? blank[k]) !== bv;
+  });
+}
+
+function searchSuggestions(budget, raw) {
+  const value = (raw || "").trim();
+  if (!value) return [];
+  const q = value.toLowerCase();
+  const groups = [];
+  const payeeNames = [...new Set((budget.transactions || []).map((tx) => displayName(budget, tx.originalPayee || tx.payee)).filter(Boolean))];
+  const payeeMatches = payeeNames.filter((n) => n.toLowerCase().includes(q)).slice(0, 4);
+  if (payeeMatches.length) groups.push({ group: "Payees", icon: "👤", items: payeeMatches.map((n) => ({ type: "payee", label: n, value: n, display: n })) });
+  const catMatches = (budget.categories || []).filter((c) => !c.archived && c.name.toLowerCase().includes(q)).slice(0, 4);
+  if (catMatches.length) groups.push({ group: "Categories", icon: "🏷", items: catMatches.map((c) => ({ type: "category", label: c.name, value: c.id, display: c.name })) });
+  const accMatches = [
+    ...(budget.accounts || []).filter((a) => !a.archived && a.name.toLowerCase().includes(q)).map((a) => ({ type: "account", label: a.name, value: a.id, display: a.name })),
+    ...(budget.creditCards || []).filter((c) => !c.archived && c.name.toLowerCase().includes(q)).map((c) => ({ type: "account", label: c.name, value: c.id, display: c.name })),
+  ].slice(0, 4);
+  if (accMatches.length) groups.push({ group: "Accounts", icon: "🏦", items: accMatches });
+  const digitsOnly = value.replace(/[^0-9]/g, "");
+  if (digitsOnly.length > 0 && /^[\d$,. ]+$/.test(value)) {
+    groups.push({ group: "Amount", icon: "💰", items: [{ type: "amount_digits", label: `Amount containing "${digitsOnly}"`, value: digitsOnly, display: `amt: ${digitsOnly}` }] });
+  }
+  const monthNames = ["january","february","march","april","may","june","july","august","september","october","november","december"];
+  const monthAbbr = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"];
+  const today = new Date();
+  let monthIdx = monthNames.findIndex((m) => m.startsWith(q));
+  if (monthIdx === -1) monthIdx = monthAbbr.findIndex((m) => m === q.slice(0, 3));
+  const isoMonthMatch = value.match(/^(\d{4})-(\d{2})$/);
+  if (isoMonthMatch) {
+    const [, yr, mo] = isoMonthMatch;
+    const label = new Date(Number(yr), Number(mo) - 1, 1).toLocaleDateString("en-US", { month: "long", year: "numeric" });
+    groups.push({ group: "Month", icon: "📅", items: [{ type: "month", label, value: `${yr}-${mo}`, display: label }] });
+  } else if (monthIdx !== -1) {
+    const items = [];
+    for (const offset of [-1, 0, 1]) {
+      const yr = today.getFullYear() + offset;
+      const mo = String(monthIdx + 1).padStart(2, "0");
+      const mk = `${yr}-${mo}`;
+      if ((budget.transactions || []).some((tx) => String(tx.date || "").startsWith(mk))) {
+        const label = new Date(yr, monthIdx, 1).toLocaleDateString("en-US", { month: "long", year: "numeric" });
+        items.push({ type: "month", label, value: mk, display: label });
+      }
+    }
+    if (items.length) groups.push({ group: "Month", icon: "📅", items: items.slice(0, 3) });
+  }
+  const typeMap = { income: { label: "Income", value: "income" }, expense: { label: "Expenses", value: "expense" }, payment: { label: "Payments", value: "payment" }, transfer: { label: "Transfers", value: "transfer" } };
+  const typeMatches = Object.entries(typeMap).filter(([k]) => k.startsWith(q)).map(([, v]) => ({ type: "txtype", label: v.label, value: v.value, display: v.label }));
+  if (typeMatches.length) groups.push({ group: "Type", icon: "🔄", items: typeMatches });
+  return groups;
+}
+
 export function renderTransactions(root, ctx) {
   const budget = ctx.budget();
-  const f = ctx.ui.txFilter;
-  const q = (ctx.ui.txQuery || "").toLowerCase();
-  let rows = [...(budget.transactions || [])].sort((a, b) => b.date.localeCompare(a.date) || b.id.localeCompare(a.id));
-  if (f.accountId) rows = rows.filter((t) => t.accountId === f.accountId);
-  if (f.categoryId) rows = rows.filter((t) => t.categoryId === f.categoryId || t.splits?.some((s) => s.categoryId === f.categoryId));
-  if (f.type) rows = rows.filter((t) => t.type === f.type);
-  if (f.dateFrom) rows = rows.filter((t) => t.date >= f.dateFrom);
-  if (f.dateTo) rows = rows.filter((t) => t.date <= f.dateTo);
-  if (f.month) {
-    const range = monthRangeSafe(f.month);
-    rows = rows.filter((t) => t.date >= range.from && t.date <= range.to);
-  }
-  if (f.groupId) {
-    const ids = new Set((budget.categories || []).filter((c) => c.groupId === f.groupId).map((c) => c.id));
-    rows = rows.filter((t) => ids.has(t.categoryId) || t.splits?.some((s) => ids.has(s.categoryId)));
-  }
-  if (f.hideReconciled) rows = rows.filter((t) => !t.reconciled && !isLocked(budget, t));
-  if (f.attention) rows = rows.filter((t) => t.type === "expense" && !t.splits && (!t.categoryId || t.categoryConfirmed === false));
-  if (f.amountOp && f.amount != null && f.amount !== "") {
-    const n = Number(f.amount);
-    rows = rows.filter((t) => {
-      const a = Math.abs(Number(t.amount) || 0);
-      if (f.amountOp === ">") return a > n + 0.001;
-      if (f.amountOp === "<") return a < n - 0.001;
-      return Math.abs(a - n) < 0.02;
-    });
-  }
-  if (q) {
-    rows = rows.filter((t) => {
-      const name = displayName(budget, t.originalPayee || t.payee);
-      const cat = budget.categories.find((c) => c.id === t.categoryId)?.name || "";
-      return `${name} ${t.note || ""} ${cat} ${t.date}`.toLowerCase().includes(q);
-    });
-  }
+  if (!ctx.ui.txFilter) ctx.ui.txFilter = blankTxFilters();
+  if (!ctx.ui.txChips) ctx.ui.txChips = [];
+  const f = { ...blankTxFilters(), ...ctx.ui.txFilter };
+  ctx.ui.txFilter = f;
+  const q = ctx.ui.txQuery || "";
+  const chips = ctx.ui.txChips;
+  const showReconciled = !!ctx.ui.showReconciled;
+  const rows = filterTxRows(budget, { query: q, chips, filters: f, showReconciled });
   const selected = ctx.ui.selected;
-  const sum = rows.reduce((s, t) => s + signedDisplay(budget, t), 0);
+  const attentionAll = (budget.transactions || []).filter(needsAttention);
 
-  const search = h("input", { class: "input", type: "search", placeholder: "Search payees, notes, categories", value: ctx.ui.txQuery || "", "aria-label": "Search transactions" });
+  const addChip = (chip) => {
+    const next = (ctx.ui.txChips || []).filter((c) => !(c.type === chip.type && c.value === chip.value));
+    next.push({ id: chip.id || uid(), type: chip.type, label: chip.label, value: chip.value });
+    ctx.ui.txChips = next;
+    ctx.ui.txQuery = "";
+    ctx.ui.txSuggestIdx = -1;
+    ctx.render();
+  };
+  const removeChip = (id) => { ctx.ui.txChips = (ctx.ui.txChips || []).filter((c) => c.id !== id); ctx.render(); };
+  const clearAllFilters = () => {
+    ctx.ui.txFilter = blankTxFilters();
+    ctx.ui.txChips = [];
+    ctx.ui.txQuery = "";
+    ctx.render();
+  };
+
+  root.append(h("div", { class: "tx-toolbar" },
+    btn("+ Add Transaction", { kind: "primary small", onClick: () => openTx(ctx, null) }),
+    btn("📥 Import", { kind: "ghost small", onClick: () => openImport(ctx) }),
+  ));
+
+  const suggestions = searchSuggestions(budget, q);
+  const flatItems = suggestions.flatMap((g) => g.items);
+  const focused = !!ctx.ui.txSearchFocused;
+  const activeIdx = Math.min(ctx.ui.txSuggestIdx ?? -1, flatItems.length - 1);
+  const search = h("input", {
+    class: "tx-search-input",
+    type: "search",
+    placeholder: chips.length ? "Add another filter..." : "Search payees, categories, amounts, dates...",
+    value: q,
+    "aria-label": "Search transactions",
+    autocomplete: "off",
+  });
   const typing = ctx.ui.txTyping;
-  search.addEventListener("input", () => { ctx.ui.txQuery = search.value; ctx.ui.txTyping = true; ctx.render(); });
+  const bumpSearch = () => { ctx.ui.txSearchSeq = (ctx.ui.txSearchSeq || 0) + 1; };
+  search.addEventListener("input", () => { bumpSearch(); ctx.ui.txQuery = search.value; ctx.ui.txTyping = true; ctx.ui.txSearchFocused = true; ctx.ui.txSuggestIdx = -1; ctx.render(); });
+  search.addEventListener("focus", () => { bumpSearch(); if (!ctx.ui.txSearchFocused) { ctx.ui.txSearchFocused = true; ctx.ui.txTyping = true; ctx.render(); } });
+  search.addEventListener("blur", () => {
+    const seq = ctx.ui.txSearchSeq;
+    setTimeout(() => {
+      if (ctx.ui.txSearchSeq !== seq) return;
+      if (document.activeElement?.classList?.contains("tx-search-input")) return;
+      if (ctx.ui.txSearchFocused) { ctx.ui.txSearchFocused = false; ctx.render(); }
+    }, 180);
+  });
+  search.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown" && flatItems.length) { e.preventDefault(); ctx.ui.txSuggestIdx = Math.min((ctx.ui.txSuggestIdx ?? -1) + 1, flatItems.length - 1); ctx.ui.txTyping = true; ctx.ui.txSearchFocused = true; ctx.render(); }
+    else if (e.key === "ArrowUp" && flatItems.length) { e.preventDefault(); ctx.ui.txSuggestIdx = Math.max((ctx.ui.txSuggestIdx ?? -1) - 1, -1); ctx.ui.txTyping = true; ctx.ui.txSearchFocused = true; ctx.render(); }
+    else if (e.key === "Enter" && (ctx.ui.txSuggestIdx ?? -1) >= 0 && flatItems[ctx.ui.txSuggestIdx]) { e.preventDefault(); addChip(flatItems[ctx.ui.txSuggestIdx]); }
+    else if (e.key === "Escape") { search.blur(); }
+    else if (e.key === "Backspace" && !search.value && chips.length) { removeChip(chips[chips.length - 1].id); }
+  });
+
+  const sugBox = (focused && suggestions.length) ? h("div", { class: "tx-sugs" }, ...suggestions.map((group) => h("div", { class: "tx-sug-group" },
+    h("div", { class: "tx-sug-h", text: `${group.icon} ${group.group}` }),
+    ...group.items.map((item) => {
+      const idx = flatItems.indexOf(item);
+      return h("div", {
+        class: "tx-sug-item" + (idx === activeIdx ? " on" : ""),
+        onmousedown: (e) => { e.preventDefault(); addChip({ type: item.type, label: item.display || item.label, value: item.value }); },
+      }, h("span", { text: item.label }), h("span", { class: "tx-sug-kind", text: group.group }));
+    }),
+  ))) : null;
+
+  const searchWrap = h("div", { class: "tx-search" },
+    h("div", { class: "tx-search-box" },
+      h("span", { class: "tx-search-ico", text: "🔍" }),
+      search,
+      q ? h("button", { class: "tx-search-clear", type: "button", text: "×", "aria-label": "Clear search", onclick: () => { ctx.ui.txQuery = ""; ctx.render(); } }) : null,
+    ),
+    sugBox,
+  );
+
+  root.append(h("div", { class: "tx-search-row" },
+    searchWrap,
+    h("div", { class: "tx-search-tools" },
+      iconBtn({
+        text: "🔒",
+        active: showReconciled,
+        label: showReconciled ? "Reconciled transactions visible — tap to hide" : "Reconciled transactions hidden — tap to show",
+        onClick: () => {
+          ctx.ui.showReconciled = !ctx.ui.showReconciled;
+          deviceSet("showReconciled", ctx.ui.showReconciled);
+          ctx.render();
+        },
+      }),
+      iconBtn({
+        text: "⚙️",
+        active: !!ctx.ui.showTxFilters,
+        label: "Filters",
+        onClick: () => { ctx.ui.showTxFilters = !ctx.ui.showTxFilters; ctx.render(); },
+      }),
+    ),
+  ));
+
+  if (chips.length) {
+    const row = h("div", { class: "tx-chips" });
+    for (const chip of chips) {
+      const kind = chip.type.startsWith("amount") ? "amount" : chip.type;
+      row.append(h("span", { class: `tx-chip ${kind}` },
+        h("span", { text: chip.label }),
+        h("button", { type: "button", text: "×", "aria-label": `Remove ${chip.label}`, onclick: () => removeChip(chip.id) }),
+      ));
+    }
+    row.append(h("button", { class: "tx-chip-clear", type: "button", text: "Clear all", onclick: clearAllFilters }));
+    root.append(row);
+  }
+
+  if (ctx.ui.showTxFilters) root.append(txFilterPanel(ctx, budget, f, clearAllFilters));
+
+  if (attentionAll.length) {
+    root.append(h("button", { class: "tx-attn", type: "button", onclick: () => {
+      ctx.ui.txFilter = { ...blankTxFilters(), categoryId: UNCONFIRMED_FILTER };
+      ctx.ui.txQuery = "";
+      ctx.ui.showTxFilters = true;
+      ctx.render();
+    } },
+      h("strong", { text: `⚠️ ${attentionAll.length} transaction${attentionAll.length !== 1 ? "s" : ""} need${attentionAll.length === 1 ? "s" : ""} attention` }),
+      h("span", { text: " · Missing or Unconfirmed Categories · Tap to fix" }),
+    ));
+  }
+
+  if (filtersAreActive(q, chips, f)) {
+    const total = netOfRows(budget, rows);
+    const net = `${total >= 0 ? "+" : ""}${fmt(total)}`;
+    root.append(h("div", { class: "tx-net" },
+      h("span", { text: `${rows.length} transaction${rows.length !== 1 ? "s" : ""}` }),
+      h("span", { class: "tx-net-amt", text: `Net: ${net}` }),
+    ));
+  }
 
   const dups = (budget.pendingDuplicates || []).filter((p) => budget.transactions.some((t) => t.id === p.newTxId) && budget.transactions.some((t) => t.id === p.existingTxId));
-
-  root.append(h("header", { class: "view-head" },
-    h("h1", { text: "Activity" }),
-    btn("Add", { onClick: () => openTx(ctx, null) }),
-  ));
-  root.append(h("div", { class: "search-row" }, search));
-  root.append(h("nav", { class: "link-row", "aria-label": "Activity tools" },
-    h("button", { class: "text-link", type: "button", text: "Filter", onclick: () => openFilters(ctx) }),
-    h("button", { class: "text-link", type: "button", text: "Import", onclick: () => openImport(ctx) }),
-    h("button", { class: "text-link", type: "button", text: "Select", onclick: () => { rows.forEach((t) => selected.add(t.id)); ctx.render(); } }),
-  ));
-  const chips = h("div", { class: "chip-row" });
-  const chip = (label, key) => chips.append(h("button", { class: "pill", type: "button", text: `${label} ×`, onclick: () => { const next = { ...ctx.ui.txFilter }; delete next[key]; if (key === "amount") delete next.amountOp; ctx.ui.txFilter = next; ctx.render(); } }));
-  if (f.accountId) chip("Account", "accountId");
-  if (f.categoryId) chip("Category", "categoryId");
-  if (f.groupId) chip("Group", "groupId");
-  if (f.type) chip(f.type, "type");
-  if (f.month) chip(f.month, "month");
-  if (f.hideReconciled) chip("Hiding reconciled", "hideReconciled");
-  if (f.attention) chip("Needs attention", "attention");
-  if (f.amountOp) chip(`Amount ${f.amountOp} ${f.amount}`, "amount");
-  if (q) chips.append(h("button", { class: "pill", type: "button", text: `“${ctx.ui.txQuery}” ×`, onclick: () => { ctx.ui.txQuery = ""; ctx.render(); } }));
-  if (chips.childNodes.length) root.append(chips);
-  if (f.accountId || f.categoryId || f.groupId || f.type || f.month || f.attention || f.hideReconciled || f.amountOp || q) {
-    root.append(h("p", { class: "hint", text: `${rows.length} shown · net ${fmt(sum)}` }),
-      btn("Clear filters", { kind: "quiet", onClick: () => { ctx.ui.txFilter = {}; ctx.ui.txQuery = ""; ctx.render(); } }));
-  }
   if (dups.length) {
     root.append(h("button", { class: "notice", type: "button", onclick: () => openDupes(ctx) },
       h("strong", { text: `${dups.length} possible duplicate${dups.length === 1 ? "" : "s"}` }),
@@ -95,10 +346,11 @@ export function renderTransactions(root, ctx) {
       btn("Done", { kind: "quiet", onClick: () => { selected.clear(); ctx.render(); } }),
     ));
   }
+
   const list = h("div", { class: "tx-list" });
-  if (!rows.length) list.append(h("p", { class: "empty", text: (q || f.accountId || f.categoryId || f.type || f.month || f.groupId || f.attention || f.hideReconciled) ? "No transactions match." : "Nothing here yet. Add a transaction when money moves." }));
+  if (!rows.length) list.append(h("p", { class: "empty", text: (budget.transactions || []).length === 0 ? "No transactions yet. Tap + Add Transaction to get started." : "No transactions match your search/filters" }));
   const PAGE = 80;
-  const filterKey = JSON.stringify({ f, q });
+  const filterKey = JSON.stringify({ f, q, chips, showReconciled });
   if (ctx.ui.txFilterKey !== filterKey) {
     ctx.ui.txFilterKey = filterKey;
     ctx.ui.txLimit = PAGE;
@@ -356,44 +608,69 @@ export function openTx(ctx, existing) {
   });
 }
 
-function openFilters(ctx) {
-  const f = ctx.ui.txFilter;
-  const budget = ctx.budget();
-  const sheet = openSheet({
-    title: "Filters",
-    body: (host) => {
-      const acct = h("select", { class: "input" }, h("option", { value: "", text: "All accounts" }));
-      for (const a of [...budget.accounts, ...budget.creditCards]) acct.append(h("option", { value: a.id, text: a.name }));
-      acct.value = f.accountId || "";
-      const type = h("select", { class: "input" },
-        h("option", { value: "", text: "All types" }),
-        h("option", { value: "expense", text: "Expense" }),
-        h("option", { value: "income", text: "Income" }),
-        h("option", { value: "transfer", text: "Transfer" }),
-        h("option", { value: "payment", text: "Payment" }),
-      );
-      type.value = f.type || "";
-      const from = h("input", { class: "input", type: "date", value: f.dateFrom || "" });
-      const to = h("input", { class: "input", type: "date", value: f.dateTo || "" });
-      const op = h("select", { class: "input" },
-        h("option", { value: "", text: "Any amount" }),
-        h("option", { value: ">", text: "Greater than" }),
-        h("option", { value: "=", text: "Equal to" }),
-        h("option", { value: "<", text: "Less than" }),
-      );
-      op.value = f.amountOp || "";
-      const amt = h("input", { class: "input", inputmode: "decimal", value: f.amount ?? "", placeholder: "0.00" });
-      const hide = h("input", { type: "checkbox", checked: !!f.hideReconciled });
-      const attn = h("input", { type: "checkbox", checked: !!f.attention });
-      host.append(field("Account", acct), field("Type", type), field("From", from), field("To", to), field("Amount", op), field("Amount value", amt),
-        h("label", { class: "choice" }, hide, h("span", { text: "Hide reconciled" })),
-        h("label", { class: "choice" }, attn, h("span", { text: "Needs a category or confirmation" })),
-        btn("Apply", { block: true, onClick: () => {
-          ctx.ui.txFilter = { ...f, accountId: acct.value, type: type.value, dateFrom: from.value, dateTo: to.value, amountOp: op.value, amount: amt.value, hideReconciled: hide.checked, attention: attn.checked };
-          sheet.close(); ctx.render();
-        }}));
-    },
-  });
+
+function txFilterPanel(ctx, budget, f, clearAllFilters) {
+  const setF = (patch) => { ctx.ui.txFilter = { ...ctx.ui.txFilter, ...patch }; ctx.render(); };
+  const acct = h("select", { class: "input", onchange: (e) => setF({ accountId: e.target.value }) }, h("option", { value: "", text: "All Accounts" }));
+  const accts = (budget.accounts || []).filter((a) => !a.archived);
+  const cards = (budget.creditCards || []).filter((a) => !a.archived);
+  if (accts.length) {
+    const og = h("optgroup", { label: "Accounts" });
+    for (const a of accts) og.append(h("option", { value: a.id, text: a.name }));
+    acct.append(og);
+  }
+  if (cards.length) {
+    const og = h("optgroup", { label: "Credit Cards" });
+    for (const a of cards) og.append(h("option", { value: a.id, text: a.name }));
+    acct.append(og);
+  }
+  acct.value = f.accountId || "";
+  const cat = h("select", { class: "input", onchange: (e) => setF({ categoryId: e.target.value, categoryIds: null, categoryLabel: "" }) },
+    h("option", { value: "", text: "All Categories" }),
+    h("option", { value: UNCONFIRMED_FILTER, text: "⚠️ Missing or Unconfirmed" }),
+  );
+  for (const g of budget.categoryGroups || []) {
+    const og = h("optgroup", { label: g.name });
+    for (const c of (budget.categories || []).filter((c) => c.groupId === g.id)) og.append(h("option", { value: c.id, text: c.name }));
+    cat.append(og);
+  }
+  cat.value = f.categoryId || "";
+  const typ = h("select", { class: "input", onchange: (e) => setF({ type: e.target.value }) },
+    h("option", { value: "", text: "All Types" }),
+    h("option", { value: "expense", text: "Expense" }),
+    h("option", { value: "income", text: "Income" }),
+    h("option", { value: "payment", text: "Payment" }),
+    h("option", { value: "adjustment", text: "Adjustment" }),
+  );
+  typ.value = f.type || "";
+  const from = h("input", { class: "input", type: "date", value: f.dateFrom || "", onchange: (e) => setF({ dateFrom: e.target.value }) });
+  const to = h("input", { class: "input", type: "date", value: f.dateTo || "", onchange: (e) => setF({ dateTo: e.target.value }) });
+  const kids = [];
+  if (f.payee) kids.push(h("div", { class: "tx-filter-tag" }, h("span", { text: "Payee:" }), h("span", { text: f.payee }), h("button", { type: "button", text: "×", onclick: () => setF({ payee: "" }) })));
+  if (f.categoryIds) kids.push(h("div", { class: "tx-filter-tag" }, h("span", { text: "Group:" }), h("span", { text: f.categoryLabel || "Group" }), h("button", { type: "button", text: "×", onclick: () => setF({ categoryIds: null, categoryLabel: "" }) })));
+  kids.push(acct, cat);
+  kids.push(typ);
+  kids.push(h("div", { class: "tx-filter-row cols" },
+    h("div", {}, h("label", { class: "hint", text: "From Date" }), h("div", { class: "tx-date-wrap" }, from, f.dateFrom ? h("button", { type: "button", class: "tx-date-x", text: "×", onclick: () => setF({ dateFrom: "" }) }) : null)),
+    h("div", {}, h("label", { class: "hint", text: "To Date" }), h("div", { class: "tx-date-wrap" }, to, f.dateTo ? h("button", { type: "button", class: "tx-date-x", text: "×", onclick: () => setF({ dateTo: "" }) }) : null)),
+  ));
+  const amt = h("input", { class: "input", type: "number", min: "0", placeholder: "0.00", value: f.amountVal || "", oninput: (e) => {
+    let v = e.target.value;
+    if (v.startsWith("-")) v = v.slice(1);
+    const next = { amountVal: v };
+    if (v && !f.amountGT && !f.amountEQ && !f.amountLT) next.amountEQ = true;
+    setF(next);
+  } });
+  kids.push(h("div", { class: "tx-filter-row amt" },
+    h("div", { class: "tx-amt-ops" },
+      iconBtn({ text: ">", active: !!f.amountGT, label: "Greater than", onClick: () => setF({ amountGT: !f.amountGT, amountLT: f.amountGT ? f.amountLT : false }) }),
+      iconBtn({ text: "=", active: !!f.amountEQ, label: "Equal to", onClick: () => setF({ amountEQ: !f.amountEQ }) }),
+      iconBtn({ text: "<", active: !!f.amountLT, label: "Less than", onClick: () => setF({ amountLT: !f.amountLT, amountGT: f.amountLT ? f.amountGT : false }) }),
+    ),
+    amt,
+    btn("Clear All Filters", { kind: "ghost small", onClick: clearAllFilters }),
+  ));
+  return h("div", { class: "tx-filter-panel" }, ...kids);
 }
 
 function openImport(ctx) {

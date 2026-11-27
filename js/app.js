@@ -3,7 +3,7 @@ import { loadState, saveState, subscribe, exportData, importData, deviceGet, dev
 import { h, clear, icon, toast, closeAllModals, btn } from "./ui.js?v=154";
 import { renderIdentity, renderWizard, renderLoading } from "./views/gate.js?v=154";
 import { renderBudget, openInbox, openHistory } from "./views/budget.js?v=154";
-import { renderTransactions, openTx } from "./views/transactions.js?v=154";
+import { renderTransactions, openTx, applyTxNav } from "./views/transactions.js?v=154";
 import { renderAccounts } from "./views/accounts.js?v=154";
 import { renderPayees } from "./views/payees.js?v=154";
 import { renderSettings } from "./views/settings.js?v=154";
@@ -40,7 +40,7 @@ const ctx = {
   account: null,
   month: monthKey(),
   nav: "budget",
-  ui: { collapsed: {}, showArchived: false, txFilter: {}, txQuery: "", selected: new Set(), payeeQuery: "", avg: null },
+  ui: { collapsed: {}, showArchived: false, txFilter: {}, txQuery: "", txChips: [], showTxFilters: false, showReconciled: false, selected: new Set(), payeeQuery: "", avg: null },
   budget() {
     return ctx.state?.budgets?.find((b) => b.id === ctx.state.activeBudgetId) || ctx.state?.budgets?.[0] || null;
   },
@@ -148,7 +148,8 @@ const ctx = {
   go(nav, filter) {
     ctx.nav = nav;
     closeAllModals();
-    if (filter) ctx.ui.txFilter = { ...ctx.ui.txFilter, ...filter };
+    if (nav === "transactions" && filter) applyTxNav(ctx, filter);
+    else if (filter) ctx.ui.txFilter = { ...ctx.ui.txFilter, ...filter };
     const hash = nav === "budget" ? `#budget/${ctx.month}` : `#${nav}`;
     if (location.hash !== hash) history.replaceState(null, "", hash);
     ctx.render();
@@ -405,6 +406,7 @@ async function boot() {
   const theme = await deviceGet("theme");
   const custom = await deviceGet("customTheme");
   ctx.applyTheme(theme || "system", custom);
+  ctx.ui.showReconciled = !!(await deviceGet("showReconciled"));
   matchMedia("(prefers-color-scheme: dark)").addEventListener("change", async () => {
     const current = await deviceGet("theme");
     if (!current || resolveTheme(current) === "system") ctx.applyTheme("system", await deviceGet("customTheme"));

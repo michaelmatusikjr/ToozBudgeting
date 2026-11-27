@@ -75,7 +75,7 @@ function openPayee(ctx, name) {
           });
           sheet.close();
         }}),
-        btn("See transactions", { kind: "ghost", block: true, onClick: () => { sheet.close(); ctx.ui.txQuery = name; ctx.go("transactions"); } }),
+        btn("See transactions", { kind: "ghost", block: true, onClick: () => { sheet.close(); ctx.go("transactions", { payee: name }); } }),
       );
       if (originals.length) {
         host.append(h("p", { class: "kicker", text: "Original names" }));

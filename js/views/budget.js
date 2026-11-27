@@ -11,7 +11,7 @@ import {
   placeGroup, placeCategory,
 } from "../mutate.js?v=154";
 import { collectReminders } from "../notify.js?v=154";
-import { openMissingSide, openTx } from "./transactions.js?v=154";
+import { openMissingSide, openTx, applyTxNav } from "./transactions.js?v=154";
 
 function noteOf(budget, month, cat) {
   return budget.categoryNotes?.[month]?.[cat.id] || "";
@@ -192,8 +192,7 @@ function availableClass(avail) {
 }
 
 function goMonthActivity(ctx, extra) {
-  const r = monthDateRange(ctx.month);
-  ctx.ui.txFilter = { dateFrom: r.from, dateTo: r.to, ...extra };
+  applyTxNav(ctx, { month: ctx.month, ...(extra || {}) });
   ctx.go("transactions");
 }
 
