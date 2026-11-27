@@ -15,12 +15,12 @@ import { plaidClient, PlaidError, LOGIN_CODES, slimTx, slimAccount } from "./pla
 import { HttpError, now, corsHeaders, json, readJson, meta, setMeta } from "./http.js";
 import {
   authSession, requireAction, signInGoogle, signInRedirect, redeemCode, signOut, meView, updateMe,
-  listMembers, createInvite, revokeInvite, updateMember, removeMember, renameHousehold, signInReady, ownerEmailCount, signInStart, lastSignInError,
+  listMembers, createInvite, revokeInvite, updateMember, removeMember, renameHousehold, signInReady, ownerEmailCount, signInStart, lastSignInError, inviteInfo,
 } from "./auth.js";
 import { push, pull } from "./sync.js";
 import { appStatus, appKeys, setAppLink, removeAppLink, getPrefs, setPrefs } from "./apps.js";
 
-const VERSION = "2.1.0";
+const VERSION = "2.1.1";
 const DEFAULT_CAP = 10;
 const CHUNK = 400;
 const SYNC_LOCK_MS = 5 * 60000;
@@ -479,6 +479,7 @@ export function makeHandler({ fetchImpl } = {}) {
       if (path === "/auth/config" && m === "GET") return json(authConfig(env), 200, cors);
       if (path === "/auth/google" && m === "POST") return json(await signInGoogle(env, req, doFetch), 200, cors);
       if (path === "/auth/redeem" && m === "POST") return json(await redeemCode(env, req), 200, cors);
+      if (/^\/auth\/invite\/[^/]+$/.test(path) && m === "GET") return json(await inviteInfo(env, decodeURIComponent(path.split("/")[3])), 200, cors);
       if (path === "/bank/pair") throw new HttpError(410, "Pairing was replaced by Sign in with Google. Update the app.");
       const s = await authSession(env, req);
       let out;

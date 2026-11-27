@@ -2,7 +2,7 @@
  * Household account: Sign in with Google, the session token, and the household API.
  * The server is the toozbudgeting-bank Worker. The session token lives in IndexedDB on this device only.
  */
-import { deviceGet, deviceSet } from "./store.js?v=151";
+import { deviceGet, deviceSet } from "./store.js?v=152";
 
 export const SERVER_DEFAULT = "https://toozbudgeting-bank.michael-matusik-jr.workers.dev";
 const GIS_SRC = "https://accounts.google.com/gsi/client";
@@ -72,7 +72,42 @@ function deviceName() {
   return standalone ? `${what} app` : what;
 }
 
+/* ---------- invite links ---------- */
+
+export const APP_LINK = "https://michaelmatusikjr.github.io/ToozBudgeting/";
+const INVITE_RE = /^i_[\w-]{8,40}$/;
+
+/** The invite from a ?invite= link this device opened, until sign-in uses it. */
+export async function pendingInvite() { const v = await deviceGet("pendingInvite"); return INVITE_RE.test(String(v?.id || "")) ? v : null; }
+export async function setPendingInvite(id) { await deviceSet("pendingInvite", id && INVITE_RE.test(id) ? { id, at: Date.now() } : null); }
+export const isInviteId = (id) => INVITE_RE.test(String(id || ""));
+
+/** Who invited you and to what (no sign-in needed). The email comes back masked. */
+export const inviteDetails = (id) => api("GET", `/auth/invite/${encodeURIComponent(id)}`, undefined, { auth: false });
+
+export const inviteLink = (id) => `${APP_LINK}?invite=${encodeURIComponent(id)}`;
+
+export function inviteMessage(inv, householdName) {
+  const where = householdName ? `our ToozBudgeting household (${householdName})` : "our ToozBudgeting household";
+  return `Join ${where}:\n${inviteLink(inv.id)}\nSign in with Google using ${inv.email}.`;
+}
+
+/**
+ * Share an invite with the phone's share sheet, or copy it when sharing isn't available.
+ * Returns "shared", "copied", "canceled", or "manual" (the caller shows the text to copy by hand).
+ */
+export async function shareInvite(inv, householdName) {
+  const text = inviteMessage(inv, householdName);
+  if (navigator.share) {
+    try { await navigator.share({ title: "Join our ToozBudgeting household", text }); return "shared"; }
+    catch (e) { if (e?.name === "AbortError") return "canceled"; }
+  }
+  try { await navigator.clipboard.writeText(text); return "copied"; }
+  catch { return "manual"; }
+}
+
 async function finishSignIn(res) {
+  await setPendingInvite(null);
   const prev = await account();
   const sameHousehold = prev?.me?.household?.id === res.me?.household?.id && prev?.me?.user?.id === res.me?.user?.id;
   return saveAccount({
@@ -86,7 +121,8 @@ async function finishSignIn(res) {
 
 /** Trade a Google ID token (from the Sign in with Google button) for a household session. */
 export async function signInWithCredential(credential) {
-  const res = await api("POST", "/auth/google", { credential, deviceName: deviceName() }, { auth: false });
+  const invite = (await pendingInvite())?.id;
+  const res = await api("POST", "/auth/google", { credential, deviceName: deviceName(), ...(invite ? { invite } : {}) }, { auth: false });
   return finishSignIn(res);
 }
 
@@ -169,7 +205,10 @@ export async function renderGoogleButton(host, { onSignedIn, onError } = {}) {
     host.replaceChildren(Object.assign(document.createElement("p"), { className: "hint", textContent: cfg.error ? `${cfg.error}. Sign-in will show here when it’s back.` : "Google sign-in isn’t set up on the server yet." }));
     return false;
   }
-  if (isStandaloneIOS()) return redirectButton(host, (await serverUrl()) + "/auth/google/start");
+  if (isStandaloneIOS()) {
+    const invite = (await pendingInvite())?.id;
+    return redirectButton(host, (await serverUrl()) + "/auth/google/start" + (invite ? `?invite=${encodeURIComponent(invite)}` : ""));
+  }
   let google;
   try { google = await loadGis(); }
   catch (e) { onError?.(withCode(e.message, "GSI_LOAD")); return false; }

@@ -87,6 +87,64 @@ export async function lastSignInError(env) {
   try { return JSON.parse((await meta(env, "last_signin_error")) || "null"); } catch { return null; }
 }
 
+/* ---------- invite links ---------- */
+
+/** Invite ids look like i_<random>. Anything else is ignored. */
+export const cleanInviteId = (v) => (/^i_[\w-]{8,40}$/.test(String(v || "")) ? String(v) : null);
+
+/** "k•••@gmail.com": enough for the invitee to pick the right Google account, without exposing the address to anyone holding the link. */
+export function maskEmail(email) {
+  const [user, domain] = String(email || "").split("@");
+  if (!domain) return "";
+  return `${user.slice(0, 1)}${"•".repeat(Math.min(Math.max(user.length - 1, 3), 6))}@${domain}`;
+}
+
+async function inviteRow(env, id) {
+  return env.DB.prepare(`SELECT i.*, h.name AS household_name, COALESCE(m.display_name, u.name, u.email) AS inviter_name, u.picture AS inviter_picture
+    FROM invites i JOIN households h ON h.id = i.household_id
+    LEFT JOIN users u ON u.id = i.invited_by
+    LEFT JOIN memberships m ON m.user_id = i.invited_by AND m.household_id = i.household_id
+    WHERE i.id = ?`).bind(id).first();
+}
+
+function inviteState(row) {
+  if (!row) return "INVITE_NOT_FOUND";
+  if (row.accepted_at) return "INVITE_USED";
+  if (row.revoked_at) return "INVITE_REVOKED";
+  if (row.expires_at < now()) return "INVITE_EXPIRED";
+  return null;
+}
+
+const INVITE_MESSAGES = {
+  INVITE_NOT_FOUND: "That invite link isn’t valid. Ask for a new one.",
+  INVITE_USED: "That invite was already used. If it was yours, just sign in.",
+  INVITE_REVOKED: "That invite was canceled. Ask for a new one.",
+  INVITE_EXPIRED: "That invite expired. Ask for a new one.",
+};
+
+/** GET /auth/invite/<id> (no sign-in): who invited you and to what, so the app can show it before Google sign-in. */
+export async function inviteInfo(env, id) {
+  const clean = cleanInviteId(id);
+  const row = clean ? await inviteRow(env, clean) : null;
+  const bad = inviteState(row);
+  if (bad) throw new HttpError(bad === "INVITE_NOT_FOUND" ? 404 : 410, INVITE_MESSAGES[bad], { code: bad });
+  return {
+    invite: {
+      id: row.id, household: row.household_name || "a household", invitedBy: row.inviter_name || "A household owner",
+      invitedByPicture: row.inviter_picture || null, role: row.role, emailHint: maskEmail(row.email), expiresAt: row.expires_at,
+    },
+  };
+}
+
+/** Signing in from an invite link with a different Google account gets a clear error instead of "not invited". */
+async function checkInviteEmail(env, id, email) {
+  const row = await inviteRow(env, id);
+  if (inviteState(row)) return; // stale link: fall through to the normal checks (an existing member can still sign in)
+  if (row.email !== email) {
+    throw new HttpError(403, `This invite is for ${maskEmail(row.email)}. Sign in with that Google account.`, { code: "INVITE_EMAIL_MISMATCH", emailHint: maskEmail(row.email) });
+  }
+}
+
 /* ---------- households and membership ---------- */
 
 async function upsertUser(env, g) {
@@ -154,7 +212,7 @@ async function checkRate(env, req) {
   return ip;
 }
 
-async function signInWithCredential(env, req, fetchImpl, credential, deviceName, { nonce = null, via = "popup", fields = null } = {}) {
+async function signInWithCredential(env, req, fetchImpl, credential, deviceName, { nonce = null, via = "popup", fields = null, inviteId = null } = {}) {
   const ip = await checkRate(env, req);
   let g;
   try { g = await verifyGoogleIdToken(env, fetchImpl, String(credential || ""), { nonce }); }
@@ -163,9 +221,13 @@ async function signInWithCredential(env, req, fetchImpl, credential, deviceName,
     await noteSignInFailure(env, { via, code: e?.extra?.code || "ERROR", fields, ua: uaFamily(req) }, e);
     throw e;
   }
-  const user = await upsertUser(env, g);
-  let res;
-  try { res = await resolveMembership(env, user); }
+  let res; let user;
+  try {
+    // An invite link only says which invite to expect. Access still comes from the Google email matching it.
+    if (inviteId) await checkInviteEmail(env, inviteId, g.email);
+    user = await upsertUser(env, g);
+    res = await resolveMembership(env, user);
+  }
   catch (e) { await noteSignInFailure(env, { via, code: e?.extra?.code || "ERROR", ua: uaFamily(req) }, e); throw e; }
   const token = await newSession(env, user, res.membership.household_id, deviceName);
   return { token, joined: res.joined, user };
@@ -181,7 +243,7 @@ function uaFamily(req) {
 /** POST /auth/google { credential, deviceName } -> { token, me } */
 export async function signInGoogle(env, req, fetchImpl) {
   const body = await readJson(req);
-  const { token, joined } = await signInWithCredential(env, req, fetchImpl, body.credential, body.deviceName);
+  const { token, joined } = await signInWithCredential(env, req, fetchImpl, body.credential, body.deviceName, { inviteId: cleanInviteId(body.invite) });
   const session = await sessionFromToken(env, token);
   return { token, joined, me: await meView(env, session) };
 }
@@ -209,7 +271,8 @@ export async function signInStart(env, req) {
   const app = appParam && APPS[appParam] ? appParam : null;
   if (!id) return Response.redirect(appUrl(env, app) + "#signin-error=" + encodeURIComponent("Google sign-in isn’t set up on the server yet") + "&signin-code=NOT_CONFIGURED", 303);
   const nonce = randomToken(16);
-  const state = await sealToken(env.TOKEN_ENC_KEY, "oidc-state", JSON.stringify({ nonce, exp: now() + STATE_MS, ...(app ? { app } : {}) }));
+  const invite = cleanInviteId(new URL(req.url).searchParams.get("invite"));
+  const state = await sealToken(env.TOKEN_ENC_KEY, "oidc-state", JSON.stringify({ nonce, exp: now() + STATE_MS, ...(app ? { app } : {}), ...(invite ? { invite } : {}) }));
   const q = new URLSearchParams({
     client_id: id,
     redirect_uri: publicBase(env, req) + "/auth/google/redirect",
@@ -245,7 +308,7 @@ export async function signInRedirect(env, req, fetchImpl) {
     const err = form.get("error");
     if (err) throw fail(401, "GOOGLE_" + String(err).toUpperCase().replace(/[^A-Z_]/g, "").slice(0, 30), err === "access_denied" ? "Sign-in was canceled" : "Google couldn’t finish the sign-in. Try again.");
     const idToken = form.get("id_token");
-    let nonce = null; let via = "gsi-redirect";
+    let nonce = null; let via = "gsi-redirect"; let inviteId = null;
     if (idToken || form.get("state")) {
       via = "oidc";
       let st = null;
@@ -253,10 +316,11 @@ export async function signInRedirect(env, req, fetchImpl) {
       if (!st || !st.nonce) throw fail(401, "BAD_STATE", "That sign-in link didn’t come from this app. Try again.");
       if (st.exp < now()) throw fail(401, "STATE_EXPIRED", "That sign-in took too long. Try again.");
       nonce = st.nonce;
+      inviteId = cleanInviteId(st.invite);
     }
     const credential = idToken || form.get("credential");
     if (!credential) throw fail(401, "NO_CREDENTIAL", "Google didn’t send a sign-in. Try again.");
-    const { token } = await signInWithCredential(env, req, fetchImpl, credential, "Installed app", { nonce, via, fields });
+    const { token } = await signInWithCredential(env, req, fetchImpl, credential, "Installed app", { nonce, via, fields, inviteId });
     const code = randomToken(24);
     await env.DB.prepare("INSERT INTO login_codes (code_hash, sealed, expires_at) VALUES (?, ?, ?)")
       .bind(await sha256Hex(code), await sealToken(env.TOKEN_ENC_KEY, "login-code", token), now() + CODE_MS).run();
@@ -339,7 +403,7 @@ function memberView(row) {
 }
 
 function inviteView(row) {
-  return { id: row.id, email: row.email, role: row.role, scopes: parseScopes(row.scopes), createdAt: row.created_at, expiresAt: row.expires_at };
+  return { id: row.id, email: row.email, role: row.role, scopes: parseScopes(row.scopes), createdAt: row.created_at, expiresAt: row.expires_at, invitedBy: row.invited_by || null };
 }
 
 export async function meView(env, session) {

@@ -1,16 +1,16 @@
-import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, openAmountPad } from "../ui.js?v=151";
-import { fmt, monthLabel, monthKey, prevMonth, nextMonth, todayKey, toTitleCase, uid, round2 } from "../util.js?v=151";
+import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, openAmountPad } from "../ui.js?v=152";
+import { fmt, monthLabel, monthKey, prevMonth, nextMonth, todayKey, toTitleCase, uid, round2 } from "../util.js?v=152";
 import {
   budgetSnapshot, getGoalMetrics, trailingAvg, monthAccessible, historySeries,
   overspentMonths, available, globalFree, ccMismatches,
-} from "../calc.js?v=151";
+} from "../calc.js?v=152";
 import {
   setAssigned, moveMoney, coverOverspending, planClawback, applyClawback,
   computeMonthAssignments, applyAssignments, setCategory, addCategory, archiveCategory,
   deleteCategory, setMonthNote, addGroup, renameGroup, deleteGroup, moveGroup, moveCategory,
-} from "../mutate.js?v=151";
-import { collectReminders } from "../notify.js?v=151";
-import { openMissingSide } from "./transactions.js?v=151";
+} from "../mutate.js?v=152";
+import { collectReminders } from "../notify.js?v=152";
+import { openMissingSide } from "./transactions.js?v=152";
 
 function noteOf(budget, month, cat) {
   return budget.categoryNotes?.[month]?.[cat.id] || "";
