@@ -1,4 +1,4 @@
-import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, keepFocus, iconBtn } from "../ui.js?v=154";
+import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, keepFocus, iconBtn, bindLongPress } from "../ui.js?v=154";
 import { fmt, todayKey, toTitleCase, isCard, ccPayCat, makePayFrom, RTA, uid, monthLabel } from "../util.js?v=154";
 import { deviceSet } from "../store.js?v=154";
 import { displayName, payeeDefaultCategory, payeeSuggestedCategory, findFuzzyDuplicates, isAccountPayee } from "../payees.js?v=154";
@@ -333,18 +333,46 @@ export function renderTransactions(root, ctx) {
     ));
   }
   if (selected.size) {
-    root.append(h("div", { class: "bulk" },
-      h("span", { text: `${selected.size} selected` }),
-      btn("Category", { kind: "ghost", onClick: () => openBulkCat(ctx) }),
-      btn("Confirm", { kind: "ghost", onClick: () => { ctx.updateBudget((b) => confirmCategories(b, [...selected])); selected.clear(); toast("Categories confirmed"); } }),
-      btn("Delete", { kind: "danger", onClick: () => confirmDialog({
-        title: "Delete transactions?",
-        message: "Starting balances and reconciled transactions stay. Transfers delete both sides.",
-        confirm: "Delete", danger: true,
+    const allIds = rows.map((tx) => tx.id);
+    const allOn = allIds.length > 0 && allIds.every((id) => selected.has(id));
+    const selTxs = [...selected].map((id) => (budget.transactions || []).find((tx) => tx.id === id)).filter(Boolean);
+    const hasSuggested = selTxs.some((tx) => !tx.splits && tx.categoryConfirmed === false && tx.categoryId && tx.type === "expense");
+    const bar = h("div", { class: "bulk" },
+      h("span", { class: "bulk-count", text: `${selected.size} selected` }),
+      h("button", { class: "text-link", type: "button", text: allOn ? "Deselect All" : "Select All", onclick: () => {
+        if (allOn) selected.clear();
+        else allIds.forEach((id) => selected.add(id));
+        ctx.render();
+      }}),
+    );
+    if (selected.size === 1) {
+      bar.append(btn("✏️ Edit", { kind: "ghost small", onClick: () => {
+        const tx = (budget.transactions || []).find((item) => item.id === [...selected][0]);
+        selected.clear();
+        if (tx) openTx(ctx, tx);
+        else ctx.render();
+      }}));
+    }
+    if (hasSuggested) {
+      bar.append(btn("✓ Confirm", { kind: "ghost small", onClick: () => {
+        ctx.updateBudget((b) => confirmCategories(b, [...selected]));
+        selected.clear();
+        toast("Categories confirmed");
+      }}));
+    }
+    bar.append(
+      btn("🏷 Category", { kind: "ghost small", onClick: () => openBulkCat(ctx) }),
+      btn("Account", { kind: "ghost small", onClick: () => openBulkAccount(ctx) }),
+      btn("🗑 Delete", { kind: "danger small", onClick: () => confirmDialog({
+        title: "Delete Transactions?",
+        message: `Delete ${selected.size} transaction${selected.size !== 1 ? "s" : ""}? This cannot be undone. Locked (reconciled) transactions will be skipped.`,
+        confirm: "Yes, Delete",
+        danger: true,
         onConfirm: () => { ctx.updateBudget((b) => deleteTransactions(b, [...selected])); selected.clear(); toast("Deleted", { label: "Undo", action: () => ctx.undo() }); },
       }) }),
-      btn("Done", { kind: "quiet", onClick: () => { selected.clear(); ctx.render(); } }),
-    ));
+      btn("Cancel", { kind: "quiet small", onClick: () => { selected.clear(); ctx.render(); } }),
+    );
+    root.append(bar);
   }
 
   const list = h("div", { class: "tx-list" });
@@ -421,10 +449,8 @@ function txRow(ctx, tx, selected) {
     noteBits.push(`Note from category for ${when}: ${monthNote}`);
   }
   const row = h("article", { class: `tx${selected.has(tx.id) ? " sel" : ""}${selecting ? " selecting" : ""}` });
-  let timer = null;
-  row.addEventListener("contextmenu", (e) => { e.preventDefault(); selected.add(tx.id); ctx.render(); });
-  row.addEventListener("touchstart", () => { timer = setTimeout(() => { selected.add(tx.id); ctx.render(); }, 480); }, { passive: true });
-  row.addEventListener("touchend", () => clearTimeout(timer));
+  bindLongPress(row, () => { ctx.ui.selected = new Set([tx.id]); ctx.render(); });
+  row.addEventListener("contextmenu", (e) => { e.preventDefault(); ctx.ui.selected = new Set([tx.id]); ctx.render(); });
   row.addEventListener("click", () => {
     if (selecting) {
       if (selected.has(tx.id)) selected.delete(tx.id); else selected.add(tx.id);
@@ -954,3 +980,32 @@ function openBulkCat(ctx) {
     },
   });
 }
+
+function openBulkAccount(ctx) {
+  const budget = ctx.budget();
+  const sheet = openSheet({
+    title: "Set account",
+    body: (host) => {
+      const sel = h("select", { class: "input" });
+      for (const a of [...(budget.accounts || []), ...(budget.creditCards || [])].filter((a) => !a.archived)) {
+        sel.append(h("option", { value: a.id, text: a.name }));
+      }
+      host.append(h("p", { class: "hint", text: "Locked (reconciled) transactions are skipped." }), sel, btn("Apply", { block: true, onClick: () => {
+        const ids = [...ctx.ui.selected];
+        ctx.updateBudget((b) => {
+          let cur = b;
+          for (const id of ids) {
+            const item = (cur.transactions || []).find((tx) => tx.id === id);
+            if (!item || isLocked(cur, item)) continue;
+            cur = updateTransaction(cur, id, { accountId: sel.value });
+          }
+          return cur;
+        });
+        ctx.ui.selected.clear();
+        sheet.close();
+        toast("Account updated", { label: "Undo", action: () => ctx.undo() });
+      }}));
+    },
+  });
+}
+
