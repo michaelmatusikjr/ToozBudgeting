@@ -1,8 +1,8 @@
-import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, openAmountPad, isTouchUi } from "../ui.js?v=154";
+import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, openAmountPad, isTouchUi, amountInput, bindContextMenu } from "../ui.js?v=154";
 import { fmt, monthLabel, monthKey, prevMonth, nextMonth, todayKey, toTitleCase, uid, round2 } from "../util.js?v=154";
 import {
   budgetSnapshot, getGoalMetrics, trailingAvg, monthAccessible, historySeries,
-  overspentMonths, available, globalFree, ccMismatches,
+  overspentMonths, available, globalFree, ccMismatches, catReturned,
 } from "../calc.js?v=154";
 import {
   setAssigned, moveMoney, coverOverspending, planClawback, applyClawback,
@@ -120,6 +120,59 @@ function openAddGroup(ctx) {
   });
 }
 
+
+function monthDateRange(mk) {
+  const [y, m] = mk.split("-").map(Number);
+  const last = new Date(y, m, 0).getDate();
+  return { from: `${mk}-01`, to: `${mk}-${String(last).padStart(2, "0")}` };
+}
+
+function fmtActivity(activity) {
+  const n = Number(activity) || 0;
+  const sign = n > 0 ? "-" : n < 0 ? "+" : "";
+  return sign + fmt(Math.abs(n));
+}
+
+function activityClass(activity) {
+  const n = Number(activity) || 0;
+  if (n > 0.005) return "neg";
+  if (n < -0.005) return "pos";
+  return "zero";
+}
+
+function availableClass(avail) {
+  if (avail < -0.005) return "neg";
+  if (avail > 0.005) return "pos";
+  return "zero";
+}
+
+function goMonthActivity(ctx, extra) {
+  const r = monthDateRange(ctx.month);
+  ctx.ui.txFilter = { dateFrom: r.from, dateTo: r.to, ...extra };
+  ctx.go("transactions");
+}
+
+function openNotePeek(ctx, cat, monthNote, persistentNote) {
+  const touch = window.matchMedia?.("(hover: none)")?.matches || isTouchUi();
+  if (touch) {
+    openSheet({
+      title: `📝 ${cat.name}`,
+      closeLabel: "Discard",
+      body: (host) => {
+        if (monthNote) {
+          host.append(h("div", { class: "bud-note-k", text: "This Month" }));
+          host.append(h("div", { class: "bud-note-v", text: monthNote }));
+        }
+        if (persistentNote) {
+          host.append(h("div", { class: "bud-note-k", text: "Category" }));
+          host.append(h("div", { class: "bud-note-v", text: persistentNote }));
+        }
+      },
+    });
+    return;
+  }
+}
+
 export function renderBudget(root, ctx) {
   const budget = ctx.budget();
   if (!budget) { root.append(h("p", { text: "No budget selected." })); return; }
@@ -204,23 +257,66 @@ export function renderBudget(root, ctx) {
     ));
   }
 
-  const groups = h("div", { class: "groups" });
+  const groups = h("div", { class: "bud-groups" });
   for (const g of budget.categoryGroups || []) {
-    const cats = (budget.categories || []).filter((c) => c.groupId === g.id && (ctx.ui.showArchived || !c.archived));
+    const cats = (budget.categories || []).filter((c) => c.groupId === g.id && !c.archived);
     if (!cats.length && g.name === "Uncategorized") continue;
     const open = !collapsed[g.id];
-    const gAvail = cats.reduce((s, c) => s + Number(snap.available[c.id] || 0), 0);
-    const sec = h("section", { class: "group" });
-    const gCls = gAvail < -0.005 ? "neg" : gAvail > 0.005 ? "pos" : "zero";
-    sec.append(h("button", { class: "group-h", type: "button", onclick: () => { collapsed[g.id] = !collapsed[g.id]; ctx.render(); } },
-      h("span", { class: "chev", text: open ? "▾" : "▸" }),
-      h("span", { class: "grow", text: g.name }),
-      h("span", { class: `num ${gCls}`, text: fmt(gAvail) }),
-    ));
+    const gB = cats.reduce((s, c) => s + Number(snap.budgeted[c.id] || 0), 0);
+    const gA = cats.reduce((s, c) => s + Number(snap.activity[c.id] || 0), 0);
+    const gAv = cats.reduce((s, c) => s + Number(snap.available[c.id] || 0), 0);
+    const sec = h("section", { class: "bud-group" });
+    const gHead = h("div", { class: "bud-group-h " + budgetGridClass() });
+    const nameBtn = h("button", {
+      class: "bud-group-name",
+      type: "button",
+      onclick: () => { collapsed[g.id] = !collapsed[g.id]; ctx.render(); },
+    }, h("span", { class: "bud-chev", text: open ? "▼" : "▶" }), g.name);
+    gHead.append(nameBtn);
+    gHead.append(h("div", { class: `bud-gval ${gB ? "" : "zero"}`, text: fmt(gB) }));
+    if (showAct) {
+      const actEl = h("div", {
+        class: `bud-gval ${activityClass(gA)}`,
+        text: fmtActivity(gA),
+      });
+      if (Math.abs(gA) > 0.005) {
+        actEl.classList.add("linkish");
+        actEl.addEventListener("click", (e) => { e.stopPropagation(); goMonthActivity(ctx, { groupId: g.id }); });
+      }
+      gHead.append(actEl);
+    }
+    gHead.append(h("div", { class: `bud-gval avail ${availableClass(gAv)}`, text: fmt(gAv) }));
+    bindContextMenu(gHead, () => [
+      { label: "✏️ Edit Group", edit: true, onClick: () => openGroup(ctx, g) },
+    ], { readOnly: ro });
+    sec.append(gHead);
     if (open) {
       for (const cat of cats) sec.append(categoryRow(ctx, cat, snap, month, today));
     }
     groups.append(sec);
+  }
+
+  const archivedCats = (budget.categories || []).filter((c) => c.archived);
+  const archivedBox = h("div", { class: "bud-archived" });
+  if (archivedCats.length) {
+    archivedBox.append(h("button", {
+      class: "bud-archived-h",
+      type: "button",
+      onclick: () => { ctx.ui.showArchived = !ctx.ui.showArchived; ctx.render(); },
+    }, h("span", { class: "bud-chev", text: ctx.ui.showArchived ? "▼" : "▶" }), `🗂️ Archived (${archivedCats.length})`));
+    if (ctx.ui.showArchived) {
+      for (const cat of archivedCats) {
+        archivedBox.append(h("div", { class: "bud-archived-row" },
+          h("span", { text: cat.name }),
+          ro ? null : h("button", {
+            class: "bud-restore",
+            type: "button",
+            text: "↩ Restore",
+            onclick: () => ctx.updateBudget((b) => archiveCategory(b, cat.id, month)),
+          }),
+        ));
+      }
+    }
   }
 
   const actSign = totalActivity < 0 ? "+" : "-";
@@ -241,7 +337,7 @@ export function renderBudget(root, ctx) {
     ),
   );
 
-  root.append(h("div", { class: "bud-view" }, tiles, banner, cols, notices, groups, totals));
+  root.append(h("div", { class: "bud-view" }, tiles, banner, cols, notices, groups, archivedBox, totals));
   if (ctx.ui.focusCat) {
     const id = ctx.ui.focusCat;
     ctx.ui.focusCat = null;
@@ -297,69 +393,135 @@ function commitAssigned(ctx, cat, month, val) {
 }
 
 function categoryRow(ctx, cat, snap, month, today) {
+  const budget = ctx.budget();
   const budgeted = Number(snap.budgeted[cat.id] || 0);
   const activity = Number(snap.activity[cat.id] || 0);
   const avail = Number(snap.available[cat.id] || 0);
   const metrics = getGoalMetrics(cat, avail, budgeted, month);
-  const underfunded = !!(metrics && !metrics.complete && ((metrics.type === "monthly" && metrics.underfunded) || (metrics.type === "date" && !metrics.onTrack) || (metrics.type === "savings" && avail < (metrics.target || 0) - 0.005)));
-  const avg = trailingAvg(ctx.budget(), cat.id, month);
-  const note = noteOf(ctx.budget(), month, cat);
-  const row = h("article", { class: `cat ${avail < -0.005 ? "over" : ""} ${underfunded ? "under" : ""} ${cat.archived ? "archived" : ""}` });
-  const title = h("button", { class: "cat-name", type: "button", text: cat.name, onclick: () => openCategory(ctx, cat) });
-  const flag = underfunded ? h("span", { class: "goal-flag", text: "Under" }) : null;
-  const subBits = [];
-  if (metrics) {
-    subBits.push(metrics.type === "monthly"
-      ? (metrics.underfunded ? `Needs ${fmt(metrics.needed)}` : "Funded")
-      : metrics.type === "date"
-        ? (metrics.complete ? "Goal reached" : metrics.expired ? "Date passed" : `${fmt(metrics.monthlyNeeded)} a month`)
-        : `${Math.round(metrics.progress || 0)}% saved`);
+  const monthNote = noteOf(budget, month, cat);
+  const persistentNote = cat.note || "";
+  const hasNote = !!(monthNote || persistentNote);
+  const returned = catReturned(budget, cat, month, budget.monthlyBudgets || {}, budget.inflows || {});
+  const ro = ctx.readOnly();
+  const showAct = showActivityCol();
+  const hintOn = ctx.ui.avgHintCatId === cat.id;
+
+  const wrap = h("div", { class: "bud-cat" });
+  const row = h("div", { class: "bud-cat-row " + budgetGridClass() });
+
+  const nameCell = h("div", { class: "bud-cat-name" });
+  const nameBtn = h("button", {
+    class: "bud-cat-label",
+    type: "button",
+    text: cat.name,
+    onclick: () => {
+      if (cat.creditCardId) return;
+      ctx.ui.avgHintCatId = hintOn ? null : cat.id;
+      ctx.render();
+    },
+  });
+  nameCell.append(nameBtn);
+  if (hasNote) {
+    const ico = h("span", { class: "bud-note-ico", text: "📝", role: "button", tabindex: "0" });
+    const showTip = () => {
+      if (window.matchMedia?.("(hover: none)")?.matches || isTouchUi()) {
+        openNotePeek(ctx, cat, monthNote, persistentNote);
+        return;
+      }
+      ico.querySelector(".bud-note-tip")?.remove();
+      const tip = h("div", { class: "bud-note-tip" });
+      if (monthNote) {
+        tip.append(h("div", { class: "bud-note-k", text: "THIS MONTH" }));
+        tip.append(h("div", { class: "bud-note-v", text: monthNote }));
+      }
+      if (persistentNote) {
+        tip.append(h("div", { class: "bud-note-k", text: "CATEGORY" }));
+        tip.append(h("div", { class: "bud-note-v", text: persistentNote }));
+      }
+      ico.append(tip);
+    };
+    const hideTip = (e) => {
+      if (e && e.relatedTarget && ico.contains(e.relatedTarget)) return;
+      ico.querySelector(".bud-note-tip")?.remove();
+    };
+    ico.addEventListener("click", (e) => { e.stopPropagation(); showTip(); });
+    ico.addEventListener("mouseenter", () => { if (!(window.matchMedia?.("(hover: none)")?.matches || isTouchUi())) showTip(); });
+    ico.addEventListener("mouseleave", hideTip);
+    nameCell.append(ico);
   }
-  if (avg) subBits.push(`avg ${fmt(avg.avg)}`);
-  const sub = (subBits.length || note || cat.note)
-    ? h("div", { class: "cat-sub" },
-      subBits.length ? h("span", { text: subBits.join(" · ") }) : null,
-      (note || cat.note) ? h("button", { class: "text-link note-link", type: "button", text: "Note", onclick: () => openNote(ctx, cat) }) : null,
-    )
-    : null;
+  if (cat.goal?.type && !metrics?.complete) nameCell.append(h("span", { class: "bud-ico", text: "🎯" }));
+  if (metrics?.complete) nameCell.append(h("span", { class: "bud-ico", text: "✅" }));
+  if (metrics?.type === "monthly") {
+    nameCell.append(h("span", { class: `bud-goal-m ${metrics.underfunded ? "warn" : "ok"}`, text: metrics.underfunded ? `⚠️ ${fmt(metrics.needed)}` : "✓" }));
+  }
+  if (metrics?.type === "date" && !metrics.complete) {
+    nameCell.append(h("span", { class: `bud-goal-m ${metrics.onTrack ? "ok" : "warn"}`, text: metrics.onTrack ? "✓" : `⚠️ ${fmt(metrics.monthlyNeeded)}/mo` }));
+  }
+  if (metrics?.type === "savings" && !metrics.complete) {
+    nameCell.append(h("span", { class: "bud-goal-m sav", text: `${Math.round(metrics.progress)}%` }));
+  }
+  if (returned > 0.005) nameCell.append(h("span", { class: "bud-returned", text: `↩ ${fmt(returned)}` }));
+  row.append(nameCell);
 
-  const bBtn = h("button", { class: `num-btn fig ${budgeted ? "" : "zero"}`, type: "button", onclick: () => {
-    openAmountPad({
-      title: cat.name,
-      value: budgeted,
-      allowNegative: true,
-      onCommit: (val) => commitAssigned(ctx, cat, month, val),
+  const amtCell = h("div", { class: "bud-cell right", onclick: (e) => e.stopPropagation() });
+  const built = amountInput({
+    value: budgeted,
+    allowNegative: true,
+    disabled: ro,
+    label: cat.name,
+    onCommit: (val) => commitAssigned(ctx, cat, month, val),
+  });
+  const inp = built.matches?.("input.amount-input") ? built : (built.querySelector?.("input") || built);
+  inp.classList.add("bud-amt");
+  if (!budgeted) inp.classList.add("zero");
+  amtCell.append(inp);
+  row.append(amtCell);
+
+  if (showAct) {
+    const hasA = Math.abs(activity) > 0.005;
+    const act = h(hasA ? "button" : "div", {
+      class: `bud-cell right bud-act ${activityClass(activity)}`,
+      type: hasA ? "button" : undefined,
+      text: fmtActivity(activity),
+      onclick: hasA ? (e) => { e.stopPropagation(); goMonthActivity(ctx, { categoryId: cat.id }); } : undefined,
     });
-  }});
-  bBtn.append(h("span", { class: "fig-k", text: "Assigned" }), h("span", { class: "fig-n", text: fmt(budgeted) }));
+    row.append(act);
+  }
 
-  const actCls = activity > 0.005 ? "num-btn fig neg" : activity < -0.005 ? "num-btn fig pos" : "num-btn fig zero";
-  const actText = activity > 0.005 || activity < -0.005 ? fmt(-activity) : fmt(0);
-  const avCls = avail < -0.005 ? "num-btn avail neg" : avail > 0.005 ? "num-btn avail pos" : "num-btn avail zero";
-  const bar = metrics && (metrics.type === "savings" || metrics.type === "date")
-    ? h("div", { class: "goal-bar" }, h("span", { style: `width:${Math.max(0, Math.min(100, metrics.complete ? 100 : (metrics.progress != null ? metrics.progress : (metrics.target ? (avail / metrics.target) * 100 : 0))))}%` }))
-    : null;
+  const isPos = avail > 0.005, isNeg = avail < -0.005;
+  const av = h((isPos || isNeg) && !ro ? "button" : "div", {
+    class: `bud-cell right bud-avail ${availableClass(avail)}`,
+    type: (isPos || isNeg) && !ro ? "button" : undefined,
+    text: fmt(avail),
+    onclick: (isPos || isNeg) && !ro ? (e) => {
+      e.stopPropagation();
+      if (isPos) openMove(ctx, cat.id, null);
+      else openMove(ctx, null, cat.id);
+    } : undefined,
+  });
+  row.append(av);
+  wrap.append(row);
 
-  const availControl = Math.abs(avail) < 0.005
-    ? h("div", { class: avCls }, h("span", { class: "fig-n", text: fmt(avail) }))
-    : h("button", { class: avCls, type: "button", onclick: () => {
-      if (avail < -0.005) openMove(ctx, null, cat.id);
-      else openMove(ctx, cat.id, null);
-    } }, h("span", { class: "fig-n", text: fmt(avail) }));
+  if (hintOn && !cat.creditCardId) {
+    const ta = trailingAvg(budget, cat.id, month);
+    if (ta) {
+      const over = ta.avg > budgeted + 0.005;
+      wrap.append(h("div", { class: "bud-hint" },
+        h("span", { text: `📊 ${ta.monthsUsed}-mo avg spend:` }),
+        h("span", { class: over ? "warn" : "ok", text: `${fmt(ta.avg)}/mo` }),
+        h("span", { class: "muted", text: `· budgeted ${fmt(budgeted)}` }),
+        over ? h("span", { class: "warn", text: `⚠️ under by ${fmt(ta.avg - budgeted)}` }) : null,
+      ));
+    }
+  }
 
-  row.append(
-    h("div", { class: "cat-id" }, h("div", { class: "cat-title" }, title, flag), sub),
-    availControl,
-    h("div", { class: "cat-figs" },
-      bBtn,
-      h("button", { class: actCls, type: "button", onclick: () => ctx.go("transactions", { categoryId: cat.id, month }) },
-        h("span", { class: "fig-k", text: "Activity" }),
-        h("span", { class: "fig-n", text: actText }),
-      ),
-    ),
-  );
-  if (bar) row.append(bar);
-  return row;
+  bindContextMenu(wrap, () => [
+    { label: "⚙️ Category Settings", edit: true, onClick: () => openCategory(ctx, cat) },
+    { label: cat.archived ? "↩ Restore Category" : "🗂 Archive Category", edit: true, onClick: () => ctx.updateBudget((b) => archiveCategory(b, cat.id, month)) },
+    { label: "📝 Add Note for This Month", edit: true, onClick: () => openNote(ctx, cat) },
+    { label: "📊 View Activity", onClick: () => goMonthActivity(ctx, { categoryId: cat.id }) },
+  ], { readOnly: ro });
+  return wrap;
 }
 
 function openMove(ctx, fromId, toId) {
