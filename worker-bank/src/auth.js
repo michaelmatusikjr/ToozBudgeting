@@ -8,6 +8,7 @@
 import { randomToken, sha256Hex, safeEqual, verifyRs256, jwtHeader, sealToken, openToken } from "./crypto.js";
 import { HttpError, now, readJson, meta, setMeta } from "./http.js";
 import { ROLES, can, parseScopes } from "./roles.js";
+import { appUrl as appUrlFor, APPS } from "./apps.js";
 
 export const GOOGLE_CERTS_URL = "https://www.googleapis.com/oauth2/v3/certs";
 const GOOGLE_ISS = new Set(["accounts.google.com", "https://accounts.google.com"]);
@@ -188,8 +189,9 @@ export async function signInGoogle(env, req, fetchImpl) {
 
 const STATE_MS = 10 * 60000;
 
-function appUrl(env) {
-  return String(env.APP_URL || "https://michaelmatusikjr.github.io/ToozBudgeting/");
+/** Where a redirect sign-in returns: ToozBudgeting, or another household app (src/apps.js) named at /auth/google/start?app=. */
+function appUrl(env, app = null) {
+  return app && APPS[app] ? appUrlFor(env, app) : String(env.APP_URL || "https://michaelmatusikjr.github.io/ToozBudgeting/");
 }
 function publicBase(env, req) {
   return String(env.PUBLIC_URL || new URL(req.url).origin).replace(/\/+$/, "");
@@ -203,9 +205,11 @@ function publicBase(env, req) {
  */
 export async function signInStart(env, req) {
   const id = clientIds(env)[0];
-  if (!id) return Response.redirect(appUrl(env) + "#signin-error=" + encodeURIComponent("Google sign-in isn’t set up on the server yet") + "&signin-code=NOT_CONFIGURED", 303);
+  const appParam = new URL(req.url).searchParams.get("app");
+  const app = appParam && APPS[appParam] ? appParam : null;
+  if (!id) return Response.redirect(appUrl(env, app) + "#signin-error=" + encodeURIComponent("Google sign-in isn’t set up on the server yet") + "&signin-code=NOT_CONFIGURED", 303);
   const nonce = randomToken(16);
-  const state = await sealToken(env.TOKEN_ENC_KEY, "oidc-state", JSON.stringify({ nonce, exp: now() + STATE_MS }));
+  const state = await sealToken(env.TOKEN_ENC_KEY, "oidc-state", JSON.stringify({ nonce, exp: now() + STATE_MS, ...(app ? { app } : {}) }));
   const q = new URLSearchParams({
     client_id: id,
     redirect_uri: publicBase(env, req) + "/auth/google/redirect",
@@ -226,13 +230,18 @@ export async function signInStart(env, req) {
  * Failures come back as #signin-error=<message>&signin-code=<CODE>.
  */
 export async function signInRedirect(env, req, fetchImpl) {
-  const back = (frag) => Response.redirect(appUrl(env) + "#" + frag, 303);
+  let target = appUrl(env);
+  const back = (frag) => Response.redirect(target + "#" + frag, 303);
   let fields = null;
   try {
     let form;
     try { form = await req.formData(); }
     catch { throw fail(400, "BAD_FORM", "Google’s reply couldn’t be read. Try again."); }
     fields = [...new Set([...form.keys()])].slice(0, 12).join(",");
+    // The sealed state names the app that started the sign-in (only apps in APPS; never a free URL).
+    if (form.get("state")) {
+      try { const peek = JSON.parse(await openToken(env.TOKEN_ENC_KEY, "oidc-state", String(form.get("state")))); if (peek?.app) target = appUrl(env, peek.app); } catch { /* checked below */ }
+    }
     const err = form.get("error");
     if (err) throw fail(401, "GOOGLE_" + String(err).toUpperCase().replace(/[^A-Z_]/g, "").slice(0, 30), err === "access_denied" ? "Sign-in was canceled" : "Google couldn’t finish the sign-in. Try again.");
     const idToken = form.get("id_token");
@@ -424,6 +433,7 @@ export async function removeMember(env, session, userId) {
   await env.DB.batch([
     env.DB.prepare("DELETE FROM memberships WHERE household_id = ? AND user_id = ?").bind(session.householdId, userId),
     env.DB.prepare("DELETE FROM sessions WHERE household_id = ? AND user_id = ?").bind(session.householdId, userId),
+    env.DB.prepare("DELETE FROM app_prefs WHERE household_id = ? AND user_id = ?").bind(session.householdId, userId),
   ]);
   return self ? { ok: true } : listMembers(env, session);
 }

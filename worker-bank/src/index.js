@@ -18,8 +18,9 @@ import {
   listMembers, createInvite, revokeInvite, updateMember, removeMember, renameHousehold, signInReady, ownerEmailCount, signInStart, lastSignInError,
 } from "./auth.js";
 import { push, pull } from "./sync.js";
+import { appStatus, appKeys, setAppLink, removeAppLink, getPrefs, setPrefs } from "./apps.js";
 
-const VERSION = "2.0.1";
+const VERSION = "2.1.0";
 const DEFAULT_CAP = 10;
 const CHUNK = 400;
 const SYNC_LOCK_MS = 5 * 60000;
@@ -500,6 +501,12 @@ export function makeHandler({ fetchImpl } = {}) {
       else if (path === "/bank/sync" && m === "POST") out = await syncNow(env, req, plaid, s);
       else if (path === "/bank/inbox" && m === "GET") out = await inbox(env, s);
       else if (path === "/bank/ack" && m === "POST") out = await ack(env, req, s);
+      else if (/^\/apps\/[\w-]+$/.test(path) && m === "GET") out = await appStatus(env, s, path.split("/")[2]);
+      else if (/^\/apps\/[\w-]+\/keys$/.test(path) && m === "GET") out = await appKeys(env, s, path.split("/")[2]);
+      else if (/^\/apps\/[\w-]+\/link$/.test(path) && m === "POST") out = await setAppLink(env, req, s, path.split("/")[2]);
+      else if (/^\/apps\/[\w-]+\/link$/.test(path) && m === "DELETE") out = await removeAppLink(env, s, path.split("/")[2]);
+      else if (/^\/apps\/[\w-]+\/prefs$/.test(path) && m === "GET") out = await getPrefs(env, s, path.split("/")[2]);
+      else if (/^\/apps\/[\w-]+\/prefs$/.test(path) && m === "POST") out = await setPrefs(env, req, s, path.split("/")[2]);
       else throw new HttpError(404, "Not found");
       return json(out, 200, cors);
     } catch (e) {

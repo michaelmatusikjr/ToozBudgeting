@@ -120,3 +120,22 @@ CREATE TABLE IF NOT EXISTS attempts (
   at INTEGER
 );
 CREATE INDEX IF NOT EXISTS attempts_ip ON attempts (ip, at);
+-- Other household apps (src/apps.js). Daily Tracker's linked account keys, sealed with TOKEN_ENC_KEY.
+CREATE TABLE IF NOT EXISTS app_links (
+  household_id TEXT NOT NULL,
+  app TEXT NOT NULL,
+  sealed TEXT NOT NULL,
+  label TEXT,
+  updated_by TEXT,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (household_id, app)
+);
+-- Each person's small per-app preferences (Daily Tracker: which profile is theirs).
+CREATE TABLE IF NOT EXISTS app_prefs (
+  household_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  app TEXT NOT NULL,
+  prefs TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (household_id, user_id, app)
+);
