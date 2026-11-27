@@ -1,10 +1,10 @@
 /** Settings > Household: who's signed in, the people in the household, invites, roles, and sync status. */
-import { h, btn, openSheet, field, textInput, toast, confirmDialog } from "../ui.js?v=140";
+import { h, btn, openSheet, field, textInput, toast, confirmDialog } from "../ui.js?v=151";
 import {
   account, renderGoogleButton, signOut, listMembers, invite, revokeInvite, setMember, removeMember, setMyName,
   renameHousehold, refreshMe, ROLE_LABEL, ROLE_HINT,
-} from "../account.js?v=140";
-import { syncNow, syncStatus, preSyncBackup } from "../sync.js?v=140";
+} from "../account.js?v=151";
+import { syncNow, syncStatus, preSyncBackup } from "../sync.js?v=151";
 
 const APP_LINK = "https://michaelmatusikjr.github.io/ToozBudgeting/";
 

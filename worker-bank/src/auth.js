@@ -44,27 +44,46 @@ async function googleKeys(env, fetchImpl, force = false) {
   return keys;
 }
 
-export async function verifyGoogleIdToken(env, fetchImpl, idToken) {
+/** A sign-in failure with a short reason code the app shows, e.g. "That sign-in expired. (EXPIRED)". */
+const fail = (status, code, message) => new HttpError(status, message, { code });
+
+export async function verifyGoogleIdToken(env, fetchImpl, idToken, { nonce = null } = {}) {
   const auds = clientIds(env);
-  if (!auds.length) throw new HttpError(503, "Google sign-in isn’t set up on the server yet");
+  if (!auds.length) throw fail(503, "NOT_CONFIGURED", "Google sign-in isn’t set up on the server yet");
+  if (!idToken) throw fail(401, "NO_CREDENTIAL", "Google didn’t send a sign-in. Try again.");
   let header;
-  try { header = jwtHeader(idToken); } catch { throw new HttpError(401, "That sign-in didn’t look right. Try again."); }
-  if (header.alg !== "RS256" || !header.kid) throw new HttpError(401, "That sign-in didn’t look right. Try again.");
-  let keys = await googleKeys(env, fetchImpl);
+  try { header = jwtHeader(idToken); } catch { throw fail(401, "BAD_TOKEN", "That sign-in didn’t look right. Try again."); }
+  if (header.alg !== "RS256" || !header.kid) throw fail(401, "BAD_ALG", "That sign-in didn’t look right. Try again.");
+  let keys;
+  try { keys = await googleKeys(env, fetchImpl); } catch (e) { throw e instanceof HttpError ? fail(502, "JWKS_UNREACHABLE", e.message) : fail(502, "JWKS_UNREACHABLE", "Couldn’t reach Google to check the sign-in"); }
   let jwk = keys.find((k) => k.kid === header.kid);
   if (!jwk) { keys = await googleKeys(env, fetchImpl, true); jwk = keys.find((k) => k.kid === header.kid); }
-  if (!jwk) throw new HttpError(401, "Google’s sign-in key wasn’t recognized. Try again.");
+  if (!jwk) throw fail(401, "UNKNOWN_KEY", "Google’s sign-in key wasn’t recognized. Try again.");
   let p;
-  try { p = await verifyRs256(idToken, jwk); } catch { throw new HttpError(401, "That sign-in couldn’t be verified"); }
+  try { p = await verifyRs256(idToken, jwk); } catch { throw fail(401, "BAD_SIGNATURE", "That sign-in couldn’t be verified"); }
   const t = Math.floor(now() / 1000);
-  if (!GOOGLE_ISS.has(p.iss)) throw new HttpError(401, "That sign-in isn’t from Google");
+  if (!GOOGLE_ISS.has(p.iss)) throw fail(401, "WRONG_ISSUER", "That sign-in isn’t from Google");
   const aud = Array.isArray(p.aud) ? p.aud : [p.aud];
-  if (!aud.some((a) => auds.includes(a))) throw new HttpError(401, "That sign-in was for a different app");
-  if (!p.exp || p.exp < t - 60) throw new HttpError(401, "That sign-in expired. Try again.");
-  if (p.iat && p.iat > t + 300) throw new HttpError(401, "That sign-in’s clock is off");
-  if (!p.sub) throw new HttpError(401, "That sign-in has no account id");
-  if (!p.email || !(p.email_verified === true || p.email_verified === "true")) throw new HttpError(403, "Your Google email isn’t verified");
+  if (!aud.some((a) => auds.includes(a))) throw fail(401, "WRONG_AUDIENCE", "That sign-in was for a different app");
+  if (!p.exp || p.exp < t - 60) throw fail(401, "EXPIRED", "That sign-in expired. Try again.");
+  if (p.iat && p.iat > t + 300) throw fail(401, "CLOCK", "That sign-in’s clock is off");
+  if (nonce !== null && !(await safeEqual(String(p.nonce || ""), nonce))) throw fail(401, "BAD_NONCE", "That sign-in didn’t match this request. Try again.");
+  if (!p.sub) throw fail(401, "NO_SUB", "That sign-in has no account id");
+  if (!p.email || !(p.email_verified === true || p.email_verified === "true")) throw fail(403, "EMAIL_UNVERIFIED", "Your Google email isn’t verified");
   return { sub: String(p.sub), email: lc(p.email), name: String(p.name || p.given_name || p.email).slice(0, 80), picture: p.picture ? String(p.picture).slice(0, 500) : null };
+}
+
+/** Remember the last sign-in failure (reason code and form field names only, never tokens) for /health and debugging. */
+const noted = new WeakSet();
+async function noteSignInFailure(env, info, err = null) {
+  if (err && typeof err === "object") { if (noted.has(err)) return; noted.add(err); }
+  try {
+    console.log("signin_failure", JSON.stringify(info));
+    await setMeta(env, "last_signin_error", JSON.stringify({ at: now(), ...info }));
+  } catch { /* best effort */ }
+}
+export async function lastSignInError(env) {
+  try { return JSON.parse((await meta(env, "last_signin_error")) || "null"); } catch { return null; }
 }
 
 /* ---------- households and membership ---------- */
@@ -134,18 +153,28 @@ async function checkRate(env, req) {
   return ip;
 }
 
-async function signInWithCredential(env, req, fetchImpl, credential, deviceName) {
+async function signInWithCredential(env, req, fetchImpl, credential, deviceName, { nonce = null, via = "popup", fields = null } = {}) {
   const ip = await checkRate(env, req);
   let g;
-  try { g = await verifyGoogleIdToken(env, fetchImpl, String(credential || "")); }
+  try { g = await verifyGoogleIdToken(env, fetchImpl, String(credential || ""), { nonce }); }
   catch (e) {
     if (e instanceof HttpError && e.status === 401) await env.DB.prepare("INSERT INTO attempts (ip, at) VALUES (?, ?)").bind(ip, now()).run();
+    await noteSignInFailure(env, { via, code: e?.extra?.code || "ERROR", fields, ua: uaFamily(req) }, e);
     throw e;
   }
   const user = await upsertUser(env, g);
-  const { membership, joined } = await resolveMembership(env, user);
-  const token = await newSession(env, user, membership.household_id, deviceName);
-  return { token, joined, user };
+  let res;
+  try { res = await resolveMembership(env, user); }
+  catch (e) { await noteSignInFailure(env, { via, code: e?.extra?.code || "ERROR", ua: uaFamily(req) }, e); throw e; }
+  const token = await newSession(env, user, res.membership.household_id, deviceName);
+  return { token, joined: res.joined, user };
+}
+
+function uaFamily(req) {
+  const ua = req.headers.get("User-Agent") || "";
+  const dev = /iPhone/.test(ua) ? "iPhone" : /iPad/.test(ua) ? "iPad" : /Android/.test(ua) ? "Android" : /Mac/.test(ua) ? "Mac" : /Windows/.test(ua) ? "Windows" : "Other";
+  const br = /CriOS|Chrome/.test(ua) ? "Chrome" : /FxiOS|Firefox/.test(ua) ? "Firefox" : /Safari/.test(ua) ? "Safari" : "WebView";
+  return dev + " " + br;
 }
 
 /** POST /auth/google { credential, deviceName } -> { token, me } */
@@ -156,26 +185,78 @@ export async function signInGoogle(env, req, fetchImpl) {
   return { token, joined, me: await meView(env, session) };
 }
 
+
+const STATE_MS = 10 * 60000;
+
 function appUrl(env) {
   return String(env.APP_URL || "https://michaelmatusikjr.github.io/ToozBudgeting/");
 }
+function publicBase(env, req) {
+  return String(env.PUBLIC_URL || new URL(req.url).origin).replace(/\/+$/, "");
+}
 
 /**
- * POST /auth/google/redirect (form post from Google, used by the installed iPhone app where popups don't come back).
+ * GET /auth/google/start: the installed iPhone app's sign-in. A plain top-level navigation to Google's OpenID Connect
+ * page (response_type=id_token, response_mode=form_post), so it doesn't depend on the Sign in with Google script.
+ * Google posts id_token + state back to /auth/google/redirect. The state is sealed with TOKEN_ENC_KEY and carries a
+ * one-time nonce that the ID token has to repeat.
+ */
+export async function signInStart(env, req) {
+  const id = clientIds(env)[0];
+  if (!id) return Response.redirect(appUrl(env) + "#signin-error=" + encodeURIComponent("Google sign-in isn’t set up on the server yet") + "&signin-code=NOT_CONFIGURED", 303);
+  const nonce = randomToken(16);
+  const state = await sealToken(env.TOKEN_ENC_KEY, "oidc-state", JSON.stringify({ nonce, exp: now() + STATE_MS }));
+  const q = new URLSearchParams({
+    client_id: id,
+    redirect_uri: publicBase(env, req) + "/auth/google/redirect",
+    response_type: "id_token",
+    response_mode: "form_post",
+    scope: "openid email profile",
+    prompt: "select_account",
+    nonce, state,
+  });
+  return Response.redirect("https://accounts.google.com/o/oauth2/v2/auth?" + q, 303);
+}
+
+/**
+ * POST /auth/google/redirect (form post from Google). Two senders:
+ * - Google's OpenID page after /auth/google/start: id_token + state (nonce checked), or error=...
+ * - the Sign in with Google button in redirect mode: credential (+ g_csrf_token).
  * Signs in, then sends the browser back to the app with a one-time code it trades for the session token.
+ * Failures come back as #signin-error=<message>&signin-code=<CODE>.
  */
 export async function signInRedirect(env, req, fetchImpl) {
   const back = (frag) => Response.redirect(appUrl(env) + "#" + frag, 303);
+  let fields = null;
   try {
-    const form = await req.formData();
-    const { token } = await signInWithCredential(env, req, fetchImpl, form.get("credential"), "Installed app");
+    let form;
+    try { form = await req.formData(); }
+    catch { throw fail(400, "BAD_FORM", "Google’s reply couldn’t be read. Try again."); }
+    fields = [...new Set([...form.keys()])].slice(0, 12).join(",");
+    const err = form.get("error");
+    if (err) throw fail(401, "GOOGLE_" + String(err).toUpperCase().replace(/[^A-Z_]/g, "").slice(0, 30), err === "access_denied" ? "Sign-in was canceled" : "Google couldn’t finish the sign-in. Try again.");
+    const idToken = form.get("id_token");
+    let nonce = null; let via = "gsi-redirect";
+    if (idToken || form.get("state")) {
+      via = "oidc";
+      let st = null;
+      try { st = JSON.parse(await openToken(env.TOKEN_ENC_KEY, "oidc-state", String(form.get("state") || ""))); } catch { st = null; }
+      if (!st || !st.nonce) throw fail(401, "BAD_STATE", "That sign-in link didn’t come from this app. Try again.");
+      if (st.exp < now()) throw fail(401, "STATE_EXPIRED", "That sign-in took too long. Try again.");
+      nonce = st.nonce;
+    }
+    const credential = idToken || form.get("credential");
+    if (!credential) throw fail(401, "NO_CREDENTIAL", "Google didn’t send a sign-in. Try again.");
+    const { token } = await signInWithCredential(env, req, fetchImpl, credential, "Installed app", { nonce, via, fields });
     const code = randomToken(24);
     await env.DB.prepare("INSERT INTO login_codes (code_hash, sealed, expires_at) VALUES (?, ?, ?)")
       .bind(await sha256Hex(code), await sealToken(env.TOKEN_ENC_KEY, "login-code", token), now() + CODE_MS).run();
     return back("signin=" + code);
   } catch (e) {
+    const code = e?.extra?.code || "ERROR";
+    await noteSignInFailure(env, { via: "redirect", code, fields, ua: uaFamily(req) }, e);
     const msg = e instanceof HttpError ? e.message : "Sign-in failed";
-    return back("signin-error=" + encodeURIComponent(msg));
+    return back("signin-error=" + encodeURIComponent(msg) + "&signin-code=" + encodeURIComponent(code));
   }
 }
 
@@ -185,7 +266,7 @@ export async function redeemCode(env, req) {
   const hash = await sha256Hex(String(body.code || ""));
   const row = await env.DB.prepare("SELECT * FROM login_codes WHERE code_hash = ?").bind(hash).first();
   await env.DB.prepare("DELETE FROM login_codes WHERE code_hash = ? OR expires_at < ?").bind(hash, now()).run();
-  if (!row || row.expires_at < now()) throw new HttpError(401, "That sign-in link expired. Sign in again.");
+  if (!row || row.expires_at < now()) throw new HttpError(401, "That sign-in link expired. Sign in again.", { code: "CODE_EXPIRED" });
   const token = await openToken(env.TOKEN_ENC_KEY, "login-code", row.sealed);
   const session = await sessionFromToken(env, token);
   return { token, me: await meView(env, session) };

@@ -41,7 +41,7 @@ test("link token: webhook, redirect, transactions, and the redirect fallback", a
   assert.equal(r.data.linkToken, "link-production-abc");
   assert.equal(r.data.oauthRedirect, true);
   const sent = t.plaid.calls.at(-1).body;
-  assert.equal(sent.webhook, BASE + "/bank/webhook");
+  assert.equal(sent.webhook, BASE + "/plaid/webhook");
   assert.deepEqual(sent.products, ["transactions"]);
   assert.equal(sent.redirect_uri, t.env.REDIRECT_URI);
   assert.equal(sent.transactions.days_requested, 30);

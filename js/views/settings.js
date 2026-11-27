@@ -1,14 +1,14 @@
-import { h, btn, openSheet, field, textInput, toast, confirmDialog } from "../ui.js?v=140";
-import { APP_VERSION, toTitleCase, uid } from "../util.js?v=140";
-import { exportData, deviceGet, deviceSet, importData } from "../store.js?v=140";
-import { freshBudgetShell, copyCategories, addAccount, addCreditCard } from "../mutate.js?v=140";
-import { pushConfig, setPushConfig, pushStatus, enablePush, disablePush, DEFAULTS, syncSchedule } from "../push.js?v=140";
-import { requestPermission, scheduleLocal } from "../notify.js?v=140";
-import { isIOS, isStandalone, canInstall, promptInstall } from "../pwa.js?v=140";
-import { openWhatsNew } from "../whatsnew.js?v=140";
-import { THEMES, paintTheme, deriveCustom, resolveTheme, customFrom } from "../theme.js?v=140";
-import { bankSection, openBankSheet } from "./bank.js?v=140";
-import { householdSection } from "./household.js?v=140";
+import { h, btn, openSheet, field, textInput, toast, confirmDialog } from "../ui.js?v=151";
+import { APP_VERSION, toTitleCase, uid } from "../util.js?v=151";
+import { exportData, deviceGet, deviceSet, importData } from "../store.js?v=151";
+import { freshBudgetShell, copyCategories, addAccount, addCreditCard } from "../mutate.js?v=151";
+import { pushConfig, setPushConfig, pushStatus, enablePush, disablePush, DEFAULTS, syncSchedule } from "../push.js?v=151";
+import { requestPermission, scheduleLocal } from "../notify.js?v=151";
+import { isIOS, isStandalone, canInstall, promptInstall } from "../pwa.js?v=151";
+import { openWhatsNew } from "../whatsnew.js?v=151";
+import { THEMES, paintTheme, deriveCustom, resolveTheme, customFrom } from "../theme.js?v=151";
+import { bankSection, openBankSheet } from "./bank.js?v=151";
+import { householdSection } from "./household.js?v=151";
 
 export async function renderSettings(root, ctx) {
   const budget = ctx.budget();
@@ -114,9 +114,11 @@ export async function renderSettings(root, ctx) {
     btn("Push server", { kind: "quiet", block: true, onClick: () => editPush(ctx, cfg) }),
   ]);
   root.append(notif);
-  if (!user?.account) root.append(section("Account on this device", [
-    h("p", { text: user ? `${user.displayName}${user.isGuest ? " · guest" : ""}` : "Signed out" }),
-    user && !user.isGuest ? null : btn("Add email and password", { kind: "ghost", block: true, onClick: () => upgrade(ctx, user) }),
+  // Google sign-in replaces the old on-device accounts: once signed in, this section is gone (Household shows who you are).
+  // Before that, it only names the local profile and points to Google, instead of asking for an email and password.
+  if (!user?.account && !ctx.account?.token) root.append(section("Profile on this device", [
+    h("p", { text: user ? `${user.displayName}${user.isGuest ? " · guest" : ""} · only on this device` : "Signed out" }),
+    h("p", { class: "hint", text: "To use the same budget on every phone and share it with your household, use Sign in with Google under Household above." }),
     btn("Log out", { kind: "danger", block: true, onClick: () => confirmDialog({
       title: "Log out?",
       message: "This ends the session on this device. The budget stays here so you can log in again.",
@@ -266,7 +268,7 @@ function importFile(ctx) {
     const f = input.files?.[0]; if (!f) return;
     try {
       const parsed = JSON.parse(await f.text());
-      ctx.restore(parsed.budgets ? (await import("../store.js?v=140")).importData(parsed) : parsed);
+      ctx.restore(parsed.budgets ? (await import("../store.js?v=151")).importData(parsed) : parsed);
       toast("Imported");
     } catch (e) { toast(e.message || "Couldn’t import that file"); }
   });

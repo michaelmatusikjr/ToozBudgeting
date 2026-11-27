@@ -1,22 +1,22 @@
-import { APP_VERSION, monthKey, prevMonth, nextMonth, deepClone } from "./util.js?v=140";
-import { loadState, saveState, subscribe, exportData, importData, deviceGet, deviceSet } from "./store.js?v=140";
-import { h, clear, icon, toast, closeAllModals, btn } from "./ui.js?v=140";
-import { renderIdentity, renderWizard, renderLoading } from "./views/gate.js?v=140";
-import { renderBudget, openInbox } from "./views/budget.js?v=140";
-import { renderTransactions, openTx } from "./views/transactions.js?v=140";
-import { renderAccounts } from "./views/accounts.js?v=140";
-import { renderPayees } from "./views/payees.js?v=140";
-import { renderSettings } from "./views/settings.js?v=140";
-import { registerSW, activateWaiting } from "./pwa.js?v=140";
-import { scheduleLocal, collectReminders } from "./notify.js?v=140";
-import { pushOnOpen } from "./push.js?v=140";
-import { bankOnOpen } from "./banksync.js?v=140";
-import { normalizeBudget } from "./mutate.js?v=140";
-import { announceIfUpdated } from "./whatsnew.js?v=140";
-import { paintTheme, resolveTheme } from "./theme.js?v=140";
-import { monthAccessible } from "./calc.js?v=140";
-import { account, redeemSignInCode, onAccountChange, signOut } from "./account.js?v=140";
-import { startAutoSync, syncSoon, syncNow, syncStatus, onSyncChange } from "./sync.js?v=140";
+import { APP_VERSION, monthKey, prevMonth, nextMonth, deepClone } from "./util.js?v=151";
+import { loadState, saveState, subscribe, exportData, importData, deviceGet, deviceSet } from "./store.js?v=151";
+import { h, clear, icon, toast, closeAllModals, btn } from "./ui.js?v=151";
+import { renderIdentity, renderWizard, renderLoading } from "./views/gate.js?v=151";
+import { renderBudget, openInbox } from "./views/budget.js?v=151";
+import { renderTransactions, openTx } from "./views/transactions.js?v=151";
+import { renderAccounts } from "./views/accounts.js?v=151";
+import { renderPayees } from "./views/payees.js?v=151";
+import { renderSettings } from "./views/settings.js?v=151";
+import { registerSW, activateWaiting } from "./pwa.js?v=151";
+import { scheduleLocal, collectReminders } from "./notify.js?v=151";
+import { pushOnOpen } from "./push.js?v=151";
+import { bankOnOpen } from "./banksync.js?v=151";
+import { normalizeBudget } from "./mutate.js?v=151";
+import { announceIfUpdated } from "./whatsnew.js?v=151";
+import { paintTheme, resolveTheme } from "./theme.js?v=151";
+import { monthAccessible } from "./calc.js?v=151";
+import { account, redeemSignInCode, onAccountChange, signOut, withCode } from "./account.js?v=151";
+import { startAutoSync, syncSoon, syncNow, syncStatus, onSyncChange } from "./sync.js?v=151";
 
 const root = document.getElementById("app");
 const undoStack = [];
@@ -297,13 +297,18 @@ window.addEventListener("hashchange", () => { closeAllModals(); applyHash(); ctx
 
 /** Back from Google on the installed iPhone app: #signin=<one-time code> or #signin-error=<message>. */
 async function finishRedirectSignIn() {
-  const m = /^#signin=([\w-]+)/.exec(location.hash);
-  const e = /^#signin-error=(.*)$/.exec(location.hash);
-  if (!m && !e) return null;
+  const hash = location.hash.replace(/^#/, "");
+  if (!/^signin(-error)?=/.test(hash)) return null;
+  const q = new URLSearchParams(hash);
   history.replaceState(null, "", location.pathname + location.search);
-  if (e) { setTimeout(() => toast(decodeURIComponent(e[1]) || "Sign-in failed", { ms: 7000 }), 300); return null; }
-  try { return await redeemSignInCode(m[1]); }
-  catch (x) { setTimeout(() => toast(x.message, { ms: 7000 }), 300); return null; }
+  const code = q.get("signin");
+  if (!code) {
+    const msg = withCode(q.get("signin-error") || "Sign-in failed", q.get("signin-code") || "ERROR");
+    setTimeout(() => toast(msg, { ms: 9000 }), 300);
+    return null;
+  }
+  try { return await redeemSignInCode(code); }
+  catch (x) { setTimeout(() => toast(withCode(x.message, x.code || "REDEEM"), { ms: 9000 }), 300); return null; }
 }
 
 async function boot() {
