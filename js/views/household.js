@@ -1,7 +1,7 @@
 /** Settings > Household: who's signed in, the people in the household, invites, roles, and sync status. */
 import { h, btn, openSheet, field, textInput, toast, confirmDialog } from "../ui.js?v=154";
 import {
-  account, renderGoogleButton, signOut, listMembers, invite, revokeInvite, setMember, removeMember, setMyName,
+  account, listMembers, invite, revokeInvite, setMember, removeMember, setMyName,
   renameHousehold, refreshMe, ROLE_LABEL, ROLE_HINT, shareInvite, inviteMessage,
 } from "../account.js?v=154";
 import { syncNow, syncStatus, preSyncBackup } from "../sync.js?v=154";
@@ -38,15 +38,8 @@ function when(ts) { return ts ? new Date(ts).toLocaleString() : "not yet"; }
 export async function householdSection(ctx) {
   const a = await account();
   if (!a?.token) {
-    const host = h("div", { class: "gsi-host" });
-    const err = h("p", { class: "error", text: a?.signedOutReason || "" });
-    setTimeout(() => renderGoogleButton(host, {
-      onSignedIn: (acct) => ctx.accountSignedIn(acct),
-      onError: (m) => { err.textContent = m; },
-    }), 0);
     return [
-      h("p", { class: "hint", text: "Sign in with Google to share this budget with your household. Everyone sees the same budget on every phone and computer, and bank transactions come in for all of you." }),
-      host, err,
+      h("p", { class: "hint", text: "Sign in with Google to share this budget with your household. Everyone sees the same budget on every phone and computer, and bank transactions come in for all of you. Use Sign in with Google on the Account card above." }),
     ];
   }
   const me = a.me || {};
@@ -76,12 +69,6 @@ export async function householdSection(ctx) {
       h("a", { href: URL.createObjectURL(blob), download: `toozbudgeting-before-sign-in-${new Date(backup.at).toISOString().slice(0, 10)}.json` }).click();
     } }));
   }
-  kids.push(btn("Sign out", { kind: "danger", block: true, onClick: () => confirmDialog({
-    title: "Sign out?",
-    message: "This device stops syncing with your household. The budget stays on this device until you sign in again.",
-    confirm: "Sign out",
-    onConfirm: async () => { await signOut(); ctx.accountSignedOut(); },
-  }) }));
   return kids;
 }
 
