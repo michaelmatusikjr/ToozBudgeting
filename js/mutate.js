@@ -2,12 +2,12 @@
 import {
   uid, toTitleCase, monthKey, todayKey, nextMonth, prevMonth, isCard, isBank, ccPayCat,
   isPayFrom, payFromId, round2, deepClone,
-} from "./util.js?v=137";
-import { available, readyToAssign, getGoalMetrics, globalFree, furthestMonth, accountBalances } from "./calc.js?v=137";
+} from "./util.js?v=138";
+import { available, readyToAssign, getGoalMetrics, globalFree, furthestMonth, accountBalances } from "./calc.js?v=138";
 import {
   ensurePayee, prunePayees, findFuzzyDuplicates, runPaymentMatchScan, displayName,
   originalsForCanonical, payeeDefaultCategory, payeeSuggestedCategory,
-} from "./payees.js?v=137";
+} from "./payees.js?v=138";
 
 const stamp = () => new Date().toISOString();
 

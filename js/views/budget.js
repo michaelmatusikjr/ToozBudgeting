@@ -1,16 +1,16 @@
-import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, openAmountPad } from "../ui.js?v=137";
-import { fmt, monthLabel, monthKey, prevMonth, nextMonth, todayKey, toTitleCase, uid, round2 } from "../util.js?v=137";
+import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, openAmountPad } from "../ui.js?v=138";
+import { fmt, monthLabel, monthKey, prevMonth, nextMonth, todayKey, toTitleCase, uid, round2 } from "../util.js?v=138";
 import {
   budgetSnapshot, getGoalMetrics, trailingAvg, monthAccessible, historySeries,
   overspentMonths, available, globalFree, ccMismatches,
-} from "../calc.js?v=137";
+} from "../calc.js?v=138";
 import {
   setAssigned, moveMoney, coverOverspending, planClawback, applyClawback,
   computeMonthAssignments, applyAssignments, setCategory, addCategory, archiveCategory,
   deleteCategory, setMonthNote, addGroup, renameGroup, deleteGroup, moveGroup, moveCategory,
-} from "../mutate.js?v=137";
-import { collectReminders } from "../notify.js?v=137";
-import { openMissingSide } from "./transactions.js?v=137";
+} from "../mutate.js?v=138";
+import { collectReminders } from "../notify.js?v=138";
+import { openMissingSide } from "./transactions.js?v=138";
 
 function noteOf(budget, month, cat) {
   return budget.categoryNotes?.[month]?.[cat.id] || "";
@@ -105,27 +105,6 @@ export function renderBudget(root, ctx) {
     ));
   }
 
-  const under = (budget.categories || []).filter((c) => {
-    if (c.archived || !c.goal) return false;
-    const m = getGoalMetrics(c, snap.available[c.id] || 0, snap.budgeted[c.id] || 0, month);
-    if (!m || m.complete) return false;
-    return (m.type === "monthly" && m.underfunded) || (m.type === "date" && !m.onTrack);
-  });
-  if (under.length) {
-    let needed = 0;
-    for (const c of under) {
-      const m = getGoalMetrics(c, snap.available[c.id] || 0, snap.budgeted[c.id] || 0, month);
-      if (!m) continue;
-      if (m.type === "monthly") needed += m.needed;
-      else if (m.type === "date") needed += Math.max(0, m.monthlyNeeded - (snap.budgeted[c.id] || 0));
-    }
-    const noun = under.length === 1 ? "goal needs" : "goals need";
-    notices.append(h("button", { class: "notice warn", type: "button", onclick: () => openAllGoals(ctx) },
-      h("strong", { text: `${under.length} ${noun} funding` }),
-      h("span", { text: `${fmt(needed)} still needed this month` }),
-      h("span", { class: "notice-go", text: "Goals" }),
-    ));
-  }
   for (const miss of ccMismatches(budget, today)) {
     notices.append(h("button", { class: "notice warn", type: "button", onclick: () => {
       const openPad = () => {
@@ -232,10 +211,12 @@ function categoryRow(ctx, cat, snap, month, today) {
   const activity = Number(snap.activity[cat.id] || 0);
   const avail = Number(snap.available[cat.id] || 0);
   const metrics = getGoalMetrics(cat, avail, budgeted, month);
+  const underfunded = !!(metrics && !metrics.complete && ((metrics.type === "monthly" && metrics.underfunded) || (metrics.type === "date" && !metrics.onTrack) || (metrics.type === "savings" && avail < (metrics.target || 0) - 0.005)));
   const avg = trailingAvg(ctx.budget(), cat.id, month);
   const note = noteOf(ctx.budget(), month, cat);
-  const row = h("article", { class: `cat ${avail < -0.005 ? "over" : ""} ${cat.archived ? "archived" : ""}` });
+  const row = h("article", { class: `cat ${avail < -0.005 ? "over" : ""} ${underfunded ? "under" : ""} ${cat.archived ? "archived" : ""}` });
   const title = h("button", { class: "cat-name", type: "button", text: cat.name, onclick: () => openCategory(ctx, cat) });
+  const flag = underfunded ? h("span", { class: "goal-flag", text: "Under" }) : null;
   const subBits = [];
   if (metrics) {
     subBits.push(metrics.type === "monthly"
@@ -277,7 +258,7 @@ function categoryRow(ctx, cat, snap, month, today) {
     } }, h("span", { class: "fig-n", text: fmt(avail) }));
 
   row.append(
-    h("div", { class: "cat-id" }, title, sub),
+    h("div", { class: "cat-id" }, h("div", { class: "cat-title" }, title, flag), sub),
     availControl,
     h("div", { class: "cat-figs" },
       bBtn,

@@ -739,3 +739,35 @@ input, textarea, select, [contenteditable="true"] {
   user-select: text;
   -webkit-touch-callout: default;
 }
+html, body, #app, .shell, .main, .view, .topbar, .month-nav, .tabs, .side, .sheet, header, h1, h2, button, a {
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+input, textarea, select, [contenteditable="true"] {
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
+  touch-action: manipulation;
+}
+.cat-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.cat-title .cat-name { width: auto; flex: 1 1 auto; min-width: 0; }
+.goal-flag {
+  flex: 0 0 auto;
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  line-height: 1.4;
+  padding: 2px 7px;
+  border-radius: 999px;
+  color: var(--brass);
+  background: color-mix(in srgb, var(--brass) 22%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--brass) 50%, var(--line));
+}
+.cat.under:not(.over) {
+  background: color-mix(in srgb, var(--brass) 12%, var(--surface));
+  box-shadow: inset 3px 0 0 var(--brass);
+}
+.cat.under .goal-bar > span { background: var(--brass); }

@@ -1,19 +1,19 @@
-import { APP_VERSION, monthKey, prevMonth, nextMonth, deepClone } from "./util.js?v=137";
-import { loadState, saveState, subscribe, exportData, importData, deviceGet, deviceSet } from "./store.js?v=137";
-import { h, clear, icon, toast, closeAllModals, btn } from "./ui.js?v=137";
-import { renderIdentity, renderWizard } from "./views/gate.js?v=137";
-import { renderBudget, openInbox } from "./views/budget.js?v=137";
-import { renderTransactions, openTx } from "./views/transactions.js?v=137";
-import { renderAccounts } from "./views/accounts.js?v=137";
-import { renderPayees } from "./views/payees.js?v=137";
-import { renderSettings } from "./views/settings.js?v=137";
-import { registerSW, activateWaiting } from "./pwa.js?v=137";
-import { scheduleLocal, collectReminders } from "./notify.js?v=137";
-import { pushOnOpen } from "./push.js?v=137";
-import { normalizeBudget } from "./mutate.js?v=137";
-import { announceIfUpdated } from "./whatsnew.js?v=137";
-import { paintTheme, resolveTheme } from "./theme.js?v=137";
-import { monthAccessible } from "./calc.js?v=137";
+import { APP_VERSION, monthKey, prevMonth, nextMonth, deepClone } from "./util.js?v=138";
+import { loadState, saveState, subscribe, exportData, importData, deviceGet, deviceSet } from "./store.js?v=138";
+import { h, clear, icon, toast, closeAllModals, btn } from "./ui.js?v=138";
+import { renderIdentity, renderWizard } from "./views/gate.js?v=138";
+import { renderBudget, openInbox } from "./views/budget.js?v=138";
+import { renderTransactions, openTx } from "./views/transactions.js?v=138";
+import { renderAccounts } from "./views/accounts.js?v=138";
+import { renderPayees } from "./views/payees.js?v=138";
+import { renderSettings } from "./views/settings.js?v=138";
+import { registerSW, activateWaiting } from "./pwa.js?v=138";
+import { scheduleLocal, collectReminders } from "./notify.js?v=138";
+import { pushOnOpen } from "./push.js?v=138";
+import { normalizeBudget } from "./mutate.js?v=138";
+import { announceIfUpdated } from "./whatsnew.js?v=138";
+import { paintTheme, resolveTheme } from "./theme.js?v=138";
+import { monthAccessible } from "./calc.js?v=138";
 
 const root = document.getElementById("app");
 const undoStack = [];
@@ -212,6 +212,10 @@ window.addEventListener("keydown", (e) => {
     if (e.key === "/") { e.preventDefault(); ctx.ui.searchEl?.focus(); }
   }
 });
+
+window.addEventListener("gesturestart", (e) => e.preventDefault(), { passive: false });
+window.addEventListener("gesturechange", (e) => e.preventDefault(), { passive: false });
+window.addEventListener("gestureend", (e) => e.preventDefault(), { passive: false });
 
 window.addEventListener("hashchange", () => { closeAllModals(); applyHash(); ctx.render(); });
 

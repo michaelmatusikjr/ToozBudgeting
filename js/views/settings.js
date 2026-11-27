@@ -1,12 +1,12 @@
-import { h, btn, openSheet, field, textInput, toast, confirmDialog } from "../ui.js?v=137";
-import { APP_VERSION, toTitleCase, uid } from "../util.js?v=137";
-import { exportData, deviceGet, deviceSet, importData } from "../store.js?v=137";
-import { freshBudgetShell, copyCategories, addAccount, addCreditCard } from "../mutate.js?v=137";
-import { pushConfig, setPushConfig, pushStatus, enablePush, disablePush, DEFAULTS, syncSchedule } from "../push.js?v=137";
-import { requestPermission, scheduleLocal } from "../notify.js?v=137";
-import { isIOS, isStandalone, canInstall, promptInstall } from "../pwa.js?v=137";
-import { openWhatsNew } from "../whatsnew.js?v=137";
-import { THEMES, paintTheme, deriveCustom, resolveTheme, customFrom } from "../theme.js?v=137";
+import { h, btn, openSheet, field, textInput, toast, confirmDialog } from "../ui.js?v=138";
+import { APP_VERSION, toTitleCase, uid } from "../util.js?v=138";
+import { exportData, deviceGet, deviceSet, importData } from "../store.js?v=138";
+import { freshBudgetShell, copyCategories, addAccount, addCreditCard } from "../mutate.js?v=138";
+import { pushConfig, setPushConfig, pushStatus, enablePush, disablePush, DEFAULTS, syncSchedule } from "../push.js?v=138";
+import { requestPermission, scheduleLocal } from "../notify.js?v=138";
+import { isIOS, isStandalone, canInstall, promptInstall } from "../pwa.js?v=138";
+import { openWhatsNew } from "../whatsnew.js?v=138";
+import { THEMES, paintTheme, deriveCustom, resolveTheme, customFrom } from "../theme.js?v=138";
 
 export async function renderSettings(root, ctx) {
   const budget = ctx.budget();
@@ -255,7 +255,7 @@ function importFile(ctx) {
     const f = input.files?.[0]; if (!f) return;
     try {
       const parsed = JSON.parse(await f.text());
-      ctx.restore(parsed.budgets ? (await import("../store.js?v=137")).importData(parsed) : parsed);
+      ctx.restore(parsed.budgets ? (await import("../store.js?v=138")).importData(parsed) : parsed);
       toast("Imported");
     } catch (e) { toast(e.message || "Couldn’t import that file"); }
   });
@@ -286,7 +286,7 @@ function editReminders(ctx) {
   const budget = ctx.budget();
   const pending = new Map();
   const sheet = openSheet({ title: "Reminders", body: (host) => {
-    host.append(h("p", { class: "lede", text: "Bill due dates, and one-off reminders. The app also watches overspending, goals, reconciliation, Ready to Assign, and card payments." }));
+    host.append(h("p", { class: "lede", text: "Bill due dates, and one-off reminders. The app also watches overspending, reconciliation, Ready to Assign, and card payments. A goal that is short is marked on the plan. It does not raise a notice." }));
     for (const cat of budget.categories.filter((c) => !c.archived && !c.creditCardId)) {
       const day = h("input", { class: "input", type: "number", min: "1", max: "28", value: cat.dueDay || "", placeholder: "Day" });
       const lead = h("input", { class: "input", type: "number", min: "0", max: "14", value: cat.leadDays || 0 });

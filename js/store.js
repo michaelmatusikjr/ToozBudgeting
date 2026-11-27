@@ -5,8 +5,8 @@
  * Device-only settings (theme, push credentials, fired reminders, session chrome)
  * live in a separate store and are never part of the budget export.
  */
-import { SCHEMA_VERSION, deepClone, randomDeviceId, b64url } from "./util.js?v=137";
-import { emptyApp, normalizeBudget } from "./mutate.js?v=137";
+import { SCHEMA_VERSION, deepClone, randomDeviceId, b64url } from "./util.js?v=138";
+import { emptyApp, normalizeBudget } from "./mutate.js?v=138";
 
 const DB_NAME = "toozbudgeting";
 const DB_VER = 1;

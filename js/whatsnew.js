@@ -1,7 +1,7 @@
 /** What's new: toast on a real version change, then a carousel of short animated recreations. */
-import { h, openSheet, btn, icon, toast } from "./ui.js?v=137";
-import { APP_VERSION } from "./util.js?v=137";
-import { deviceGet, deviceSet } from "./store.js?v=137";
+import { h, openSheet, btn, icon, toast } from "./ui.js?v=138";
+import { APP_VERSION } from "./util.js?v=138";
+import { deviceGet, deviceSet } from "./store.js?v=138";
 
 const RELEASES = [
   {
@@ -106,6 +106,16 @@ const RELEASES = [
         demo: "lists",
         title: "Payees are not accounts.",
         body: "Account and card names stay off the payee list, and they are never offered as a merge. Suggestions stay open until you finish them or close the sheet.",
+      },
+    ],
+  },
+  {
+    version: "1.4.2",
+    slides: [
+      {
+        demo: "plan",
+        title: "A short goal stays on the row.",
+        body: "Underfunded goals are marked on the plan. They no longer raise a notice. The header no longer zooms or selects text.",
       },
     ],
   },

@@ -1,7 +1,7 @@
 /** Local reminders while the app is open. Closed-app delivery is js/push.js. */
-import { deviceGet, deviceSet } from "./store.js?v=137";
-import { monthKey, todayKey, timeZone, monthLabel, fmt } from "./util.js?v=137";
-import { overspentMonths, staleReconcile, ccMismatches, readyToAssign, getGoalMetrics, available } from "./calc.js?v=137";
+import { deviceGet, deviceSet } from "./store.js?v=138";
+import { monthKey, todayKey, timeZone, monthLabel, fmt } from "./util.js?v=138";
+import { overspentMonths, staleReconcile, ccMismatches, readyToAssign } from "./calc.js?v=138";
 
 const timers = new Set();
 
@@ -99,36 +99,18 @@ export function collectReminders(budget, month) {
     });
   }
   for (const cat of budget.categories || []) {
-    if (cat.archived || !cat.goal) continue;
-    const avail = available(budget, cat.id, month || monthKey());
-    const metrics = getGoalMetrics(cat, avail, (budget.monthlyBudgets?.[month || monthKey()] || {})[cat.id] || 0, month || monthKey());
-    if (metrics?.type === "date" && (metrics.expired || (metrics.targetDate && metrics.targetDate <= nextMonthSafe(monthKey()) && !metrics.complete))) {
-      push({
-        id: `goal:${cat.id}`, kind: "goal", title: cat.name + " goal",
-        body: metrics.expired ? "This date goal has passed." : "A goal deadline is getting close.",
-        url: `./#budget/${month || monthKey()}/${cat.id}`, tag: `goal:${cat.id}`,
-        date: today, recur: { type: "none" },
-      });
-    }
-    if (cat.dueDay) {
-      push({
-        id: `bill:${cat.id}`, kind: "bill", title: cat.name + " due",
-        body: `Due on day ${cat.dueDay}.`,
-        url: `./#budget/${month || monthKey()}/${cat.id}`, tag: `bill:${cat.id}`,
-        time: cat.reminderTime || "09:00",
-        offsetDays: -(cat.leadDays || 0),
-        recur: { type: "monthly", start: today },
-      });
-    }
+    if (cat.archived || !cat.dueDay) continue;
+    push({
+      id: `bill:${cat.id}`, kind: "bill", title: cat.name + " due",
+      body: `Due on day ${cat.dueDay}.`,
+      url: `./#budget/${month || monthKey()}/${cat.id}`, tag: `bill:${cat.id}`,
+      time: cat.reminderTime || "09:00",
+      offsetDays: -(cat.leadDays || 0),
+      recur: { type: "monthly", start: today },
+    });
   }
   for (const r of budget.reminders || []) push(r);
   return rules;
-}
-
-function nextMonthSafe(mk) {
-  const [y, m] = mk.split("-").map(Number);
-  const d = new Date(y, m, 1);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
 export async function scheduleLocal(budget, month) {
