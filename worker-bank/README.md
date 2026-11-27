@@ -20,6 +20,8 @@ Household accounts, shared budget sync, and Plaid bank sync for ToozBudgeting. I
 
 **Shared budget** (`src/sync.js`): the app's records (budget header, account, card, group, category, transaction, payee, month marker, month-and-category amount, inflow, note, reminder) are stored one row per record per household in `records`. Each has the edit time `t` and device `dev`. Last write wins per record by `(t, dev)`, and deletes are tombstones. Each push bumps the household's `seq` and writes the rows in one D1 batch (a single transaction), so `GET /sync/pull?since=<seq>` never skips a change. A push answers with any record the server kept instead (a newer edit by someone else, a clamped future clock, or owner-only fields), so the device converges right away.
 
+**Other household apps** (`src/apps.js`): the same Google sign-in, people, household and roles are shared with Daily Tracker (`APPS` lists the apps). Daily Tracker keeps its own end-to-end encrypted data on its own Worker (`daily-tracker-push`); this Worker never sees it. An owner links the household's Daily Tracker account once: the app sends its username, `authKey` and key-encryption key (both derived from the password on the device; never the password), sealed here with `TOKEN_ENC_KEY` and bound to the household and app. Owners and members get them back over their session (`GET /apps/daily-tracker/keys`) and sign in to Daily Tracker without a password. Viewers don't (Daily Tracker's keys open every profile, so it can't be read-only). Each person can keep small per-app preferences (Daily Tracker: which profile is theirs). The installed-app sign-in takes `GET /auth/google/start?app=daily-tracker`; the app is sealed in the state, so Google's redirect URI stays `/auth/google/redirect` for every app.
+
 **Bank sync**
 
 1. An owner asks for a Plaid Link token (`POST /bank/link-token`) and opens Plaid Link. The bank sign-in goes to Plaid only.
@@ -45,6 +47,10 @@ The free Plaid Trial allows **10 Items (bank logins) for the life of the account
 | POST | `/auth/redeem` | one-time code | Trade the redirect code for a session |
 | POST | `/auth/logout` | session | Sign out this device (`?all=1` for every device) |
 | GET, PATCH | `/me` | session | Who's signed in, household, role; change display name |
+| GET | `/apps/:app` | session | Is the app linked, by whom, can I use or manage it (never the keys) |
+| GET | `/apps/:app/keys` | owner, member | The linked account's sign-in keys (404 `NOT_LINKED`) |
+| POST, DELETE | `/apps/:app/link` | owner | Link (or re-link after a password change) / unlink |
+| GET, POST | `/apps/:app/prefs` | session | This person's preferences for the app (≤ 4 KB JSON) |
 | PATCH | `/household` | owner | Rename the household |
 | GET | `/household/members` | session | People (and pending invites, for owners) |
 | PATCH, DELETE | `/household/members/:userId` | owner | Change role or scopes; remove (anyone can remove themselves) |
