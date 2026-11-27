@@ -1,4 +1,4 @@
-import { h, btn, openSheet, field, textInput, toast, confirmDialog } from "../ui.js?v=154";
+import { h, btn, openSheet, field, textInput, toast, confirmDialog, bindContextMenu, devHooks } from "../ui.js?v=154";
 import { APP_VERSION, toTitleCase, uid } from "../util.js?v=154";
 import { exportData, deviceGet, deviceSet, importData } from "../store.js?v=154";
 import { freshBudgetShell, copyCategories, addAccount, addCreditCard } from "../mutate.js?v=154";
@@ -68,69 +68,65 @@ export async function renderSettings(root, ctx) {
   }
 
   if (tab === "budgets") {
-    pane.append(setSec("Budget",
+    pane.append(setSec("This budget",
       h("div", { class: "set-card" },
-        line(budget?.name || "Budget", "Rename", () => renameBudget(ctx)),
-        line("New budget", "Create", () => newBudget(ctx)),
+        line(budget?.name || "Budget", "Rename", () => renameBudget(ctx, budget?.id)),
         line("Accounts and cards", "Add", () => ctx.go("accounts")),
       ),
     ));
-    const budgets = (ctx.state.budgets || []).filter((b) => !b.archived);
-    const others = (ctx.state.budgets || []).filter((b) => b.archived);
-    pane.append(setSec("Budgets",
-      h("div", { class: "set-card" },
-        ...budgets.map((b) => h("div", { class: "line" },
-          h("span", {}, h("strong", { text: b.name }), b.id === ctx.state.activeBudgetId ? h("span", { class: "muted", text: " · current" }) : null),
-          h("span", { class: "row gap" },
-            b.id === ctx.state.activeBudgetId ? null : btn("Open", { kind: "quiet", onClick: () => ctx.commit({ ...ctx.state, activeBudgetId: b.id, setupComplete: true }) }),
-            btn(b.archived ? "Restore" : "Archive", { kind: "quiet", onClick: () => {
-              const next = ctx.state.budgets.map((x) => x.id === b.id ? { ...x, archived: !x.archived } : x);
-              const active = next.find((x) => !x.archived) || next[0];
-              ctx.commit({ ...ctx.state, budgets: next, activeBudgetId: b.id === ctx.state.activeBudgetId ? active?.id || null : ctx.state.activeBudgetId, setupComplete: !!active && !active.archived });
-            }}),
-            btn("Delete", { kind: "quiet", onClick: () => confirmDialog({
-              title: `Delete ${b.name}?`,
-              message: "This removes the budget from this device. Export a backup first if you might want it back.",
-              confirm: "Delete",
-              danger: true,
-              onConfirm: () => {
-                const next = ctx.state.budgets.filter((x) => x.id !== b.id);
-                ctx.commit({ ...ctx.state, budgets: next, activeBudgetId: ctx.state.activeBudgetId === b.id ? (next.find((x) => !x.archived)?.id || null) : ctx.state.activeBudgetId, setupComplete: next.some((x) => !x.archived) });
-              },
-            }) }),
-          ),
-        )),
-        others.length ? h("p", { class: "hint", text: `${others.length} archived.` }) : null,
-      ),
-    ));
+    const activeBudgets = (ctx.state.budgets || []).filter((b) => !b.archived);
+    const archivedBudgets = (ctx.state.budgets || []).filter((b) => b.archived);
+    pane.append(h("div", { class: "set-sec-h", text: "Active Budgets" }));
+    for (const b of activeBudgets) pane.append(budgetCard(ctx, b, false));
+    if (archivedBudgets.length) {
+      pane.append(h("div", { class: "set-sec-h set-sec-h-gap", text: "Archived" }));
+      for (const b of archivedBudgets) pane.append(budgetCard(ctx, b, true));
+    }
+    const create = btn("+ Create New Budget", { kind: "primary", block: true, onClick: () => newBudget(ctx) });
+    create.classList.add("set-create");
+    if (ctx.readOnly()) create.disabled = true;
+    pane.append(create);
   }
 
   if (tab === "data") {
-    pane.append(setSec("Backup",
-      h("div", { class: "set-card" },
-        line("Export JSON", "Download", () => download(ctx)),
-        line("Copy backup", "Copy", () => copyBackup(ctx)),
-        line("Paste backup", "Paste", () => pasteBackup(ctx)),
-        line("Import JSON", "Choose file", () => importFile(ctx)),
-        line("Reset this device", "Reset", () => confirmDialog({
-          title: "Erase local data?",
-          message: ctx.account?.token
-            ? "This signs this device out and deletes the budget on this device only. Your household’s budget stays safe on the server."
-            : "This deletes budgets on this device. Export a backup first if you might want them back.",
-          confirm: "Erase", danger: true, onConfirm: () => ctx.reset(),
-        })),
-      ),
+    pane.append(h("div", { class: "set-sec-h", text: "Backup & Restore" }));
+    pane.append(h("p", { class: "set-lede", text: "Export a backup file of everything in ToozBudgeting — all budgets, accounts, transactions, and settings. Keep it somewhere safe so you can restore it later if needed." }));
+    pane.append(btn("📤 Export Backup", { kind: "primary", block: true, onClick: () => download(ctx) }));
+    pane.append(h("div", { class: "set-sec-h set-sec-h-gap", text: "Restore from Backup" }));
+    pane.append(h("p", { class: "set-lede" },
+      "Choose a backup file you exported earlier. This ",
+      h("strong", { text: "replaces everything" }),
+      " currently in ToozBudgeting.",
     ));
+    const importErr = h("div", { class: "set-budget-err" });
+    pane.append(btn("📥 Import Backup", { kind: "navy-out", block: true, onClick: () => importFile(ctx, importErr) }), importErr);
+    const clip = h("div", { class: "set-clip" },
+      h("div", { class: "set-clip-h", text: "📱 Mobile Clipboard Backup" }),
+      h("div", { class: "set-clip-p", text: "Use these if the export/import buttons above don't work on your device. Copy copies the full backup JSON to your clipboard. Paste reads JSON from your clipboard to restore." }),
+      btn("📋 Copy Backup to Clipboard", { kind: "amber-fill", block: true, onClick: () => copyBackup(ctx) }),
+      btn("📋 Paste Backup from Clipboard", { kind: "amber", block: true, onClick: () => pasteBackup(ctx) }),
+    );
+    pane.append(clip);
+
     pane.append(setSec("Bank sync", h("div", { class: "set-card set-bank" }, ...(await bankSection(ctx)))));
     if (ctx.ui.openBank) {
       ctx.ui.openBank = false;
       setTimeout(() => openBankSheet(ctx), 0);
     }
-    pane.append(h("div", { class: "set-foot" },
-      h("p", { class: "hint", text: `ToozBudgeting ${APP_VERSION}` }),
-      h("p", { class: "hint legal-links" }, h("a", { href: "./privacy.html", text: "Privacy" }), " · ", h("a", { href: "./terms.html", text: "Terms" })),
-      btn("What's new", { kind: "quiet", block: true, onClick: () => openWhatsNew() }),
-    ));
+
+    pane.append(h("div", { class: "set-sec-h set-sec-h-gap", text: "Factory Reset" }));
+    pane.append(h("p", { class: "set-lede", text: ctx.account?.token
+      ? "Wipes the budgets on this device and signs this device out, then takes you back to the setup wizard. Your household’s budget stays safe on the server. Export a backup first if you want to keep a local copy."
+      : "Wipes everything stored in this copy of ToozBudgeting and takes you back to the setup wizard, as if you'd just opened it for the first time. Export a backup first if you want to keep anything." }));
+    pane.append(btn("🗑 Factory Reset", { kind: "ghost danger", block: true, onClick: () => factoryReset(ctx) }));
+
+    const tools = h("div", { class: "set-tools" });
+    devHooks.settingsCard?.(tools, ctx);
+    if (tools.childNodes.length) pane.append(tools);
+
+    pane.append(h("div", { class: "set-version", text: `ToozBudgeting · v${APP_VERSION}` }));
+    pane.append(h("button", { type: "button", class: "set-whatsnew", text: "What's new", onclick: () => openWhatsNew() }));
+    pane.append(h("p", { class: "hint legal-links set-legal" }, h("a", { href: "./privacy.html", text: "Privacy" }), " · ", h("a", { href: "./terms.html", text: "Terms" })));
     if (canInstall() || (isIOS() && !isStandalone())) {
       pane.append(btn("Install app", { block: true, kind: "ghost", onClick: async () => {
         const res = await promptInstall();
@@ -340,45 +336,146 @@ function line(label, action, onClick, kind = "quiet") {
   return h("div", { class: "line" }, h("span", { text: label }), btn(action, { kind: tone, onClick }));
 }
 
-function renameBudget(ctx) {
-  const input = textInput({ value: ctx.budget().name });
-  const sheet = openSheet({ title: "Rename budget", body: (host) => {
-    host.append(field("Name", input), btn("Save", { block: true, onClick: () => {
-      const name = toTitleCase(input.value.trim());
-      if (!name) return;
-      if (ctx.state.budgets.some((b) => b.id !== ctx.budget().id && b.name.toLowerCase() === name.toLowerCase())) { toast("A budget with that name already exists"); return; }
-      ctx.updateBudget((b) => ({ ...b, name }));
-      sheet.close();
-    }}));
-  }});
+function budgetCard(ctx, b, archived) {
+  const active = b.id === ctx.state.activeBudgetId;
+  const ro = !!ctx.readOnly();
+  const card = h("div", { class: `set-budget-card${active ? " on" : ""}${archived ? " archived" : ""}` });
+  const meta = active
+    ? "✓ Currently active"
+    : (b.createdAt ? `Created ${new Date(b.createdAt).toLocaleDateString()}` : "");
+  const info = h("div", { class: "set-budget-info" },
+    h("div", { class: "set-budget-name", text: b.name }),
+    meta ? h("div", { class: `set-budget-meta${active ? " on" : ""}`, text: meta }) : null,
+  );
+  const actions = h("div", { class: "set-budget-actions" });
+  if (archived) {
+    if (!ro) {
+      actions.append(
+        btn("Restore", { kind: "good small", onClick: () => ctx.commit({ ...ctx.state, budgets: ctx.state.budgets.map((x) => x.id === b.id ? { ...x, archived: false } : x) }) }),
+        btn("Delete", { kind: "ghost danger small", onClick: () => deleteBudget(ctx, b) }),
+      );
+    }
+  } else if (!active && !ro) {
+    actions.append(
+      btn("Switch", { kind: "primary small", onClick: () => ctx.commit({ ...ctx.state, activeBudgetId: b.id, setupComplete: true }) }),
+      btn("Archive", { kind: "ghost small", onClick: () => ctx.commit({ ...ctx.state, budgets: ctx.state.budgets.map((x) => x.id === b.id ? { ...x, archived: true } : x) }) }),
+    );
+  }
+  card.append(info, actions);
+  bindContextMenu(card, () => [
+    { label: "✏️ Rename", edit: true, onClick: () => renameBudget(ctx, b.id) },
+  ], { readOnly: ro });
+  return card;
+}
+
+function deleteBudget(ctx, b) {
+  if (b.id === ctx.state.activeBudgetId) return;
+  const sheet = openSheet({
+    title: "Delete Budget?",
+    body: (host) => {
+      host.append(
+        h("div", { class: "set-factory-warn", text: `Permanently delete "${b.name}"? All of its accounts, categories, and transaction history will be gone for good.` }),
+        h("div", { class: "set-factory-note", text: "Consider exporting a backup first (Data tab) if you might want this later." }),
+        btnRow(
+          { label: "Cancel", kind: "ghost", onClick: () => sheet.close() },
+          { label: "Delete Permanently", kind: "danger", onClick: () => {
+            const next = ctx.state.budgets.filter((x) => x.id !== b.id);
+            ctx.commit({ ...ctx.state, budgets: next, activeBudgetId: ctx.state.activeBudgetId === b.id ? (next.find((x) => !x.archived)?.id || null) : ctx.state.activeBudgetId, setupComplete: next.some((x) => !x.archived) });
+            sheet.close();
+          } },
+        ),
+      );
+    },
+  });
+}
+
+function renameBudget(ctx, id) {
+  const target = (ctx.state.budgets || []).find((b) => b.id === (id || ctx.budget()?.id));
+  if (!target) return;
+  const input = textInput({ value: target.name, placeholder: "Budget name" });
+  const err = h("div", { class: "set-budget-err" });
+  const sheet = openSheet({
+    title: "Rename Budget",
+    closeLabel: "Discard",
+    body: (host) => {
+      const save = () => {
+        const name = input.value.trim();
+        err.textContent = "";
+        if (!name) return;
+        if (ctx.state.budgets.some((b) => b.id !== target.id && b.name.trim().toLowerCase() === name.toLowerCase())) {
+          err.textContent = `A budget named "${name}" already exists. Choose a different name.`;
+          return;
+        }
+        if (target.id === ctx.budget()?.id) ctx.updateBudget((b) => ({ ...b, name }));
+        else ctx.commit({ ...ctx.state, budgets: ctx.state.budgets.map((b) => b.id === target.id ? { ...b, name } : b) });
+        sheet.close();
+      };
+      input.addEventListener("keydown", (e) => { if (e.key === "Enter") save(); });
+      host.append(field("Budget Name", input), err, btnRow(
+        { label: "Cancel", kind: "ghost", onClick: () => sheet.close() },
+        { label: "Save", onClick: save },
+      ));
+      input.focus();
+    },
+  });
 }
 
 function newBudget(ctx) {
-  const input = textInput({ value: "New budget" });
-  let copyFrom = ctx.budget()?.id || "";
-  const sheet = openSheet({ title: "New budget", body: (host) => {
-    const sel = h("select", { class: "input" }, h("option", { value: "", text: "Start empty" }));
-    for (const b of ctx.state.budgets || []) sel.append(h("option", { value: b.id, text: `Copy categories from ${b.name}` }));
-    sel.value = copyFrom;
-    sel.addEventListener("change", () => { copyFrom = sel.value; });
-    host.append(field("Name", input), field("Categories", sel), btn("Create", { block: true, onClick: () => {
-      const name = toTitleCase(input.value.trim() || "New budget");
-      let b = freshBudgetShell(name, ctx.state.activeUserId);
-      const source = (ctx.state.budgets || []).find((x) => x.id === copyFrom);
-      if (source) {
-        const copied = copyCategories(source);
-        b = { ...b, categoryGroups: copied.groups, categories: copied.categories };
-      }
-      ctx.addBudget(b);
-      sheet.close();
-    }}));
-  }});
+  const input = textInput({ placeholder: "e.g. Business Budget..." });
+  let copyFrom = "";
+  const err = h("div", { class: "set-budget-err" });
+  const sheet = openSheet({
+    title: "Create New Budget",
+    closeLabel: "Discard",
+    body: (host) => {
+      const sel = h("select", { class: "input" }, h("option", { value: "", text: "Select a budget..." }));
+      for (const b of (ctx.state.budgets || []).filter((x) => !x.archived)) sel.append(h("option", { value: b.id, text: b.name }));
+      sel.addEventListener("change", () => { copyFrom = sel.value; sync(); });
+      input.addEventListener("input", sync);
+      const blank = btn("Start Completely Blank", { kind: "primary", block: true, disabled: true, onClick: () => create(true) });
+      const copy = btn("Copy & Create", { kind: "good", block: true, disabled: true, onClick: () => create(false) });
+      const sync = () => {
+        const named = !!input.value.trim();
+        blank.disabled = !named;
+        copy.disabled = !named || !copyFrom;
+      };
+      const create = (blankStart) => {
+        const name = input.value.trim();
+        err.textContent = "";
+        if (!name) return;
+        if (ctx.state.budgets.some((b) => b.name.trim().toLowerCase() === name.toLowerCase())) {
+          err.textContent = `A budget named "${name}" already exists. Choose a different name.`;
+          return;
+        }
+        if (!blankStart && !copyFrom) return;
+        let b = freshBudgetShell(name, ctx.state.activeUserId);
+        if (!blankStart) {
+          const source = (ctx.state.budgets || []).find((x) => x.id === copyFrom);
+          if (source) {
+            const copied = copyCategories(source);
+            b = { ...b, categoryGroups: copied.groups, categories: copied.categories };
+          }
+        }
+        ctx.addBudget(b);
+        sheet.close();
+      };
+      host.append(
+        field("Budget Name", input),
+        err,
+        blank,
+        h("div", { class: "set-or", text: "— or —" }),
+        field("Copy categories from", sel),
+        copy,
+      );
+      input.focus();
+    },
+  });
 }
 
 function download(ctx) {
   const data = exportData(ctx.state);
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-  const a = h("a", { href: URL.createObjectURL(blob), download: `toozbudgeting-${todayStamp()}.json` });
+  const a = h("a", { href: URL.createObjectURL(blob), download: `toozbudgeting-backup-${todayStampIso()}.json` });
   a.click();
   toast("Backup downloaded");
 }
@@ -390,25 +487,73 @@ async function copyBackup(ctx) {
 }
 async function pasteBackup(ctx) {
   try {
-    ctx.restore(importData(JSON.parse(await navigator.clipboard.readText())));
-    toast("Backup restored");
-  } catch { toast("Clipboard doesn’t contain a valid backup"); }
+    const parsed = JSON.parse(await navigator.clipboard.readText());
+    if (!parsed || !Array.isArray(parsed.budgets)) { toast("Clipboard doesn't contain a valid ToozBudgeting backup."); return; }
+    confirmRestore(ctx, parsed);
+  } catch { toast("Couldn't read clipboard. Make sure you've copied a ToozBudgeting backup first."); }
 }
-function todayStamp() {
-  const d = new Date();
-  return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+function todayStampIso() {
+  return new Date().toISOString().slice(0, 10);
 }
-function importFile(ctx) {
+function importFile(ctx, errEl) {
   const input = h("input", { type: "file", accept: "application/json,.json" });
   input.addEventListener("change", async () => {
     const f = input.files?.[0]; if (!f) return;
+    if (errEl) errEl.textContent = "";
     try {
       const parsed = JSON.parse(await f.text());
-      ctx.restore(parsed.budgets ? (await import("../store.js?v=154")).importData(parsed) : parsed);
-      toast("Imported");
-    } catch (e) { toast(e.message || "Couldn’t import that file"); }
+      if (!parsed || !Array.isArray(parsed.budgets)) {
+        if (errEl) errEl.textContent = "This doesn't look like a ToozBudgeting backup file.";
+        else toast("This doesn't look like a ToozBudgeting backup file.");
+        return;
+      }
+      confirmRestore(ctx, parsed);
+    } catch {
+      const msg = "Couldn't read that file — make sure it's a ToozBudgeting backup (.json).";
+      if (errEl) errEl.textContent = msg;
+      else toast(msg);
+    }
   });
   input.click();
+}
+
+function confirmRestore(ctx, parsed) {
+  let data;
+  try { data = parsed.budgets ? importData(parsed) : parsed; }
+  catch (e) { toast(e.message || "Couldn't import that file"); return; }
+  const n = (data.budgets || parsed.budgets || []).length;
+  const sheet = openSheet({
+    title: "Restore from Backup?",
+    body: (host) => {
+      host.append(
+        h("div", { class: "set-factory-warn", text: `This will replace everything currently in ToozBudgeting with this backup (${n} budget${n !== 1 ? "s" : ""}).` }),
+        h("div", { class: "set-factory-note", text: "You can Undo right after if this wasn't what you meant to do." }),
+        btnRow(
+          { label: "Cancel", kind: "ghost", onClick: () => sheet.close() },
+          { label: "Restore Backup", kind: "danger", onClick: () => { ctx.restore(data); sheet.close(); toast("Backup restored"); } },
+        ),
+      );
+    },
+  });
+}
+
+function factoryReset(ctx) {
+  const signedIn = !!ctx.account?.token;
+  const sheet = openSheet({
+    title: "Factory Reset?",
+    body: (host) => {
+      host.append(
+        h("div", { class: "set-factory-warn", text: signedIn
+          ? "This signs this device out and erases the budgets on this device, then reopens the setup wizard. Your household’s budget stays safe on the server."
+          : "This permanently erases everything in this copy of ToozBudgeting — all budgets, accounts, transactions, and settings — and reopens the setup wizard." }),
+        h("div", { class: "set-factory-note", text: "This cannot be undone. Export a backup first (above) if you want to keep a copy." }),
+        btnRow(
+          { label: "Cancel", kind: "ghost", onClick: () => sheet.close() },
+          { label: "Erase Everything", kind: "danger", onClick: () => { sheet.close(); ctx.reset(); } },
+        ),
+      );
+    },
+  });
 }
 
 
