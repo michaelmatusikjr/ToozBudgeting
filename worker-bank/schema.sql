@@ -1,5 +1,7 @@
 -- toozbudgeting-bank D1 schema for a fresh database. Safe to run more than once.
 -- An existing database from v1 (device pairing) also needs migrations/0002_households.sql.
+-- Existing databases also need 0004_link_sessions.sql and 0005_budget_roles_activity.sql
+-- (0005 is numbered after 0004_link_sessions, which already shipped).
 
 -- Household accounts
 CREATE TABLE IF NOT EXISTS households (
@@ -37,6 +39,7 @@ CREATE TABLE IF NOT EXISTS invites (
   email TEXT NOT NULL,
   role TEXT NOT NULL CHECK (role IN ('owner', 'member', 'viewer')),
   scopes TEXT,
+  budget_roles TEXT,
   invited_by TEXT,
   created_at INTEGER,
   expires_at INTEGER,
@@ -136,3 +139,62 @@ CREATE TABLE IF NOT EXISTS link_sessions (
   expires_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS link_sessions_household ON link_sessions (household_id, created_at);
+
+-- Per-budget access. No row = no access. Household owners are treated as owner even without a row (see roles.js).
+CREATE TABLE IF NOT EXISTS budget_access (
+  household_id TEXT NOT NULL,
+  budget_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('owner', 'member', 'viewer')),
+  granted_by TEXT,
+  granted_at INTEGER,
+  PRIMARY KEY (household_id, budget_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS budget_access_user ON budget_access (household_id, user_id);
+
+-- Activity log for one budget. Kept forever until the budget is deleted and 30 days pass.
+CREATE TABLE IF NOT EXISTS activity (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  household_id TEXT NOT NULL,
+  budget_id TEXT NOT NULL,
+  at INTEGER,
+  client_t INTEGER,
+  user_id TEXT,
+  device TEXT,
+  source TEXT DEFAULT 'app',
+  action TEXT,
+  op_id TEXT,
+  label TEXT,
+  target_kind TEXT,
+  target_id TEXT,
+  category_id TEXT,
+  account_id TEXT,
+  amount REAL,
+  before TEXT,
+  after TEXT
+);
+CREATE INDEX IF NOT EXISTS activity_budget_at ON activity (household_id, budget_id, at);
+CREATE INDEX IF NOT EXISTS activity_budget_user_at ON activity (household_id, budget_id, user_id, at);
+
+CREATE TABLE IF NOT EXISTS household_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  household_id TEXT NOT NULL,
+  at INTEGER,
+  user_id TEXT,
+  action TEXT,
+  target_user TEXT,
+  budget_id TEXT,
+  before TEXT,
+  after TEXT
+);
+CREATE INDEX IF NOT EXISTS household_log_hh_at ON household_log (household_id, at);
+
+-- Deleted budgets: activity stays exportable for 30 days.
+CREATE TABLE IF NOT EXISTS deleted_budgets (
+  household_id TEXT NOT NULL,
+  budget_id TEXT NOT NULL,
+  name TEXT,
+  deleted_at INTEGER,
+  deleted_by TEXT,
+  PRIMARY KEY (household_id, budget_id)
+);
