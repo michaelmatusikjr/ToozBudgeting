@@ -1,6 +1,10 @@
 /** Named themes plus one custom palette. Device-only; never part of a budget export. */
 
 export const THEMES = {
+  standard: {
+    id: "standard", name: "Standard", hint: "The default look",
+    bg: "#f0eee9", surface: "#ffffff", ink: "#1a2035", accent: "#1a2b4a", band: "#eae7e1",
+  },
   paper: {
     id: "paper", name: "Paper", hint: "Warm daylight",
     bg: "#f3efe6", surface: "#fffdf8", ink: "#1c1915", accent: "#1f6b56", band: "#e4d9c6",
@@ -20,7 +24,7 @@ const CUSTOM_KEYS = ["bg", "surface", "ink", "accent"];
 export function resolveTheme(name) {
   if (name === "light") return "paper";
   if (name === "dark") return "ink";
-  if (name === "paper" || name === "ink" || name === "dusk" || name === "custom") return name;
+  if (name === "standard" || name === "paper" || name === "ink" || name === "dusk" || name === "custom") return name;
   return "system";
 }
 
@@ -60,6 +64,8 @@ export function deriveCustom(input = {}) {
   const accent = hex(input.accent, THEMES.paper.accent);
   const dark = relLum(bg) < 0.42;
   const band = mix(surface, ink, dark ? 0.16 : 0.07);
+  const good = dark ? "#8ed4ae" : "#1b7a4a";
+  const navy = dark ? band : accent;
   const vars = {
     "--bg": bg,
     "--bg-2": mix(bg, ink, dark ? 0.1 : 0.06),
@@ -74,10 +80,37 @@ export function deriveCustom(input = {}) {
     "--brass-ink": dark ? "#1c1915" : "#3d3426",
     "--danger": dark ? "#f0a097" : "#a33b32",
     "--danger-soft": dark ? mix(bg, "#a33b32", 0.42) : "#f8e8e5",
-    "--good": dark ? "#8ed4ae" : "#1b7a4a",
+    "--good": good,
     "--good-soft": dark ? mix(bg, "#1b7a4a", 0.45) : "#e5f3eb",
     "--btn-shadow": dark ? "0 0 0 1px rgba(255,255,255,0.06)" : "0 1px 0 rgba(28,25,21,0.05), 0 1px 2px rgba(28,25,21,0.06)",
     "--card-shadow": dark ? "none" : "0 1px 2px rgba(28,25,21,0.05)",
+    "--navy": navy,
+    "--good-on-navy": mix(good, "#ffffff", 0.45),
+    "--gold": mix(accent, dark ? "#f4eee6" : "#6a4a28", 0.35),
+    "--purple": dark ? "#b3a1f5" : "#7B5EE8",
+    "--amber": dark ? "#f5b14a" : "#F39C12",
+    "--ink-2": mix(ink, bg, 0.25),
+    "--input-bg": mix(surface, bg, 0.5),
+    "--on-navy": dark ? ink : "#FFFFFF",
+    "--group-bg": dark ? mix(surface, ink, 0.08) : "#EAE7E1",
+    "--group-bg-reorder": dark ? mix(surface, "#b3a1f5", 0.22) : "#E4DDF5",
+    "--row-reorder": dark ? mix(surface, "#b3a1f5", 0.12) : "#F3F0FA",
+    "--row-divider": dark ? mix(surface, ink, 0.08) : "#F4F1EB",
+    "--soft": dark ? mix(surface, ink, 0.06) : "#F8F6F2",
+    "--green-bg": dark ? mix(surface, "#27AE60", 0.2) : "#EAF6F0",
+    "--green-border": dark ? mix(surface, "#27AE60", 0.45) : "#A8DFBF",
+    "--green-ink": dark ? good : "#1A5C36",
+    "--amber-bg": dark ? mix(surface, "#F39C12", 0.2) : "#FFF8E7",
+    "--amber-ink": dark ? "#f5b14a" : "#7A5800",
+    "--red-bg": dark ? mix(surface, "#E74C3C", 0.22) : "#FDEDEC",
+    "--zero": dark ? mix(ink, bg, 0.45) : "#C4C0CC",
+    "--zero-group": dark ? mix(ink, bg, 0.38) : "#B5B0BD",
+    "--rta-neg": "#FF6B6B",
+    "--activity-neg-on-navy": "#FF9999",
+    "--disabled": dark ? "#555" : "#ccc",
+    "--scrim": "rgba(0,0,0,0.45)",
+    "--scrim-light": "rgba(0,0,0,0.25)",
+    "--scrim-select": "rgba(0,0,0,0.35)",
   };
   return { bg, surface, ink, accent, band, dark, vars };
 }
@@ -87,6 +120,11 @@ const PROPS = [
   "--accent", "--accent-ink", "--brass", "--brass-ink",
   "--danger", "--danger-soft", "--good", "--good-soft",
   "--btn-shadow", "--card-shadow",
+  "--navy", "--good-on-navy", "--gold", "--purple", "--amber", "--ink-2", "--input-bg", "--on-navy",
+  "--group-bg", "--group-bg-reorder", "--row-reorder", "--row-divider", "--soft",
+  "--green-bg", "--green-border", "--green-ink", "--amber-bg", "--amber-ink", "--red-bg",
+  "--zero", "--zero-group", "--rta-neg", "--activity-neg-on-navy", "--disabled",
+  "--scrim", "--scrim-light", "--scrim-select",
 ];
 
 function clearProps(root) {
@@ -101,7 +139,7 @@ function paintMeta(color, system) {
     const light = metas[0];
     const dark = metas[1] || metas[0];
     light.setAttribute("media", "(prefers-color-scheme: light)");
-    light.setAttribute("content", THEMES.paper.bg);
+    light.setAttribute("content", THEMES.standard.bg);
     if (dark !== light) {
       dark.setAttribute("media", "(prefers-color-scheme: dark)");
       dark.setAttribute("content", THEMES.ink.bg);

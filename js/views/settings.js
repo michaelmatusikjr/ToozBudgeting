@@ -73,10 +73,9 @@ export async function renderSettings(root, ctx) {
   const customSaved = await deviceGet("customTheme");
   const phoneDark = matchMedia("(prefers-color-scheme: dark)").matches;
   const grid = h("div", { class: "theme-grid" });
-  for (const id of ["paper", "ink", "dusk"]) {
+  for (const id of ["standard", "paper", "ink", "dusk"]) {
     const t = THEMES[id];
-    const on = stored === id || (stored === "system" && ((phoneDark && id === "ink") || (!phoneDark && id === "paper")));
-    grid.append(themeSwatch(t, on, async () => {
+    grid.append(themeSwatch(t, stored === id, async () => {
       await deviceSet("theme", id);
       paintTheme(id);
       ctx.render();
@@ -91,6 +90,14 @@ export async function renderSettings(root, ctx) {
     if (!saved) { openCustomTheme(ctx, null); return; }
     await deviceSet("theme", "custom");
     paintTheme("custom", saved);
+    ctx.render();
+  }));
+  grid.append(themeSwatch({
+    name: "Match this phone", hint: "Standard in light, Ink in dark",
+    bg: THEMES.standard.bg, surface: THEMES.standard.surface, ink: THEMES.standard.ink, accent: THEMES.standard.accent, band: THEMES.standard.band,
+  }, stored === "system", async () => {
+    await deviceSet("theme", "system");
+    paintTheme("system");
     ctx.render();
   }));
   const appearance = [grid];
