@@ -19,7 +19,7 @@ import {
   listBudgetAccess, setBudgetAccess,
 } from "./auth.js";
 import { push, pull } from "./sync.js";
-import { purgeDeletedBudgets } from "./activity.js";
+import { purgeDeletedBudgets, listActivity, activityCsv, listDeletedBudgets } from "./activity.js";
 import { householdRole, budgetRole, canTakeBankBatch } from "./roles.js";
 
 const VERSION = "2.0.3";
@@ -625,8 +625,14 @@ export function makeHandler({ fetchImpl } = {}) {
       else if (/^\/household\/members\/[^/]+$/.test(path) && m === "DELETE") out = await removeMember(env, s, decodeURIComponent(path.split("/")[3]));
       else if (path === "/household/invites" && m === "POST") out = await createInvite(env, req, s);
       else if (/^\/household\/invites\/[^/]+$/.test(path) && m === "DELETE") out = await revokeInvite(env, s, decodeURIComponent(path.split("/")[3]));
+      else if (path === "/budgets/deleted" && m === "GET") out = await listDeletedBudgets(env, s);
       else if (/^\/budgets\/[^/]+\/access$/.test(path) && m === "GET") out = await listBudgetAccess(env, s, decodeURIComponent(path.split("/")[2]));
       else if (/^\/budgets\/[^/]+\/access$/.test(path) && m === "PUT") out = await setBudgetAccess(env, req, s, decodeURIComponent(path.split("/")[2]));
+      else if (/^\/budgets\/[^/]+\/activity\.csv$/.test(path) && m === "GET") {
+        const csv = await activityCsv(env, url, s, decodeURIComponent(path.split("/")[2]));
+        return new Response(csv.body, { status: 200, headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": `attachment; filename="${csv.filename}"`, "Cache-Control": "no-store", ...cors } });
+      }
+      else if (/^\/budgets\/[^/]+\/activity$/.test(path) && m === "GET") out = await listActivity(env, url, s, decodeURIComponent(path.split("/")[2]));
       else if (path === "/sync/pull" && m === "GET") out = await pull(env, url, s);
       else if (path === "/sync/push" && m === "POST") out = await push(env, req, s);
       else if (path === "/bank/link-token" && m === "POST") out = await linkToken(env, req, plaid, s);

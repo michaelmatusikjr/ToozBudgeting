@@ -2,8 +2,8 @@
  * Activity log: one row per real change that landed on a push (WU-44).
  * Denied, invalid, and losing records are never logged.
  */
-import { now } from "./http.js";
-import { recordBudgetId } from "./roles.js";
+import { now, HttpError } from "./http.js";
+import { recordBudgetId, budgetRole, householdRole } from "./roles.js";
 
 export const ACTIVITY_KEEP_DAYS = 30;
 
@@ -339,4 +339,163 @@ export async function purgeDeletedBudgets(env, asOf = now()) {
   }
   await env.DB.batch(stmts);
   return rows.length;
+}
+
+function notFound() {
+  return new HttpError(404, "Not found", { code: "NOT_FOUND" });
+}
+
+function budgetKey(id) {
+  return String(id || "");
+}
+
+/** Live or deleted-within-30-days budget the person may export (budget Owner or household Owner). */
+export async function activityScope(env, session, budgetId) {
+  const hid = session.householdId;
+  const key = budgetKey(budgetId);
+  if (!key) throw notFound();
+  const live = await env.DB.prepare(
+    "SELECT id, budget_id, body FROM records WHERE household_id = ? AND kind = 'budget' AND deleted = 0 AND (id = ? OR budget_id = ? OR id = ?)"
+  ).bind(hid, key, key, "budget:" + key).first();
+  const deleted = await env.DB.prepare(
+    "SELECT * FROM deleted_budgets WHERE household_id = ? AND (budget_id = ? OR budget_id = ?)"
+  ).bind(hid, key, key.replace(/^budget:/, "")).first();
+  const id = (live && (live.budget_id || (String(live.id).startsWith("budget:") ? live.id.slice(7) : live.id)))
+    || deleted?.budget_id
+    || key.replace(/^budget:/, "");
+  if (!live && !deleted) throw notFound();
+  if (householdRole(session) !== "owner" && budgetRole(session, id) !== "owner") throw notFound();
+  let name = id;
+  if (live) {
+    try { name = JSON.parse(live.body || "null")?.name || name; } catch { /* keep */ }
+  } else if (deleted?.name) name = deleted.name;
+  return { id, name, deleted: !!deleted, deletedAt: deleted?.deleted_at || null };
+}
+
+function parseTime(v) {
+  if (v == null || v === "") return null;
+  const n = Number(v);
+  if (Number.isFinite(n) && n > 0) return n;
+  const d = Date.parse(String(v));
+  return Number.isFinite(d) ? d : null;
+}
+
+async function personNames(env, householdId) {
+  const rows = (await env.DB.prepare(
+    `SELECT u.id, COALESCE(m.display_name, u.name, u.email) AS name
+     FROM users u LEFT JOIN memberships m ON m.user_id = u.id AND m.household_id = ?`
+  ).bind(householdId).all()).results || [];
+  return Object.fromEntries(rows.map((r) => [r.id, r.name]));
+}
+
+export async function listActivity(env, url, session, budgetId, { asCsv = false } = {}) {
+  const scope = await activityScope(env, session, budgetId);
+  const q = url.searchParams;
+  const action = String(q.get("action") || "").trim();
+  const user = String(q.get("user") || "").trim();
+  const category = String(q.get("category") || "").trim();
+  const account = String(q.get("account") || "").trim();
+  const target = String(q.get("target") || "").trim();
+  const from = parseTime(q.get("from"));
+  const to = parseTime(q.get("to"));
+  const before = q.get("before");
+  const cap = asCsv ? 10000 : 100;
+  const limit = Math.max(1, Math.min(cap, Number(q.get("limit") || cap) || cap));
+
+  const where = ["household_id = ?", "budget_id = ?"];
+  const args = [session.householdId, scope.id];
+  if (action) { where.push("action = ?"); args.push(action); }
+  if (user) { where.push("user_id = ?"); args.push(user); }
+  if (category) { where.push("category_id = ?"); args.push(category); }
+  if (account) { where.push("account_id = ?"); args.push(account); }
+  if (target) { where.push("target_id = ?"); args.push(target); }
+  if (from != null) { where.push("at >= ?"); args.push(from); }
+  if (to != null) { where.push("at <= ?"); args.push(to); }
+  if (before) {
+    const cur = await env.DB.prepare("SELECT id, at FROM activity WHERE household_id = ? AND budget_id = ? AND id = ?")
+      .bind(session.householdId, scope.id, Number(before)).first();
+    if (cur) {
+      where.push("(at < ? OR (at = ? AND id < ?))");
+      args.push(cur.at, cur.at, cur.id);
+    }
+  }
+  const sql = `SELECT * FROM activity WHERE ${where.join(" AND ")} ORDER BY at DESC, id DESC LIMIT ?`;
+  args.push(limit + 1);
+  const raw = (await env.DB.prepare(sql).bind(...args).all()).results || [];
+  const more = raw.length > limit;
+  const page = more ? raw.slice(0, limit) : raw;
+  const names = await personNames(env, session.householdId);
+  const events = page.map((r) => ({
+    id: r.id,
+    at: r.at,
+    clientT: r.client_t,
+    userId: r.user_id,
+    person: names[r.user_id] || r.user_id,
+    action: r.action,
+    label: r.label,
+    targetKind: r.target_kind,
+    targetId: r.target_id,
+    categoryId: r.category_id,
+    accountId: r.account_id,
+    amount: r.amount,
+    before: r.before,
+    after: r.after,
+    device: r.device,
+    source: r.source,
+    opId: r.op_id,
+  }));
+  return { budget: { id: scope.id, name: scope.name, deleted: scope.deleted }, events, more, next: more ? String(page[page.length - 1].id) : null };
+}
+
+function csvCell(v) {
+  let s = v == null ? "" : String(v);
+  if (/^[=+\-@]/.test(s)) s = "'" + s;
+  if (/[",\r\n]/.test(s)) s = `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+function isoOffset(at) {
+  return new Date(Number(at) || 0).toISOString();
+}
+
+export async function activityCsv(env, url, session, budgetId) {
+  const data = await listActivity(env, url, session, budgetId, { asCsv: true });
+  const header = ["Date/time", "Person", "Action", "Target", "Category", "Account", "Amount", "Before", "After", "Device", "Source"];
+  const lines = [header.map(csvCell).join(",")];
+  for (const e of data.events) {
+    lines.push([
+      isoOffset(e.at),
+      e.person,
+      e.action,
+      e.targetId,
+      e.categoryId,
+      e.accountId,
+      e.amount,
+      e.before,
+      e.after,
+      e.device,
+      e.source,
+    ].map(csvCell).join(","));
+  }
+  const safe = String(data.budget.name || data.budget.id).replace(/[^\w.-]+/g, "-").slice(0, 40);
+  return { body: lines.join("\r\n") + "\r\n", filename: `${safe}-activity.csv` };
+}
+
+export async function listDeletedBudgets(env, session) {
+  const hid = session.householdId;
+  const rows = (await env.DB.prepare(
+    "SELECT budget_id, name, deleted_at, deleted_by FROM deleted_budgets WHERE household_id = ? ORDER BY deleted_at DESC"
+  ).bind(hid).all()).results || [];
+  const mine = householdRole(session) === "owner"
+    ? rows
+    : rows.filter((r) => budgetRole(session, r.budget_id) === "owner");
+  return {
+    budgets: mine.map((r) => ({
+      id: r.budget_id,
+      name: r.name,
+      deletedAt: r.deleted_at,
+      deletedBy: r.deleted_by,
+      daysLeft: Math.max(0, Math.ceil((r.deleted_at + ACTIVITY_KEEP_DAYS * 86400000 - now()) / 86400000)),
+    })),
+  };
 }
