@@ -1,7 +1,7 @@
-import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog } from "../ui.js?v=134";
-import { fmt, todayKey, toTitleCase, isCard } from "../util.js?v=134";
-import { accountBalances, ccMismatches, staleReconcile, findUnclearedSuggestion, txBalanceEffect } from "../calc.js?v=134";
-import { addAccount, addCreditCard, renameAccount, archiveAccount, deleteAccount, reconcileAccount, addTransaction, isLocked, zeroAccountByUnassign } from "../mutate.js?v=134";
+import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog } from "../ui.js?v=135";
+import { fmt, todayKey, toTitleCase, isCard, monthKey, monthLabel, ccPayCat, round2 } from "../util.js?v=135";
+import { accountBalances, available, globalFree, spentByMonthCat, ccMismatches, staleReconcile, findUnclearedSuggestion, txBalanceEffect } from "../calc.js?v=135";
+import { addAccount, addCreditCard, renameAccount, archiveAccount, deleteAccount, reconcileAccount, addTransaction, isLocked, closeAccountBalance, finishAccountClose } from "../mutate.js?v=135";
 
 export function renderAccounts(root, ctx) {
   const budget = ctx.budget();
@@ -72,77 +72,296 @@ function openAccount(ctx, a, card) {
           }}));
         }});
       }}));
-      host.append(btn(a.archived ? "Restore" : "Archive", { block: true, kind: "ghost", onClick: () => { sheet.close(); requestArchive(ctx, a, card); } }));
-      host.append(btn("Delete", { kind: "danger", block: true, onClick: () => {
-        const txs = (budget.transactions || []).filter((t) => t.accountId === a.id && t.subtype !== "starting_balance");
-        if (txs.length) { toast("Delete isn’t available while this account has transactions. Archive it instead."); return; }
-        confirmDialog({ title: `Delete ${a.name}?`, message: "The starting balance goes with it.", confirm: "Delete", danger: true, onConfirm: () => {
-          ctx.updateBudget((b) => deleteAccount(b, a.id, card));
-          sheet.close();
-          toast("Deleted", { label: "Undo", action: () => ctx.undo() });
-        } });
-      }}));
+      const hasTx = (budget.transactions || []).some((t) => t.accountId === a.id);
+      if (a.archived) {
+        host.append(btn("Restore", { block: true, kind: "ghost", onClick: () => { sheet.close(); requestAccountAction(ctx, a, card, "archive"); } }));
+        if (!hasTx) host.append(btn("Delete", { kind: "danger", block: true, onClick: () => { sheet.close(); requestAccountAction(ctx, a, card, "delete"); } }));
+      } else if (hasTx) {
+        host.append(btn("Archive", { block: true, kind: "ghost", onClick: () => { sheet.close(); requestAccountAction(ctx, a, card, "archive"); } }));
+      } else {
+        host.append(btn("Delete", { kind: "danger", block: true, onClick: () => { sheet.close(); requestAccountAction(ctx, a, card, "delete"); } }));
+      }
     },
   });
 }
 
-function requestArchive(ctx, a, card) {
+function requestAccountAction(ctx, account, card, action, skipReconcile) {
   const budget = ctx.budget();
+  const a = [...(budget.accounts || []), ...(budget.creditCards || [])].find((x) => x.id === account.id) || account;
+  if (a.archived && action === "archive") {
+    ctx.updateBudget((b) => archiveAccount(b, a.id, card));
+    toast("Restored");
+    return;
+  }
   const txs = (budget.transactions || []).filter((t) => t.accountId === a.id);
   const uncat = txs.filter((t) => t.type === "expense" && !t.splits && (!t.categoryId || t.categoryConfirmed === false));
   if (uncat.length) {
-    confirmDialog({ title: "Can’t archive yet", message: `${uncat.length} transaction${uncat.length === 1 ? "" : "s"} still need a category.`, confirm: "Review them", onConfirm: () => ctx.go("transactions", { accountId: a.id }) });
-    return;
-  }
-  const openTxs = txs.filter((t) => !t.reconciled && !isLocked(budget, t));
-  if (openTxs.length) {
+    const verb = action === "delete" ? "delete" : "archive";
     confirmDialog({
-      title: "Reconcile first",
-      message: `${a.name} still has unreconciled transactions. Reconcile before archiving.`,
-      confirm: "Reconcile",
-      onConfirm: () => openReconcile(ctx, a, card, accountBalances(budget)[a.id] || 0, () => ctx.updateBudget((b) => archiveAccount(b, a.id, card))),
+      title: `Cannot ${verb} ${a.name}`,
+      message: `${uncat.length} transaction${uncat.length === 1 ? "" : "s"} ${uncat.length === 1 ? "is" : "are"} missing a category or still unconfirmed. Categorize them before you ${verb} it.`,
+      confirm: "Review",
+      onConfirm: () => ctx.go("transactions", { accountId: a.id, attention: true }),
     });
     return;
   }
-  const bal = accountBalances(budget)[a.id] || 0;
-  if (Math.abs(bal) > 0.005 && !card) {
-    openBalanceResolution(ctx, a, card, bal);
+  if (!txs.length && action === "delete") {
+    confirmDialog({
+      title: `Delete ${a.name}?`,
+      message: "This cannot be undone. You can still undo it from the top bar until you leave.",
+      confirm: "Delete",
+      danger: true,
+      onConfirm: () => {
+        ctx.updateBudget((b) => deleteAccount(b, a.id, card));
+        toast("Deleted", { label: "Undo", action: () => ctx.undo() });
+      },
+    });
     return;
   }
-  ctx.updateBudget((b) => archiveAccount(b, a.id, card));
-  toast(a.archived ? "Restored" : "Archived");
+  if (action === "archive" && !skipReconcile) {
+    const openTxs = txs.filter((t) => !t.reconciled);
+    if (openTxs.length) {
+      confirmDialog({
+        title: "Reconcile first",
+        message: `${a.name} still has unreconciled transactions. Reconcile before archiving.`,
+        confirm: "Reconcile",
+        onConfirm: () => openReconcile(ctx, a, card, accountBalances(budget)[a.id] || 0, () => requestAccountAction(ctx, a, card, action, true)),
+      });
+      return;
+    }
+  }
+  const balance = accountBalances(ctx.budget())[a.id] || 0;
+  if (card) {
+    if (balance <= 0.005) {
+      ctx.updateBudget((b) => archiveAccount(b, a.id, true));
+      toast("Archived", { label: "Undo", action: () => ctx.undo() });
+      return;
+    }
+    const pay = ccPayCat(ctx.budget(), a.id);
+    const setAside = pay ? available(ctx.budget(), pay.id, monthKey()) : 0;
+    if (setAside >= balance - 0.005) {
+      ctx.updateBudget((b) => archiveAccount(b, a.id, true));
+      toast("Archived", { label: "Undo", action: () => ctx.undo() });
+      return;
+    }
+    const short = balance - Math.max(0, setAside);
+    openSheet({
+      title: `Cannot ${action === "delete" ? "delete" : "archive"} ${a.name}`,
+      body: (host) => {
+        host.append(h("p", { class: "lede", text: `${a.name} still has ${fmt(balance)} owed, but the payment category only has ${fmt(Math.max(0, setAside))} set aside. That’s ${fmt(short)} short.` }));
+        host.append(h("p", { class: "hint", text: `Budget another ${fmt(short)} to the ${a.name} payment category, then pay the card off before you ${action === "delete" ? "delete" : "archive"} it.` }));
+        host.append(btn("OK", { block: true, onClick: () => host.closest(".scrim")?.querySelector(".icon-btn")?.click() }));
+      },
+    });
+    return;
+  }
+  if (Math.abs(balance) < 0.005) {
+    ctx.updateBudget((b) => action === "delete" ? deleteAccount(b, a.id, false) : archiveAccount(b, a.id, false));
+    toast(action === "delete" ? "Deleted" : "Archived", { label: "Undo", action: () => ctx.undo() });
+    return;
+  }
+  if (balance < -0.005) {
+    openOverdrawn(ctx, a, action, balance);
+    return;
+  }
+  openBalanceResolution(ctx, a, action, balance);
 }
 
-function openBalanceResolution(ctx, a, card, bal) {
+function accountSources(budget) {
+  const today = monthKey();
+  const spent = spentByMonthCat(budget);
+  const sources = [];
+  const free = globalFree(budget, today);
+  if (free > 0.005) sources.push({ key: "rta", label: "Ready to Assign", month: null, max: free });
+  const months = [...new Set([today, ...Object.keys(budget.monthlyBudgets || {}).filter((mk) => mk >= today)])].sort().reverse();
+  for (const mk of months) {
+    for (const cat of budget.categories || []) {
+      if (cat.archived || cat.creditCardId) continue;
+      const budgeted = Number((budget.monthlyBudgets?.[mk] || {})[cat.id] || 0);
+      const activity = spent[mk]?.[cat.id] || 0;
+      const unspent = budgeted - activity;
+      if (unspent > 0.005) sources.push({ key: `${mk}:${cat.id}`, label: cat.name, month: mk, max: unspent });
+    }
+  }
+  return sources;
+}
+
+function openBalanceResolution(ctx, account, action, balance) {
+  const absBalance = Math.abs(balance);
+  const budget = ctx.budget();
+  const sources = accountSources(budget);
+  const picks = {};
+  const others = (budget.accounts || []).filter((a) => a.id !== account.id && !a.archived);
+  const verb = action === "delete" ? "Delete" : "Archive";
   const sheet = openSheet({
-    title: "Balance remaining",
+    title: `Free up funds to ${verb.toLowerCase()}`,
     body: (host) => {
-      host.append(h("p", { class: "lede", text: `${a.name} still has ${fmt(bal)}. Move it before archiving, or delete the account only if it has no spending.` }));
-      host.append(btn("Transfer out", { block: true, onClick: () => { sheet.close(); openTransfer(ctx, a.id); } }));
-      host.append(btn("Unassign categories to zero it", { kind: "ghost", block: true, onClick: () => { sheet.close(); openClawbackClose(ctx, a, bal); } }));
-      host.append(btn("Archive anyway", { kind: "danger", block: true, onClick: () => { ctx.updateBudget((b) => archiveAccount(b, a.id, card)); sheet.close(); } }));
+      const paint = () => {
+        const selected = Object.values(picks).reduce((s, n) => s + (Number(n) || 0), 0);
+        const still = Math.max(0, absBalance - selected);
+        const covered = still < 0.005;
+        const pool = sources.reduce((s, src) => s + src.max, 0);
+        host.replaceChildren(
+          h("p", { class: "lede", text: `${account.name} · balance ${fmt(absBalance)}` }),
+          h("p", { class: "hint", text: pool + 0.005 < absBalance
+            ? "Tap a source to move it back to Ready to Assign. There isn’t enough here. Transfer the rest."
+            : "Tap a source to move it back to Ready to Assign." }),
+        );
+        if (sources.length) {
+          host.append(btn("Auto-fill", { kind: "ghost", onClick: () => {
+            let left = absBalance;
+            for (const key of Object.keys(picks)) delete picks[key];
+            for (const src of sources) {
+              if (left <= 0.005) break;
+              const take = Math.min(src.max, left);
+              picks[src.key] = round2(take);
+              left = round2(left - take);
+            }
+            paint();
+          }}));
+        } else host.append(h("p", { class: "empty", text: "No unspent budgeted funds available." }));
+        for (const src of sources) {
+          const on = Object.prototype.hasOwnProperty.call(picks, src.key);
+          host.append(h("label", { class: "line" },
+            h("input", { type: "checkbox", checked: on, onchange: () => {
+              if (on) delete picks[src.key];
+              else {
+                const used = Object.entries(picks).reduce((s, [k, n]) => s + (k === src.key ? 0 : Number(n) || 0), 0);
+                picks[src.key] = round2(Math.min(src.max, Math.max(0, absBalance - used)));
+              }
+              paint();
+            }}),
+            h("span", { class: "grow", text: src.label }),
+            h("span", { class: "muted", text: `${src.month ? monthLabel(src.month) : "Current"} · ${fmt(src.max)} unspent` }),
+          ));
+          if (on) {
+            host.append(moneyButton(picks[src.key] || 0, (n) => {
+              picks[src.key] = round2(Math.min(Math.max(0, n), src.max));
+              paint();
+            }, { label: src.label }));
+          }
+        }
+        host.append(h("div", { class: "line" },
+          h("span", { text: "Still needed" }),
+          h("strong", { class: covered ? "money pos" : "money neg", text: covered ? "Fully covered" : fmt(still) }),
+        ));
+        const row = h("div", { class: "row gap wrap" });
+        if (others.length) row.append(btn("Transfer", { kind: "ghost", onClick: () => {
+          sheet.close();
+          openTransfer(ctx, account.id, (bal) => {
+            if (Math.abs(bal) < 0.005) {
+              ctx.updateBudget((b) => finishAccountClose(b, account.id, action, false));
+              toast(action === "delete" ? "Deleted" : "Archived", { label: "Undo", action: () => ctx.undo() });
+            } else if (bal > 0.005) openBalanceResolution(ctx, account, action, bal);
+            else openOverdrawn(ctx, account, action, bal);
+          }, { amount: absBalance });
+        }}));
+        row.append(btn("Cancel", { kind: "quiet", onClick: () => sheet.close() }));
+        row.append(btn(covered ? verb : "Commit", { disabled: selected < 0.005, onClick: () => {
+          if (selected < 0.005) return;
+          const list = Object.entries(picks).filter(([, n]) => n > 0.004).map(([key, amount]) => ({ key, amount }));
+          const res = closeAccountBalance(ctx.budget(), { accountId: account.id, action, selections: list, absBalance });
+          ctx.updateBudget(() => res.budget);
+          sheet.close();
+          if (res.covered) {
+            toast(action === "delete" ? "Deleted" : "Archived", { label: "Undo", action: () => ctx.undo() });
+            return;
+          }
+          openRemainder(ctx, account, action, res.remaining);
+        }}));
+        host.append(row);
+      };
+      paint();
     },
   });
 }
 
-function openTransfer(ctx, fromId) {
+function openRemainder(ctx, account, action, remaining) {
+  const verb = action === "delete" ? "delete" : "archive";
+  const others = (ctx.budget().accounts || []).some((a) => a.id !== account.id && !a.archived);
+  openSheet({
+    title: "Balance not fully covered",
+    body: (host) => {
+      host.append(h("p", { class: "lede", text: `${fmt(remaining)} is still on ${account.name}. Transfer it to another account to ${verb}.` }));
+      host.append(h("p", { class: "hint", text: "What you already pulled has been moved. Cancel leaves the rest on the account." }));
+      if (others) host.append(btn("Transfer the rest", { block: true, onClick: () => {
+        host.closest(".scrim")?.querySelector(".icon-btn")?.click();
+        openTransfer(ctx, account.id, (bal) => {
+          if (Math.abs(bal) < 0.005) {
+            ctx.updateBudget((b) => finishAccountClose(b, account.id, action, false));
+            toast(action === "delete" ? "Deleted" : "Archived", { label: "Undo", action: () => ctx.undo() });
+          } else if (bal > 0.005) openBalanceResolution(ctx, account, action, bal);
+          else toast(`${account.name} is still overdrawn by ${fmt(Math.abs(bal))}.`);
+        }, { amount: remaining });
+      }}));
+      host.append(btn(`Cancel ${verb}`, { kind: "quiet", block: true, onClick: () => host.closest(".scrim")?.querySelector(".icon-btn")?.click() }));
+    },
+  });
+}
+
+function openOverdrawn(ctx, account, action, balance) {
+  const verb = action === "delete" ? "delete" : "archive";
+  const need = Math.abs(balance);
+  const others = (ctx.budget().accounts || []).filter((a) => a.id !== account.id && !a.archived);
+  openSheet({
+    title: `${account.name} is overdrawn`,
+    body: (host) => {
+      host.append(h("p", { class: "lede", text: `${account.name} is overdrawn by ${fmt(need)}. Add money until the balance is zero, then ${verb} it.` }));
+      host.append(h("p", { class: "hint", text: "Categories can’t cover an overdraft. Transfer money in from another account, or record the deposit in Activity." }));
+      if (others.length) {
+        let fromId = others[0].id;
+        const sel = h("select", { class: "input" });
+        for (const a of others) sel.append(h("option", { value: a.id, text: a.name }));
+        sel.addEventListener("change", () => { fromId = sel.value; });
+        host.append(field("From", sel));
+        host.append(btn("Transfer in", { block: true, onClick: () => {
+          host.closest(".scrim")?.querySelector(".icon-btn")?.click();
+          openTransfer(ctx, fromId, (bal) => {
+            if (Math.abs(bal) < 0.005) {
+              ctx.updateBudget((b) => finishAccountClose(b, account.id, action, false));
+              toast(action === "delete" ? "Deleted" : "Archived", { label: "Undo", action: () => ctx.undo() });
+            } else if (bal > 0.005) openBalanceResolution(ctx, account, action, bal);
+            else openOverdrawn(ctx, account, action, bal);
+          }, { amount: need, toId: account.id, watchId: account.id });
+        }}));
+      }
+      host.append(btn("Cancel", { kind: "quiet", block: true, onClick: () => host.closest(".scrim")?.querySelector(".icon-btn")?.click() }));
+    },
+  });
+}
+
+function openTransfer(ctx, fromId, onDone, preset) {
   const budget = ctx.budget();
-  let to = "";
-  let amount = 0;
+  const opts = preset && typeof preset === "object" ? preset : {};
+  const watchId = opts.watchId || fromId;
+  const fromBal = Math.max(0, accountBalances(budget)[fromId] || 0);
+  let to = opts.toId || "";
+  let amount = opts.amount != null ? round2(Math.min(Math.max(0, opts.amount), fromBal || opts.amount)) : (onDone ? fromBal : 0);
   const sheet = openSheet({
     title: "Transfer",
     body: (host) => {
       const sel = h("select", { class: "input" }, h("option", { value: "", text: "Select account" }));
       for (const a of [...budget.accounts, ...budget.creditCards]) if (!a.archived && a.id !== fromId) sel.append(h("option", { value: a.id, text: a.name }));
+      if (to) sel.value = to;
       sel.addEventListener("change", () => { to = sel.value; });
-      host.append(field("To", sel), field("Amount", moneyButton(0, (n) => { amount = n; })),
+      host.append(
+        h("p", { class: "hint", text: `From ${[...budget.accounts, ...budget.creditCards].find((a) => a.id === fromId)?.name || "account"} · ${fmt(fromBal)} available` }),
+        field("To", sel),
+        field("Amount", moneyButton(amount, (n) => { amount = Math.abs(n); }, { label: "Amount" })),
         btn("Transfer", { block: true, onClick: () => {
-          const res = addTransaction(budget, { type: "transfer", accountId: fromId, transferAccountId: to, amount, date: todayKey(), payee: "Transfer" });
+          const cap = Math.max(0, accountBalances(ctx.budget())[fromId] || 0);
+          if (!to || to === fromId) { toast("Pick a different account"); return; }
+          if (!(amount > 0)) { toast("Enter an amount"); return; }
+          if (amount > cap + 0.005) { toast(`Only ${fmt(cap)} can leave this account`); return; }
+          const res = addTransaction(ctx.budget(), { type: "transfer", accountId: fromId, transferAccountId: to, amount, date: todayKey(), payee: "Transfer" });
           if (res.error) { toast(res.error); return; }
           ctx.updateBudget(() => res.budget);
           sheet.close();
-          toast("Transferred", { label: "Undo", action: () => ctx.undo() });
-        }}));
+          const watched = accountBalances(ctx.budget())[watchId] || 0;
+          if (!onDone) toast("Transferred", { label: "Undo", action: () => ctx.undo() });
+          onDone?.(watched);
+        }}),
+      );
     },
   });
 }
@@ -279,32 +498,3 @@ function openNewAccount(ctx, card) {
   });
 }
 
-function openClawbackClose(ctx, account, bal) {
-  const budget = ctx.budget();
-  const month = ctx.month;
-  const pulls = {};
-  const sheet = openSheet({
-    title: "Zero the account",
-    body: (host) => {
-      host.append(h("p", { class: "lede", text: `${account.name} has ${fmt(bal)}. Unassign that much from categories, then the account is adjusted to zero and archived.` }));
-      for (const c of budget.categories) {
-        if (c.archived || c.creditCardId) continue;
-        const av = accountBalances ? (budget.monthlyBudgets?.[month]?.[c.id] || 0) : 0;
-        if (av <= 0.005 && (budget.monthlyBudgets?.[month]?.[c.id] || 0) <= 0) continue;
-        const assigned = Number((budget.monthlyBudgets?.[month] || {})[c.id] || 0);
-        if (assigned <= 0.005) continue;
-        host.append(h("div", { class: "line" }, h("span", { text: `${c.name} (${fmt(assigned)})` }), moneyButton(0, (n) => { pulls[c.id] = Math.min(n, assigned); })));
-      }
-      host.append(btn("Zero and archive", { block: true, onClick: () => {
-        const list = Object.entries(pulls).filter(([, n]) => n > 0).map(([id, amount]) => ({ id, amount }));
-        const sum = list.reduce((s, p) => s + p.amount, 0);
-        if (Math.abs(sum - bal) > 0.05) { toast(`Unassign ${fmt(bal)} in total. That’s ${fmt(sum)} so far.`); return; }
-        ctx.updateBudget((b) => archiveAccount(zeroAccountByUnassign(b, account.id, month, list), account.id, false));
-        sheet.close();
-        toast("Account archived", { label: "Undo", action: () => ctx.undo() });
-      }}));
-    },
-  });
-}
-
-void isCard;

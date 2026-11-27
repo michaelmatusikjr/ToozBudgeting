@@ -1,19 +1,52 @@
-import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, openAmountPad } from "../ui.js?v=134";
-import { fmt, monthLabel, monthKey, prevMonth, nextMonth, todayKey, toTitleCase, uid, round2 } from "../util.js?v=134";
+import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, openAmountPad } from "../ui.js?v=135";
+import { fmt, monthLabel, monthKey, prevMonth, nextMonth, todayKey, toTitleCase, uid, round2 } from "../util.js?v=135";
 import {
   budgetSnapshot, getGoalMetrics, trailingAvg, monthAccessible, historySeries,
   overspentMonths, available, globalFree, ccMismatches,
-} from "../calc.js?v=134";
+} from "../calc.js?v=135";
 import {
   setAssigned, moveMoney, coverOverspending, planClawback, applyClawback,
   computeMonthAssignments, applyAssignments, setCategory, addCategory, archiveCategory,
   deleteCategory, setMonthNote, addGroup, renameGroup, deleteGroup, moveGroup, moveCategory,
-} from "../mutate.js?v=134";
-import { collectReminders } from "../notify.js?v=134";
-import { openMissingSide } from "./transactions.js?v=134";
+} from "../mutate.js?v=135";
+import { collectReminders } from "../notify.js?v=135";
+import { openMissingSide } from "./transactions.js?v=135";
 
 function noteOf(budget, month, cat) {
   return budget.categoryNotes?.[month]?.[cat.id] || "";
+}
+
+const GOAL_HEADING = "--- Goal Changes ---";
+
+function describeGoal(g) {
+  if (!g?.type) return "No goal";
+  if (g.type === "monthly") return `Monthly: ${fmt(g.target || 0)}`;
+  if (g.type === "savings") return `Savings target: ${fmt(g.target || 0)}`;
+  if (g.type === "date") return `By ${g.targetDate || "?"}: ${fmt(g.target || 0)}`;
+  return "No goal";
+}
+
+function splitGoalNote(full) {
+  const text = full || "";
+  const i = text.indexOf(GOAL_HEADING);
+  if (i < 0) return { editable: text, changes: "" };
+  return { editable: text.slice(0, i).trimEnd(), changes: text.slice(i + GOAL_HEADING.length).trim() };
+}
+
+function joinGoalNote(editable, changes) {
+  if (!changes) return editable || "";
+  const head = (editable || "").trimEnd();
+  return (head ? `${head}\n\n` : "") + `${GOAL_HEADING}\n${changes}`;
+}
+
+export function withGoalChange(note, oldGoal, newGoal) {
+  const oldDesc = describeGoal(oldGoal);
+  const newDesc = describeGoal(newGoal);
+  if (oldDesc === newDesc) return note || "";
+  const today = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  const parts = splitGoalNote(note);
+  const changes = parts.changes ? `${parts.changes}\n${oldDesc} → ${newDesc} on ${today}` : `${oldDesc} → ${newDesc} on ${today}`;
+  return joinGoalNote(parts.editable, changes);
 }
 
 export function renderBudget(root, ctx) {
@@ -715,6 +748,7 @@ function openCategory(ctx, cat) {
   let goalTarget = cat.goal?.target || 0;
   let goalDate = cat.goal?.targetDate || "";
   let note = cat.note || "";
+  const goalNote = splitGoalNote(note);
   const sheet = openSheet({
     title: "Category",
     body: (host) => {
@@ -735,6 +769,7 @@ function openCategory(ctx, cat) {
         h("option", { value: "savings", text: "Savings target" }),
       );
       goal.value = goalType;
+      goal.disabled = !!cat.creditCardId;
       const goalBox = h("div");
       const rollBox = h("div");
       const paintExtra = () => {
@@ -766,14 +801,16 @@ function openCategory(ctx, cat) {
       };
       goal.addEventListener("change", () => { goalType = goal.value; paintExtra(); });
       const nt = h("textarea", { class: "input", rows: "3" });
-      nt.value = note;
-      nt.addEventListener("input", () => { note = nt.value; });
+      nt.value = goalNote.editable;
+      nt.addEventListener("input", () => { note = joinGoalNote(nt.value, goalNote.changes); });
       host.append(field("Name", nm), field("Group", group), field("Goal", goal), goalBox, h("p", { class: "kicker", text: "Rollover" }), rollBox, field("Category note", nt));
+      if (goalNote.changes) host.append(h("p", { class: "kicker", text: "Goal changes" }), h("p", { class: "hint", text: goalNote.changes }));
       host.append(btn("Save", { block: true, onClick: () => {
         const titled = toTitleCase(name.trim());
         if (!titled) return;
         if (budget.categories.some((c) => c.id !== cat.id && c.name.toLowerCase() === titled.toLowerCase())) { toast("That category name already exists"); return; }
-        const goalObj = goalType ? { type: goalType, target: goalTarget, ...(goalType === "date" ? { targetDate: goalDate } : {}) } : null;
+        const goalObj = cat.creditCardId ? (cat.goal || null) : (goalType ? { type: goalType, target: goalTarget, ...(goalType === "date" ? { targetDate: goalDate } : {}) } : null);
+        const nextNote = cat.creditCardId ? note : withGoalChange(note, cat.goal, goalObj);
         let rolloverChanges = [...(cat.rolloverChanges || [])];
         const effectiveMonth = past ? today : month;
         const cur = (cat.rolloverChanges || []).filter((c) => c.month <= effectiveMonth).sort((a, b) => b.month.localeCompare(a.month))[0]?.type || cat.rollover || "rollover";
@@ -782,7 +819,7 @@ function openCategory(ctx, cat) {
           rolloverChanges.push({ month: effectiveMonth, type: rollover });
         }
         const max = goalType === "savings" ? Math.max(rolloverMax, goalTarget || 0) : rolloverMax;
-        ctx.updateBudget((b) => setCategory(b, { ...cat, name: titled, groupId, note, rollover: cat.rollover || "rollover", rolloverChanges, rolloverMax: rollover === "max" ? max : 0, goal: goalObj }));
+        ctx.updateBudget((b) => setCategory(b, { ...cat, name: titled, groupId, note: nextNote, rollover: cat.rollover || "rollover", rolloverChanges, rolloverMax: rollover === "max" ? max : 0, goal: goalObj }));
         sheet.close();
       }}));
       host.append(btn("Note for this month", { kind: "ghost", block: true, onClick: () => { sheet.close(); openNote(ctx, cat); } }));
@@ -829,21 +866,42 @@ function openAddCategory(ctx) {
   const budget = ctx.budget();
   let name = "";
   let groupId = budget.categoryGroups.find((g) => g.name !== "Credit Card Payments")?.id || budget.categoryGroups[0]?.id;
+  let rollover = "rollover";
+  let rolloverMax = 0;
+  let primed = false;
   const sheet = openSheet({
     title: "New category",
     body: (host) => {
-      const nm = textInput({ placeholder: "Groceries" });
-      nm.addEventListener("input", () => { name = nm.value; });
-      const group = h("select", { class: "input" });
-      for (const g of budget.categoryGroups) if (g.name !== "Credit Card Payments") group.append(h("option", { value: g.id, text: g.name }));
-      group.value = groupId || "";
-      group.addEventListener("change", () => { groupId = group.value; });
-      host.append(field("Name", nm), field("Group", group), btn("Add", { block: true, onClick: () => {
-        if (!name.trim() || !groupId) return;
-        ctx.updateBudget((b) => addCategory(b, { name, groupId }).budget);
-        sheet.close();
-      }}));
-      nm.focus();
+      const paint = () => {
+        const nm = textInput({ placeholder: "Groceries", value: name });
+        nm.addEventListener("input", () => { name = nm.value; });
+        const group = h("select", { class: "input" });
+        for (const g of budget.categoryGroups) if (g.name !== "Credit Card Payments") group.append(h("option", { value: g.id, text: g.name }));
+        group.value = groupId || "";
+        group.addEventListener("change", () => { groupId = group.value; });
+        const rolls = h("div");
+        for (const [val, title, desc] of [
+          ["rollover", "Roll over", "Leftover carries into next month"],
+          ["return", "Return to Ready to Assign", "Leftover returns to your unassigned pool"],
+          ["max", "Roll over up to a maximum", "Excess above the limit returns to Ready to Assign"],
+        ]) {
+          rolls.append(h("label", { class: `choice ${rollover === val ? "on" : ""}` },
+            h("input", { type: "radio", name: "new-roll", value: val, checked: rollover === val, onchange: () => { rollover = val; paint(); } }),
+            h("span", {}, h("strong", { text: title }), h("span", { class: "muted", text: desc })),
+          ));
+        }
+        host.replaceChildren(field("Name", nm), field("Group", group), h("p", { class: "kicker", text: "Rollover" }), rolls);
+        if (rollover === "max") host.append(field("Maximum rollover", moneyButton(rolloverMax, (n) => { rolloverMax = n; }, { label: "Maximum rollover" })));
+        host.append(btn("Add", { block: true, onClick: () => {
+          if (!name.trim() || !groupId) return;
+          const res = addCategory(ctx.budget(), { name, groupId, rollover, rolloverMax });
+          if (res.error) { toast(res.error); return; }
+          ctx.updateBudget(() => res.budget);
+          sheet.close();
+        }}));
+        if (!primed) { primed = true; nm.focus(); }
+      };
+      paint();
     },
   });
 }

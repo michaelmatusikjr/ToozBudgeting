@@ -1,7 +1,7 @@
 /** What's new: toast on a real version change, then a carousel of short animated recreations. */
-import { h, openSheet, btn, icon, toast } from "./ui.js?v=134";
-import { APP_VERSION } from "./util.js?v=134";
-import { deviceGet, deviceSet } from "./store.js?v=134";
+import { h, openSheet, btn, icon, toast } from "./ui.js?v=135";
+import { APP_VERSION } from "./util.js?v=135";
+import { deviceGet, deviceSet } from "./store.js?v=135";
 
 const RELEASES = [
   {
@@ -76,6 +76,16 @@ const RELEASES = [
         demo: "plan",
         title: "Cover overspending properly.",
         body: "Pick the categories the money comes from. The gap shrinks as you add them. A negative available amount moves money in, instead of opening cover.",
+      },
+    ],
+  },
+  {
+    version: "1.3.3",
+    slides: [
+      {
+        demo: "lists",
+        title: "Closing an account pulls the money first.",
+        body: "A leftover balance comes out of Ready to Assign and unspent categories, or you transfer what is left. A new category can roll over, return, or cap. Goal changes are written on the category note.",
       },
     ],
   },

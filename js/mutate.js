@@ -2,12 +2,12 @@
 import {
   uid, toTitleCase, monthKey, todayKey, nextMonth, prevMonth, isCard, isBank, ccPayCat,
   isPayFrom, payFromId, round2, deepClone,
-} from "./util.js?v=134";
-import { available, readyToAssign, getGoalMetrics, globalFree, furthestMonth, accountBalances } from "./calc.js?v=134";
+} from "./util.js?v=135";
+import { available, readyToAssign, getGoalMetrics, globalFree, furthestMonth, accountBalances } from "./calc.js?v=135";
 import {
   ensurePayee, prunePayees, findFuzzyDuplicates, runPaymentMatchScan, displayName,
   originalsForCanonical, payeeDefaultCategory, payeeSuggestedCategory,
-} from "./payees.js?v=134";
+} from "./payees.js?v=135";
 
 const stamp = () => new Date().toISOString();
 
@@ -525,9 +525,17 @@ export function setCategory(budget, cat) {
   return touch(budget, { categories: budget.categories.map((c) => c.id === cat.id ? cat : c) });
 }
 
-export function addCategory(budget, { name, groupId }) {
+export function addCategory(budget, { name, groupId, rollover, rolloverMax }) {
   const titled = toTitleCase(name.trim());
-  const cat = { id: uid(), groupId, name: titled, rollover: "rollover", archived: false };
+  if (!titled || !groupId) return { budget, error: "Name and group are required." };
+  if ((budget.categories || []).some((c) => c.name.toLowerCase() === titled.toLowerCase())) {
+    return { budget, error: `A category named "${titled}" already exists.` };
+  }
+  const roll = rollover === "return" || rollover === "max" ? rollover : "rollover";
+  const cat = {
+    id: uid(), groupId, name: titled, rollover: roll, archived: false,
+    rolloverMax: roll === "max" ? round2(rolloverMax || 0) : 0,
+  };
   return { budget: touch(budget, { categories: [...budget.categories, cat] }), cat };
 }
 
@@ -730,6 +738,55 @@ export function zeroAccountByUnassign(budget, accountId, month, pulls) {
     inflows: inf,
     moneyMoveLog: logMove(budget, { type: "close", month, entries }),
   });
+}
+
+/** Pull Ready to Assign and unspent assignments, then zero a bank account. */
+export function closeAccountBalance(budget, { accountId, action, selections, absBalance }) {
+  const todayMk = monthKey();
+  const mb = deepClone(budget.monthlyBudgets || {});
+  const entries = [];
+  let selected = 0;
+  let room = round2(Math.abs(absBalance) || 0);
+  for (const sel of selections || []) {
+    let amt = round2(sel.amount);
+    if (!(amt > 0.004) || room < 0.005) continue;
+    if (amt > room) amt = room;
+    selected = round2(selected + amt);
+    room = round2(room - amt);
+    if (sel.key === "rta") continue;
+    const cut = String(sel.key).indexOf(":");
+    if (cut < 0) continue;
+    const mk = sel.key.slice(0, cut);
+    const catId = sel.key.slice(cut + 1);
+    mb[mk] = { ...(mb[mk] || {}) };
+    mb[mk][catId] = round2(Math.max(0, (mb[mk][catId] || 0) - amt));
+    entries.push({ from: catId, to: "rta", amount: amt });
+  }
+  const covered = Math.abs(absBalance) - selected < 0.005;
+  const amountToRemove = round2(covered ? Math.abs(absBalance) : selected);
+  if (!(amountToRemove > 0.004)) return { budget, covered: false, remaining: round2(Math.abs(absBalance)) };
+  const label = action === "delete" ? "Delete" : "Archive";
+  const tx = {
+    id: uid(), date: `${todayMk}-01`, payee: `${label} Adjustment`, originalPayee: `${label} Adjustment`,
+    note: `Account ${label.toLowerCase()}d`, type: "adjustment", accountId, amount: round2(-amountToRemove), reconciled: true,
+  };
+  const inf = { ...(budget.inflows || {}) };
+  inf[todayMk] = round2((inf[todayMk] || 0) - amountToRemove);
+  let next = touch(budget, {
+    monthlyBudgets: mb,
+    transactions: [...(budget.transactions || []), tx],
+    inflows: inf,
+    moneyMoveLog: entries.length ? logMove(budget, { type: "move", month: todayMk, entries }) : budget.moneyMoveLog,
+  });
+  if (covered) next = finishAccountClose(next, accountId, action, false);
+  return { budget: next, covered, remaining: round2(Math.max(0, Math.abs(absBalance) - selected)) };
+}
+
+export function finishAccountClose(budget, accountId, action, card) {
+  if (action === "delete" && !card) {
+    return touch(budget, { accounts: (budget.accounts || []).filter((a) => a.id !== accountId) });
+  }
+  return archiveAccount(budget, accountId, !!card);
 }
 
 export function freshBudgetShell(name, ownerId) {
