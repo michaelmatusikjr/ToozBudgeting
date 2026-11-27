@@ -28,7 +28,22 @@ export function h(tag, attrs, ...kids) {
 
 export function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); return node; }
 
+export function append(node, ...kids) {
+  for (const kid of kids.flat(Infinity)) {
+    if (kid == null || kid === false) continue;
+    if (typeof kid === "string" || typeof kid === "number") node.append(document.createTextNode(String(kid)));
+    else node.append(kid);
+  }
+  return node;
+}
+
+const ICON_EMOJI = {
+  budget: "📊", tx: "💸", accounts: "🏦", payees: "👥", settings: "⚙️",
+  bell: "🔔", plus: "＋", undo: "↩", redo: "↪", check: "✅", close: "✕", chev: "▶",
+};
+
 export function icon(name) {
+  if (ICON_EMOJI[name]) return h("span", { class: "ico-emoji", "aria-hidden": "true", text: ICON_EMOJI[name] });
   const paths = {
     budget: '<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/>',
     tx: '<path d="M4 7h16M4 12h16M4 17h10"/><path d="M15 15l3 3 3-3"/>',
@@ -84,14 +99,21 @@ export function closeAllModals() {
   while (stack.length) dismiss(stack[stack.length - 1]);
 }
 
-export function openSheet({ title, body, onClose }) {
+export function openSheet({ title, body, onClose, closeLabel, blocking = false }) {
   document.body.classList.add("modal-open");
-  const scrim = h("div", { class: "scrim", onclick: (e) => { if (e.target === scrim) dismiss(scrim); } });
+  const scrim = h("div", { class: "scrim", onclick: (e) => { if (!blocking && e.target === scrim) dismiss(scrim); } });
   scrim._onClose = onClose;
+  scrim._blocking = !!blocking;
   const sheet = h("div", { class: "sheet", role: "dialog", "aria-modal": "true" });
+  const closeBtn = blocking ? null : h("button", {
+    class: "sheet-close", type: "button",
+    "aria-label": closeLabel || "Close",
+    onclick: () => dismiss(scrim),
+    text: closeLabel || "✕",
+  });
   const head = h("div", { class: "sheet-head" },
     h("h2", { class: "sheet-title", text: title || "" }),
-    h("button", { class: "icon-btn", type: "button", "aria-label": "Close", onclick: () => dismiss(scrim) }, icon("close")),
+    closeBtn,
   );
   const content = h("div", { class: "sheet-body" });
   if (typeof body === "function") body(content);
@@ -100,8 +122,52 @@ export function openSheet({ title, body, onClose }) {
   scrim.append(sheet);
   document.body.append(scrim);
   stack.push(scrim);
-  sheet.querySelector(".icon-btn")?.focus?.();
-  return { content, close: () => dismiss(scrim) };
+  (closeBtn || sheet.querySelector("button, input, select, textarea"))?.focus?.();
+  return { content, close: () => dismiss(scrim), blocking: !!blocking };
+}
+
+export function btnRow(cancel, save) {
+  const toBtn = (spec, fallback) => {
+    if (spec instanceof Node) return spec;
+    const o = spec || fallback;
+    return btn(o.label || fallback.label, {
+      kind: o.kind || fallback.kind,
+      disabled: !!o.disabled,
+      onClick: o.onClick,
+    });
+  };
+  const cancelBtn = toBtn(cancel, { label: "Cancel", kind: "ghost" });
+  const saveBtn = toBtn(save, { label: "Save", kind: "primary" });
+  return h("div", { class: "btn-row" }, cancelBtn, saveBtn);
+}
+
+export function iconBtn(opts = {}) {
+  const kids = opts.children == null ? [] : (Array.isArray(opts.children) ? opts.children : [opts.children]);
+  if (opts.text != null) kids.push(h("span", { "aria-hidden": "true", text: opts.text }));
+  return h("button", {
+    type: "button",
+    class: `ico-btn${opts.active ? " on" : ""}`,
+    disabled: !!opts.disabled,
+    "aria-label": opts.label || opts["aria-label"] || "",
+    onclick: opts.onClick,
+  }, ...kids);
+}
+
+export function confirmModal({ title, body, yes = "OK", no = "Cancel", danger = false, onYes, onNo } = {}) {
+  return new Promise((resolve) => {
+    const sheet = openSheet({
+      title: title || "",
+      body: (root) => {
+        if (typeof body === "function") body(root);
+        else if (body instanceof Node) root.append(body);
+        else if (body) root.append(h("p", { class: "lede", text: String(body) }));
+        root.append(btnRow(
+          { label: no, kind: "ghost", onClick: () => { sheet.close(); onNo?.(); resolve(false); } },
+          { label: yes, kind: danger ? "danger" : "primary", onClick: () => { sheet.close(); onYes?.(); resolve(true); } },
+        ));
+      },
+    });
+  });
 }
 
 export function field(label, control) {
@@ -190,11 +256,10 @@ export function confirmDialog({ title, message, confirm = "Confirm", danger = fa
     body: (root) => {
       root.append(h("p", { class: "lede", text: message }));
       extra?.(root, sheet);
-      const row = h("div", { class: "row gap" },
-        btn("Cancel", { kind: "ghost", onClick: () => sheet.close() }),
-        btn(confirm, { kind: danger ? "danger" : "primary", onClick: () => { sheet.close(); onConfirm?.(); } }),
-      );
-      root.append(row);
+      root.append(btnRow(
+        { label: "Cancel", kind: "ghost", onClick: () => sheet.close() },
+        { label: confirm, kind: danger ? "danger" : "primary", onClick: () => { sheet.close(); onConfirm?.(); } },
+      ));
     },
   });
 }
@@ -210,7 +275,11 @@ export function keepFocus(el) {
 }
 
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && stack.length) { e.preventDefault(); closeModal(); }
+  if (e.key !== "Escape" || !stack.length) return;
+  const top = stack[stack.length - 1];
+  if (top._blocking) { e.preventDefault(); return; }
+  e.preventDefault();
+  closeModal();
 });
 
 function bindKeyboard() {
