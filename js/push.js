@@ -248,16 +248,27 @@ export async function disablePush() {
 }
 
 export async function pushOnOpen(budget) {
-  const s = await loadState();
-  if (!s.on) return;
+  return pushCleanupOnce();
+}
+
+/** One-time cleanup: unregister with the old push server and unsubscribe this device. */
+export async function pushCleanupOnce() {
   try {
-    const cfg = await pushConfig();
-    const sub = await currentSubscription(cfg);
-    if (sub && sub.endpoint !== s.endpoint) {
-      await api("POST", "/api/subscription", { subscription: sub.toJSON() });
-      await saveState({ endpoint: sub.endpoint });
+    if (await deviceGet("pushRemoved")) return false;
+    const s = await loadState();
+    let sub = null;
+    try {
+      const reg = await navigator.serviceWorker?.getRegistration?.();
+      sub = await reg?.pushManager?.getSubscription();
+    } catch { /* ignore */ }
+    if (!sub && !s.on && !s.token) {
+      await deviceSet("pushRemoved", true);
+      return false;
     }
-  } catch { /* reported by sync */ }
-  try { await syncSchedule(budget); } catch (e) { await saveState({ pending: true, error: plainError(e) }); }
-  await checkHealth();
+    await disablePush();
+    await deviceSet("pushRemoved", true);
+    return true;
+  } catch {
+    return false;
+  }
 }

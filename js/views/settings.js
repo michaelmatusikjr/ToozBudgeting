@@ -2,7 +2,6 @@ import { h, btn, openSheet, field, textInput, toast, confirmDialog } from "../ui
 import { APP_VERSION, toTitleCase, uid } from "../util.js?v=154";
 import { exportData, deviceGet, deviceSet, importData } from "../store.js?v=154";
 import { freshBudgetShell, copyCategories, addAccount, addCreditCard } from "../mutate.js?v=154";
-import { pushConfig, setPushConfig, pushStatus, enablePush, disablePush, DEFAULTS, syncSchedule } from "../push.js?v=154";
 import { requestPermission, scheduleLocal } from "../notify.js?v=154";
 import { isIOS, isStandalone, canInstall, promptInstall } from "../pwa.js?v=154";
 import { openWhatsNew } from "../whatsnew.js?v=154";
@@ -15,8 +14,6 @@ export async function renderSettings(root, ctx) {
   const user = (ctx.state.users || []).find((u) => u.userId === ctx.state.activeUserId);
   const theme = (await deviceGet("theme")) || "system";
   const perm = "Notification" in window ? Notification.permission : "unsupported";
-  const status = await pushStatus();
-  const cfg = await pushConfig();
 
   root.append(h("header", { class: "view-head" }, h("h1", { text: "Settings" })));
   root.append(section("Household", await householdSection(ctx)));
@@ -105,20 +102,9 @@ export async function renderSettings(root, ctx) {
   if (stored === "custom") appearance.push(btn("Edit colors", { kind: "ghost", block: true, onClick: () => openCustomTheme(ctx, customSaved) }));
   root.append(section("Appearance", appearance));
   const notif = section("Notifications", [
-    h("p", { class: "hint", text: `Permission: ${perm}. ${status.text}` }),
-    isIOS() && !isStandalone() ? h("p", { class: "hint", text: "On iPhone, add ToozBudgeting to the Home Screen before notifications can fire while the app is closed. iOS 16.4 or later." }) : null,
+    h("p", { class: "hint", text: `Permission: ${perm}.` }),
+    isIOS() && !isStandalone() ? h("p", { class: "hint", text: "On iPhone, add ToozBudgeting to the Home Screen before notifications can show. iOS 16.4 or later." }) : null,
     btn(perm === "granted" ? "Notifications allowed" : "Allow notifications", { block: true, kind: "ghost", disabled: perm === "granted", onClick: async () => { await requestPermission(); scheduleLocal(ctx.budget(), ctx.month); ctx.render(); } }),
-    btn(status.kind === "off" || status.kind === "ios" ? "Remind me when the app is closed" : "Turn off closed-app reminders", { block: true, onClick: async () => {
-      if (status.kind !== "off" && status.kind !== "ios" && status.kind !== "unsupported") {
-        await disablePush(); ctx.render(); return;
-      }
-      const res = await enablePush();
-      if (!res.ok) { toast(res.message); return; }
-      try { await syncSchedule(ctx.budget()); } catch (e) { toast(e.message || "Couldn’t sync rules"); }
-      ctx.render();
-    }}),
-    btn("Reminder rules", { kind: "quiet", block: true, onClick: () => editReminders(ctx) }),
-    btn("Push server", { kind: "quiet", block: true, onClick: () => editPush(ctx, cfg) }),
   ]);
   root.append(notif);
   // Google sign-in replaces the old on-device accounts: once signed in, this section is gone (Household shows who you are).
@@ -282,67 +268,6 @@ function importFile(ctx) {
   input.click();
 }
 
-function editPush(ctx, cfg) {
-  const server = textInput({ value: cfg.serverUrl });
-  const pub = textInput({ value: cfg.publicKey });
-  const key = textInput({ value: cfg.registerKey });
-  const sheet = openSheet({ title: "Push server", body: (host) => {
-    host.append(
-      h("p", { class: "hint", text: "Prefilled for the deployed ToozBudgeting worker. Change these only if you point the app at another server." }),
-      field("Server URL", server), field("VAPID public key", pub), field("Register key", key),
-      btn("Save", { block: true, onClick: async () => {
-        await setPushConfig({ serverUrl: server.value, publicKey: pub.value, registerKey: key.value });
-        sheet.close(); toast("Saved on this device");
-      }}),
-      btn("Reset to deployed server", { kind: "quiet", onClick: async () => {
-        await setPushConfig({ serverUrl: DEFAULTS.serverUrl, publicKey: DEFAULTS.publicKey, registerKey: DEFAULTS.registerKey });
-        sheet.close();
-      }}),
-    );
-  }});
-}
-
-function editReminders(ctx) {
-  const budget = ctx.budget();
-  const pending = new Map();
-  const sheet = openSheet({ title: "Reminders", body: (host) => {
-    host.append(h("p", { class: "lede", text: "Bill due dates, and one-off reminders. The app also watches overspending, reconciliation, Ready to Assign, and card payments. A goal that is short is marked on the plan. It does not raise a notice." }));
-    for (const cat of budget.categories.filter((c) => !c.archived && !c.creditCardId)) {
-      const day = h("input", { class: "input", type: "number", min: "1", max: "28", value: cat.dueDay || "", placeholder: "Day" });
-      const lead = h("input", { class: "input", type: "number", min: "0", max: "14", value: cat.leadDays || 0 });
-      const remember = () => pending.set(cat.id, { dueDay: day.value ? Number(day.value) : null, leadDays: Number(lead.value) || 0 });
-      day.addEventListener("change", remember);
-      lead.addEventListener("change", remember);
-      host.append(h("div", { class: "remind-row" },
-        h("strong", { text: cat.name }),
-        h("div", { class: "pair-inputs" }, field("Day of month", day), field("Days before", lead)),
-      ));
-    }
-    host.append(btn("Custom reminder", { kind: "ghost", onClick: () => {
-      const title = textInput({ placeholder: "Title" });
-      const when = h("input", { class: "input", type: "date", value: new Date().toISOString().slice(0, 10) });
-      const time = h("input", { class: "input", type: "time", value: "09:00" });
-      const s2 = openSheet({ title: "Custom reminder", body: (h2) => {
-        h2.append(field("Title", title), field("Date", when), field("Time", time), btn("Save", { block: true, onClick: () => {
-          const rec = { id: uid(), kind: "custom", enabled: true, title: title.value.trim() || "Reminder", body: "Open ToozBudgeting", date: when.value, time: time.value, recur: { type: "none" }, url: "./#budget", tag: uid() };
-          ctx.updateBudget((b) => ({ ...b, reminders: [...(b.reminders || []), rec] }));
-          s2.close();
-        }}));
-      }});
-    }}));
-    host.append(
-      h("p", { class: "hint", text: "Day of month and lead days (0–14) for each category. Leave the day blank to skip." }),
-      btn("Save due dates", { block: true, onClick: () => {
-        if (pending.size) {
-          ctx.updateBudget((b) => ({ ...b, categories: b.categories.map((c) => pending.has(c.id) ? { ...c, ...pending.get(c.id) } : c) }));
-        }
-        sheet.close();
-        toast("Reminders saved");
-      }}),
-    );
-  }});
-  void uid;
-}
 
 function upgrade(ctx, user) {
   const name = textInput({ value: user?.displayName?.startsWith("Guest-") ? "" : (user?.displayName || "") });

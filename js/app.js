@@ -9,7 +9,7 @@ import { renderPayees } from "./views/payees.js?v=154";
 import { renderSettings } from "./views/settings.js?v=154";
 import { registerSW, activateWaiting } from "./pwa.js?v=154";
 import { scheduleLocal, collectReminders } from "./notify.js?v=154";
-import { pushOnOpen } from "./push.js?v=154";
+import { pushCleanupOnce } from "./push.js?v=154";
 import { bankOnOpen } from "./banksync.js?v=154";
 import { normalizeBudget } from "./mutate.js?v=154";
 import { announceIfUpdated } from "./whatsnew.js?v=154";
@@ -371,7 +371,7 @@ async function boot() {
   ctx.render();
   if (ctx.budget()) {
     scheduleLocal(ctx.budget(), ctx.month);
-    pushOnOpen(ctx.budget());
+    pushCleanupOnce();
     bankOnOpen(ctx);
   }
   document.addEventListener("visibilitychange", () => {

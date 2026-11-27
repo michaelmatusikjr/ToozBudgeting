@@ -1,7 +1,7 @@
 /** Local reminders while the app is open. Closed-app delivery is js/push.js. */
 import { deviceGet, deviceSet } from "./store.js?v=154";
 import { monthKey, todayKey, timeZone, monthLabel, fmt } from "./util.js?v=154";
-import { overspentMonths, staleReconcile, ccMismatches, readyToAssign } from "./calc.js?v=154";
+import { overspentMonths, staleReconcile, ccMismatches } from "./calc.js?v=154";
 
 const timers = new Set();
 
@@ -65,14 +65,6 @@ export function collectReminders(budget, month) {
       url: `./#accounts/${s.id}`, tag: `recon:${s.id}`, date: today, recur: { type: "none" },
     });
   }
-  const rta = readyToAssign(budget, monthKey());
-  if (rta < 0.005) {
-    push({
-      id: `rta:${monthKey()}`, kind: "rta", title: "Ready to Assign is low",
-      body: rta < -0.005 ? "Ready to Assign is negative. Move money before new spending." : "Ready to Assign is empty for this month.",
-      url: "./#budget", tag: `rta:${monthKey()}`, date: today, recur: { type: "none" },
-    });
-  }
   for (const m of ccMismatches(budget, monthKey())) {
     push({
       id: `cc:${m.card.id}`, kind: "cc", title: `${m.card.name} payment is short`,
@@ -98,18 +90,6 @@ export function collectReminders(budget, month) {
       date: today, recur: { type: "none" },
     });
   }
-  for (const cat of budget.categories || []) {
-    if (cat.archived || !cat.dueDay) continue;
-    push({
-      id: `bill:${cat.id}`, kind: "bill", title: cat.name + " due",
-      body: `Due on day ${cat.dueDay}.`,
-      url: `./#budget/${month || monthKey()}/${cat.id}`, tag: `bill:${cat.id}`,
-      time: cat.reminderTime || "09:00",
-      offsetDays: -(cat.leadDays || 0),
-      recur: { type: "monthly", start: today },
-    });
-  }
-  for (const r of budget.reminders || []) push(r);
   return rules;
 }
 
