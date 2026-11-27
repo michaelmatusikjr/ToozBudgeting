@@ -14,7 +14,7 @@
  */
 import { HttpError, now, readJson } from "./http.js";
 import { requireAction } from "./auth.js";
-import { SYNC_KINDS, canReadRecord, canWriteRecord, OWNER_ONLY_BUDGET_FIELDS } from "./roles.js";
+import { SYNC_KINDS, canReadRecord, canWriteRecord, canCreateBudget, recordBudgetId, OWNER_ONLY_BUDGET_FIELDS } from "./roles.js";
 
 const MAX_PUSH_BYTES = 1500 * 1024;
 const MAX_PUSH_RECORDS = 1000;
@@ -51,18 +51,57 @@ export async function push(env, req, session) {
   const body = await readJson(req, MAX_PUSH_BYTES);
   const raw = Array.isArray(body.records) ? body.records : [];
   if (raw.length > MAX_PUSH_RECORDS) throw new HttpError(413, `Send at most ${MAX_PUSH_RECORDS} records at a time`);
-  const byId = new Map();
-  const denied = [];
+  const cleaned = [];
   let invalid = 0;
   for (const r of raw) {
     const c = cleanRecord(r);
     if (!c) { invalid++; continue; }
-    if (!canWriteRecord(session.member, c)) { denied.push(c.id); continue; }
+    cleaned.push(c);
+  }
+  const hid = session.householdId;
+
+  // Which budget headers already exist live? A missing or tombstoned header is a create (D3, D4).
+  const headerKeys = new Set();
+  for (const c of cleaned) {
+    if (c.kind !== "budget") continue;
+    headerKeys.add(c.id);
+    const bid = recordBudgetId(c);
+    if (bid) headerKeys.add(bid);
+  }
+  const existingLive = new Set();
+  const existingName = new Map();
+  if (headerKeys.size) {
+    const rows = (await env.DB.prepare(
+      "SELECT id, budget_id, deleted, body FROM records WHERE household_id = ? AND kind = 'budget' AND (id IN (SELECT value FROM json_each(?)) OR budget_id IN (SELECT value FROM json_each(?)))"
+    ).bind(hid, JSON.stringify([...headerKeys]), JSON.stringify([...headerKeys])).all()).results || [];
+    for (const row of rows) {
+      const keys = [row.id, row.budget_id].filter(Boolean);
+      let name = null;
+      try { name = JSON.parse(row.body || "null")?.name || null; } catch { name = null; }
+      for (const k of keys) if (name) existingName.set(k, name);
+      if (!row.deleted) for (const k of keys) existingLive.add(k);
+    }
+  }
+
+  const byId = new Map();
+  const denied = [];
+  const creates = new Set(); // budget ids this push is creating
+  for (const c of cleaned) {
+    const bid = recordBudgetId(c);
+    const isCreate = c.kind === "budget" && !c.deleted && !existingLive.has(c.id) && (!bid || !existingLive.has(bid));
+    if (isCreate) {
+      if (!canCreateBudget(session)) { denied.push(c.id); continue; }
+      if (bid) creates.add(bid);
+    } else if (creates.has(bid) && canCreateBudget(session)) {
+      // Same-push child records of a budget this person is creating.
+    } else if (!canWriteRecord(session, c)) {
+      denied.push(c.id);
+      continue;
+    }
     const prev = byId.get(c.id);
     if (!prev || c.t > prev.t || (c.t === prev.t && c.dev > prev.dev)) byId.set(c.id, c);
   }
   const list = [...byId.values()];
-  const hid = session.householdId;
 
   if (session.member.role !== "owner") {
     const headers = list.filter((r) => r.kind === "budget" && r.body);
@@ -83,7 +122,7 @@ export async function push(env, req, session) {
   }
 
   if (list.length) {
-    await env.DB.batch([
+    const stmts = [
       env.DB.prepare(`INSERT INTO records (household_id, id, kind, budget_id, body, deleted, t, dev, seq, updated_by, updated_at)
         SELECT ?1, json_extract(value, '$.id'), json_extract(value, '$.kind'), json_extract(value, '$.budgetId'), json_extract(value, '$.body'),
           json_extract(value, '$.deleted'), json_extract(value, '$.t'), json_extract(value, '$.dev'),
@@ -95,7 +134,28 @@ export async function push(env, req, session) {
         WHERE excluded.t > records.t OR (excluded.t = records.t AND excluded.dev > records.dev)`)
         .bind(hid, session.user.id, now(), JSON.stringify(list.map(({ sentT, overridden, ...r }) => r))),
       env.DB.prepare("UPDATE households SET seq = seq + ? WHERE id = ?").bind(list.length, hid),
-    ]);
+    ];
+    const created = [...creates];
+    if (created.length) {
+      stmts.push(env.DB.prepare(
+        `INSERT OR IGNORE INTO budget_access (household_id, budget_id, user_id, role, granted_by, granted_at)
+         SELECT ?1, value, ?2, 'owner', ?2, ?3 FROM json_each(?4)`
+      ).bind(hid, session.user.id, now(), JSON.stringify(created)));
+      stmts.push(env.DB.prepare(
+        "UPDATE memberships SET access_rev = access_rev + 1 WHERE household_id = ? AND user_id = ?"
+      ).bind(hid, session.user.id));
+    }
+    for (const tomb of list.filter((r) => r.kind === "budget" && r.deleted)) {
+      const bid = recordBudgetId(tomb) || tomb.id;
+      let name = existingName.get(bid) || existingName.get(tomb.id) || bid;
+      try { name = JSON.parse(tomb.body || "null")?.name || name; } catch { /* keep */ }
+      stmts.push(env.DB.prepare(
+        `INSERT INTO deleted_budgets (household_id, budget_id, name, deleted_at, deleted_by)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(household_id, budget_id) DO UPDATE SET name = excluded.name, deleted_at = excluded.deleted_at, deleted_by = excluded.deleted_by`
+      ).bind(hid, bid, String(name || bid).slice(0, 200), now(), session.user.id));
+    }
+    await env.DB.batch(stmts);
   }
   // Find what didn't land as sent (lost to a newer edit, clamped, or owner-only fields kept), and send those back.
   const sent = new Map(list.map((r) => [r.id, r]));
@@ -112,7 +172,7 @@ export async function push(env, req, session) {
   const current = [];
   if (differs.length) {
     const rows = (await env.DB.prepare("SELECT * FROM records WHERE household_id = ? AND id IN (SELECT value FROM json_each(?))").bind(hid, JSON.stringify(differs.slice(0, 2000))).all()).results || [];
-    for (const row of rows) if (canReadRecord(session.member, row)) current.push(rowView(row));
+    for (const row of rows) if (canReadRecord(session, row)) current.push(rowView(row));
   }
   const seq = (await env.DB.prepare("SELECT seq FROM households WHERE id = ?").bind(hid).first())?.seq || 0;
   // from: the seq just before this push (the bump and the insert are one transaction). When it equals the
@@ -128,7 +188,7 @@ export async function pull(env, url, session) {
   const limit = Math.max(1, Math.min(PULL_LIMIT, Number(url.searchParams.get("limit") || PULL_LIMIT) || PULL_LIMIT));
   const rows = (await env.DB.prepare("SELECT * FROM records WHERE household_id = ? AND seq > ? ORDER BY seq LIMIT ?").bind(session.householdId, since, limit).all()).results || [];
   const records = [];
-  for (const row of rows) if (canReadRecord(session.member, row)) records.push(rowView(row));
+  for (const row of rows) if (canReadRecord(session, row)) records.push(rowView(row));
   const last = rows.length ? rows[rows.length - 1].seq : since;
   return { records, seq: last, more: rows.length === limit, accessRev: session.member.accessRev, role: session.member.role };
 }

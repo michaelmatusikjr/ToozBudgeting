@@ -412,6 +412,8 @@ export async function meView(env, session) {
     user: { ...session.user, displayName: session.member.displayName },
     household: { id: hh?.id, name: hh?.name, seq: hh?.seq || 0, records: count },
     role: session.member.role,
+    householdRole: session.member.householdRole,
+    access: session.access || {},
     scopes: session.member.scopes,
     accessRev: session.member.accessRev,
     sessionId: session.sessionId,

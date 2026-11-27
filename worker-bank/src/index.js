@@ -18,6 +18,7 @@ import {
   listMembers, createInvite, revokeInvite, updateMember, removeMember, renameHousehold, signInReady, ownerEmailCount, signInStart, lastSignInError, inviteInfo,
 } from "./auth.js";
 import { push, pull } from "./sync.js";
+import { householdRole, budgetRole, canTakeBankBatch } from "./roles.js";
 
 const VERSION = "2.0.3";
 const DEFAULT_CAP = 10;
@@ -67,6 +68,54 @@ function itemView(row) {
     lastWebhook: row.last_webhook_code || null,
     accounts: accounts.map((a) => ({ id: a.account_id, name: a.name, officialName: a.official_name, mask: a.mask, type: a.type, subtype: a.subtype })),
   };
+}
+
+
+/** Plaid account id -> budget ids, from live budget header bankLinks. */
+async function plaidAccountIndex(env, householdId) {
+  const rows = (await env.DB.prepare(
+    "SELECT id, budget_id, body FROM records WHERE household_id = ? AND kind = 'budget' AND deleted = 0"
+  ).bind(householdId).all()).results || [];
+  const mapped = new Map(); // plaidId -> Set of budgetIds with a real target
+  const mentioned = new Map(); // plaidId -> Set of budgetIds that list the account at all
+  for (const row of rows) {
+    let body = {};
+    try { body = JSON.parse(row.body || "{}") || {}; } catch { body = {}; }
+    const bid = row.budget_id || body.id || (String(row.id).startsWith("budget:") ? row.id.slice(7) : row.id);
+    const accounts = body.bankLinks?.accounts || {};
+    for (const [plaidId, link] of Object.entries(accounts)) {
+      if (!plaidId) continue;
+      if (!mentioned.has(plaidId)) mentioned.set(plaidId, new Set());
+      mentioned.get(plaidId).add(bid);
+      const target = link && typeof link === "object" ? link.target : link;
+      if (target && target !== "skip") {
+        if (!mapped.has(plaidId)) mapped.set(plaidId, new Set());
+        mapped.get(plaidId).add(bid);
+      }
+    }
+  }
+  return { mapped, mentioned };
+}
+
+function plaidIdsInBatch(batch) {
+  const ids = new Set();
+  for (const t of [...(batch?.added || []), ...(batch?.modified || []), ...(batch?.removed || [])]) {
+    const id = t?.account_id || t?.accountId;
+    if (id) ids.add(id);
+  }
+  return ids;
+}
+
+function batchTargets(batch, index) {
+  const plaidIds = plaidIdsInBatch(batch);
+  const budgetIds = new Set();
+  let unmapped = !plaidIds.size;
+  for (const id of plaidIds) {
+    const hits = index.mapped.get(id);
+    if (!hits || !hits.size) unmapped = true;
+    else for (const b of hits) budgetIds.add(b);
+  }
+  return { budgetIds: [...budgetIds], unmapped };
 }
 
 /* ---------- handlers ---------- */
@@ -237,11 +286,25 @@ async function exchange(env, req, plaid, ctx, session) {
 async function listItems(env, session) {
   requireAction(session, "bank.view");
   const rows = (await env.DB.prepare("SELECT * FROM items WHERE household_id = ? AND status != 'removed' ORDER BY created_at").bind(session.householdId).all()).results || [];
+  let visible = rows;
+  if (householdRole(session) !== "owner") {
+    const index = await plaidAccountIndex(env, session.householdId);
+    visible = rows.filter((row) => {
+      let accounts = [];
+      try { accounts = JSON.parse(row.accounts || "[]"); } catch { accounts = []; }
+      const ids = accounts.map((a) => a.account_id || a.id).filter(Boolean);
+      if (row.item_id) ids.push(row.item_id);
+      return ids.some((id) => {
+        const budgets = index.mentioned.get(id);
+        return budgets && [...budgets].some((b) => budgetRole(session, b) != null);
+      });
+    });
+  }
   return {
-    items: rows.map(itemView),
+    items: visible.map(itemView),
     used: Number(await meta(env, "items_created") || 0),
     cap: Number(env.ITEM_CAP || DEFAULT_CAP),
-    canManage: session.member.role === "owner",
+    canManage: householdRole(session) === "owner",
   };
 }
 
@@ -304,12 +367,24 @@ async function inbox(env, session) {
   const rows = (await env.DB.prepare("SELECT id, item_id, created_at, enc, held FROM bank_inbox WHERE household_id = ? AND claimed_by = ? AND claim_until > ? ORDER BY id")
     .bind(hid, sid, now()).all()).results || [];
   const waiting = (await env.DB.prepare("SELECT COUNT(*) AS n FROM bank_inbox WHERE household_id = ?").bind(hid).first())?.n || 0;
-  const batches = [];
+  const claimed = [];
   for (const r of rows) {
-    try { batches.push({ id: r.id, itemId: r.item_id, createdAt: r.created_at, held: !!r.held, batch: JSON.parse(await openToken(env.TOKEN_ENC_KEY, inboxAad(hid), r.enc)) }); }
+    try { claimed.push({ id: r.id, itemId: r.item_id, createdAt: r.created_at, held: !!r.held, batch: JSON.parse(await openToken(env.TOKEN_ENC_KEY, inboxAad(hid), r.enc)) }); }
     catch { await env.DB.prepare("DELETE FROM bank_inbox WHERE id = ?").bind(r.id).run(); }
   }
-  return { batches, more: waiting > rows.length };
+  const index = await plaidAccountIndex(env, hid);
+  const batches = [];
+  const release = [];
+  for (const b of claimed) {
+    const { budgetIds, unmapped } = batchTargets(b.batch, index);
+    if (canTakeBankBatch(session, budgetIds, unmapped)) batches.push(b);
+    else release.push(b.id);
+  }
+  if (release.length) {
+    await env.DB.prepare("UPDATE bank_inbox SET claimed_by = NULL, claim_until = NULL WHERE household_id = ? AND id IN (SELECT value FROM json_each(?))")
+      .bind(hid, JSON.stringify(release)).run();
+  }
+  return { batches, more: waiting > batches.length };
 }
 
 /**

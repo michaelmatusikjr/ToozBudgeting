@@ -98,6 +98,29 @@ export function canWriteRecord(sessionOrMember, rec) {
   return true;
 }
 
+/** Any household member may create a budget (D3, D4). */
+export function canCreateBudget(sessionOrMember) {
+  return householdRole(sessionOrMember) != null;
+}
+
+/** Edit = budget Owner or Member, not View only. */
+export function canEditBudget(sessionOrMember, budgetId) {
+  const role = budgetRole(sessionOrMember, budgetId);
+  return role === "owner" || role === "member";
+}
+
+/**
+ * Bank inbox (D9): household Owners see every batch.
+ * Unmapped (or empty) batches wait for a household Owner.
+ * A batch that maps to one or more budgets goes only to people who can edit all of them.
+ */
+export function canTakeBankBatch(sessionOrMember, budgetIds, unmapped) {
+  if (householdRole(sessionOrMember) === "owner") return true;
+  if (unmapped || !budgetIds.length) return false;
+  return budgetIds.every((id) => canEditBudget(sessionOrMember, id));
+}
+
+
 /** Legacy household-style role for old apps (WU-41 step 5). */
 export function legacyRole(sessionOrMember) {
   const session = asSession(sessionOrMember);

@@ -271,7 +271,8 @@ test("bank roles: only household owners manage banks; members can apply", async 
   assert.equal(ex.status, 200);
   await Promise.all(t.waits.splice(0));
   assert.equal((await t.call("DELETE", `/bank/items/${ex.data.item.itemId}`, undefined, member.auth)).status, 403);
-  assert.equal((await t.call("GET", "/bank/items", undefined, other.auth)).data.items.length, 1, "members can see bank status");
+  assert.equal((await t.call("GET", "/bank/items", undefined, other.auth)).data.items.length, 0, "members only see banks linked to a budget they can read");
+  assert.equal((await t.call("GET", "/bank/items", undefined, owner.auth)).data.items.length, 1, "household Owners see every bank");
   assert.equal((await t.call("GET", "/bank/inbox", undefined, other.auth)).status, 200);
   assert.equal((await t.call("GET", "/bank/inbox", undefined, member.auth)).status, 200);
 });
