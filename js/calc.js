@@ -1,5 +1,5 @@
 /** Zero-based budget math. Matches the ClearBudget rules: rollover, return, max, date goals, RTA. */
-import { monthKey, prevMonth, nextMonth, round2 } from "./util.js?v=154";
+import { monthKey, prevMonth, nextMonth, round2, todayKey } from "./util.js?v=154";
 
 const spentCache = new WeakMap();
 const monthsCache = new WeakMap();
@@ -344,7 +344,24 @@ export function overspentMonths(budget, today = monthKey()) {
   return out;
 }
 
-export function staleReconcile(budget, today = monthKey()) {
+export function lastReconciledDate(budget, accId) {
+  const acc = (budget.accounts || []).find((a) => a.id === accId) || (budget.creditCards || []).find((c) => c.id === accId);
+  const txDate = (budget.transactions || [])
+    .filter((tx) => tx.reconciled && tx.accountId === accId)
+    .map((tx) => tx.date)
+    .sort()
+    .pop();
+  const candidates = [acc?.reconciledDate, acc?.lastReconciledDisplay, txDate].filter(Boolean);
+  return candidates.length ? candidates.sort().pop() : null;
+}
+
+export function daysSince(dateStr, today = todayKey()) {
+  const a = new Date(`${today}T00:00:00`).getTime();
+  const b = new Date(`${dateStr}T00:00:00`).getTime();
+  return Math.floor((a - b) / 86400000);
+}
+
+export function staleReconcile(budget, today = todayKey()) {
   const cutoff = (() => {
     const [y, m, d] = today.split("-").map(Number);
     const dt = new Date(y, m - 1, d);
@@ -354,12 +371,12 @@ export function staleReconcile(budget, today = monthKey()) {
   const stale = [];
   for (const a of budget.accounts || []) {
     if (a.archived) continue;
-    const when = a.reconciledDate || a.lastReconciledDisplay;
+    const when = lastReconciledDate(budget, a.id);
     if (!when || when < cutoff) stale.push({ id: a.id, name: a.name, isCard: false, when: when || null });
   }
   for (const c of budget.creditCards || []) {
     if (c.archived) continue;
-    const when = c.reconciledDate || c.lastReconciledDisplay;
+    const when = lastReconciledDate(budget, c.id);
     if (!when || when < cutoff) stale.push({ id: c.id, name: c.name, isCard: true, when: when || null });
   }
   return stale;

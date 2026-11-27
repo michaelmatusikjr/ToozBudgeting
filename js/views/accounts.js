@@ -1,86 +1,152 @@
-import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog } from "../ui.js?v=154";
+import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, bindContextMenu } from "../ui.js?v=154";
 import { fmt, todayKey, toTitleCase, isCard, monthKey, monthLabel, ccPayCat, round2 } from "../util.js?v=154";
-import { accountBalances, available, globalFree, spentByMonthCat, ccMismatches, staleReconcile, findUnclearedSuggestion, txBalanceEffect } from "../calc.js?v=154";
+import { accountBalances, available, globalFree, spentByMonthCat, findUnclearedSuggestion, txBalanceEffect, lastReconciledDate, daysSince } from "../calc.js?v=154";
 import { addAccount, addCreditCard, renameAccount, archiveAccount, deleteAccount, reconcileAccount, addTransaction, isLocked, closeAccountBalance, finishAccountClose } from "../mutate.js?v=154";
 
 export function renderAccounts(root, ctx) {
   const budget = ctx.budget();
   const bal = accountBalances(budget);
-  const month = ctx.month;
-  root.append(h("header", { class: "view-head" }, h("h1", { text: "Accounts" }), btn("Add", { onClick: () => openAdd(ctx) })));
-  const stale = staleReconcile(budget);
-  if (stale.length) root.append(h("p", { class: "notice", text: `${stale.length} account${stale.length === 1 ? "" : "s"} not reconciled in 30+ days.` }));
-  const mism = ccMismatches(budget, month);
-  for (const m of mism) {
-    root.append(h("button", { class: "notice", type: "button", onclick: () => ctx.go("budget") },
-      h("strong", { text: m.card.name }),
-      h("span", { text: `Owes ${fmt(m.owed)} · ${fmt(m.setAside)} set aside` }),
-      h("span", { class: "notice-go", text: "Plan" }),
+  const ro = !!ctx.readOnly();
+  const cash = (budget.accounts || []).filter((a) => !a.archived);
+  const cards = (budget.creditCards || []).filter((c) => !c.archived);
+  const archived = [
+    ...(budget.accounts || []).filter((a) => a.archived).map((a) => ({ ...a, isCard: false })),
+    ...(budget.creditCards || []).filter((c) => c.archived).map((c) => ({ ...c, isCard: true })),
+  ];
+  const totalCash = cash.reduce((s, a) => s + (bal[a.id] || 0), 0);
+
+  const view = h("div", { class: "acc-view" });
+  if (cash.length) {
+    view.append(h("div", { class: "acc-total" },
+      h("div", { class: "acc-total-label", text: "Total Cash Balance" }),
+      h("div", { class: "acc-total-amt", text: fmt(totalCash) }),
     ));
   }
-  const banks = h("section", { class: "group" }, h("h2", { text: "Cash and banks" }));
-  let total = 0;
-  for (const a of budget.accounts) {
-    if (a.archived && !ctx.ui.showArchived) continue;
-    total += bal[a.id] || 0;
-    banks.append(accountLine(ctx, a, bal[a.id] || 0, false));
+
+  view.append(sectionHeader("🏦 Checking · Savings · Cash", ro ? null : () => openNewAccount(ctx, false), "+ Add Account"));
+  if (!cash.length) view.append(h("div", { class: "acc-empty", text: "No accounts yet" }));
+  else {
+    const list = h("div", { class: "acc-list" });
+    cash.forEach((a, i) => list.append(accountRow(ctx, a, bal[a.id] || 0, false, i === cash.length - 1)));
+    view.append(list);
   }
-  banks.append(h("p", { class: "group-foot", text: `Total ${fmt(total)}` }));
-  const cards = h("section", { class: "group" }, h("h2", { text: "Credit cards" }));
-  for (const c of budget.creditCards) {
-    if (c.archived && !ctx.ui.showArchived) continue;
-    cards.append(accountLine(ctx, c, bal[c.id] || 0, true));
+
+  view.append(sectionHeader("💳 Credit Cards", ro ? null : () => openNewAccount(ctx, true), "+ Add Card"));
+  if (!cards.length) view.append(h("div", { class: "acc-empty", text: "No cards yet" }));
+  else {
+    const list = h("div", { class: "acc-list" });
+    cards.forEach((c, i) => list.append(accountRow(ctx, c, bal[c.id] || 0, true, i === cards.length - 1)));
+    view.append(list);
   }
-  root.append(banks, cards);
-  root.append(h("nav", { class: "link-row" },
-    h("button", { class: "text-link", type: "button", text: ctx.ui.showArchived ? "Hide archived" : "Archived", onclick: () => { ctx.ui.showArchived = !ctx.ui.showArchived; ctx.render(); } }),
-  ));
+
+  if (archived.length) {
+    const open = !!ctx.ui.showArchived;
+    const wrap = h("div", { class: "acc-archived" });
+    wrap.append(h("button", {
+      class: "acc-archived-toggle", type: "button",
+      onclick: () => { ctx.ui.showArchived = !open; ctx.render(); },
+    },
+      h("span", { class: "acc-archived-label", text: `🗂 Archived (${archived.length})` }),
+      h("span", { class: "acc-archived-chev", text: open ? "▲" : "▼" }),
+    ));
+    if (open) {
+      const list = h("div", { class: "acc-list acc-list-archived" });
+      archived.forEach((item, i) => list.append(archivedRow(ctx, item, i === archived.length - 1)));
+      wrap.append(list);
+    }
+    view.append(wrap);
+  }
+
+  root.append(view);
+
   if (ctx.ui.focusAccount) {
     const id = ctx.ui.focusAccount;
     ctx.ui.focusAccount = null;
-    const item = [...budget.accounts, ...budget.creditCards].find((a) => a.id === id);
-    if (item) openAccount(ctx, item, isCard(budget, id));
+    const item = [...(budget.accounts || []), ...(budget.creditCards || [])].find((a) => a.id === id);
+    if (item) openReconcile(ctx, item, isCard(budget, id), bal[id] || 0);
   }
 }
 
-function accountLine(ctx, a, balance, card) {
-  return h("button", { class: "line account", type: "button", onclick: () => openAccount(ctx, a, card) },
-    h("span", {}, h("strong", { text: a.name }), h("span", { class: "muted", text: card ? "Credit card" : a.type })),
-    h("span", { class: balance < -0.005 ? "neg" : balance > 0.005 ? "pos" : "", text: card ? `${fmt(balance)} owed` : fmt(balance) }),
+function sectionHeader(label, onAdd, addLabel) {
+  return h("div", { class: "acc-sec-head" },
+    h("div", { class: "acc-sec-label", text: label }),
+    onAdd ? btn(addLabel, { kind: "primary small", onClick: onAdd }) : null,
   );
 }
 
-function openAccount(ctx, a, card) {
+function accountMenuItems(ctx, a, card) {
   const budget = ctx.budget();
-  const bal = accountBalances(budget)[a.id] || 0;
+  const items = [
+    { label: "📊 View Transactions", onClick: () => ctx.go("transactions", { accountId: a.id }) },
+    { label: "⚖️ Reconcile", edit: true, onClick: () => openReconcile(ctx, a, card, accountBalances(budget)[a.id] || 0) },
+  ];
+  if (!card) items.push({ label: "💸 Transfer Money", edit: true, onClick: () => openTransfer(ctx, a.id) });
+  items.push(
+    { label: "✏️ Rename", edit: true, onClick: () => openRename(ctx, a, card) },
+    { label: "🗂 Archive", edit: true, onClick: () => requestAccountAction(ctx, a, card, "archive") },
+    { label: "🗑 Delete", danger: true, edit: true, onClick: () => requestAccountAction(ctx, a, card, "delete") },
+  );
+  return items;
+}
+
+function accountRow(ctx, a, balance, card, last) {
+  const budget = ctx.budget();
+  const recDate = lastReconciledDate(budget, a.id);
+  const recLabel = recDate ? `✅ ${daysSince(recDate)}d ago` : "Never reconciled";
+  const row = h("div", { class: `acc-row${last ? " last" : ""}`, tabindex: "0" });
+  const meta = h("div", { class: "acc-meta" });
+  if (!card) {
+    meta.append(
+      h("span", { class: "acc-type", text: a.type || "Account" }),
+      h("span", { text: " · " }),
+      h("span", { class: recDate ? "acc-rec ok" : "acc-rec", text: recLabel }),
+    );
+  } else {
+    meta.append(
+      h("span", { class: recDate ? "acc-rec ok" : "acc-rec", text: recLabel }),
+      h("span", { text: " · " }),
+      h("span", { class: balance > 0 ? "acc-owed" : "acc-paid", text: balance > 0 ? `${fmt(balance)} owed` : "Paid off" }),
+    );
+  }
+  const amt = h("button", {
+    class: `acc-bal${card && balance > 0 ? " owed" : card ? " paid" : ""}`,
+    type: "button",
+    text: card ? (balance > 0 ? `-${fmt(balance)}` : "$0.00") : fmt(balance),
+    onclick: (e) => { e.stopPropagation(); ctx.go("transactions", { accountId: a.id }); },
+  });
+  row.append(h("div", { class: "acc-main" }, h("div", { class: "acc-name", text: a.name }), meta), amt);
+  bindContextMenu(row, () => accountMenuItems(ctx, a, card), { readOnly: !!ctx.readOnly() });
+  return row;
+}
+
+function archivedRow(ctx, item, last) {
+  const hasTx = ((ctx.budget().transactions || []).some((t) => t.accountId === item.id));
+  const row = h("div", { class: `acc-row acc-row-archived${last ? " last" : ""}`, tabindex: "0" });
+  row.append(h("div", { class: "acc-main" },
+    h("div", { class: "acc-name", text: item.name }),
+    h("div", { class: "acc-meta" }, h("span", { class: "acc-type", text: item.isCard ? "Credit Card" : (item.type || "Account") })),
+  ));
+  bindContextMenu(row, () => [
+    { label: "↩ Restore", edit: true, onClick: () => requestAccountAction(ctx, item, item.isCard, "archive") },
+    ...(!hasTx ? [{ label: "🗑 Delete", danger: true, edit: true, onClick: () => requestAccountAction(ctx, item, item.isCard, "delete") }] : []),
+  ], { readOnly: !!ctx.readOnly() });
+  return row;
+}
+
+function openRename(ctx, a, card) {
+  const budget = ctx.budget();
+  const input = textInput({ value: a.name });
   const sheet = openSheet({
-    title: a.name,
+    title: "Rename",
     body: (host) => {
-      host.append(h("p", { class: "rta-num", text: card ? fmt(bal) : fmt(bal) }), h("p", { class: "muted", text: card ? "Balance owed" : "Cleared balance from transactions" }));
-      host.append(btn("Transactions", { block: true, kind: "ghost", onClick: () => { sheet.close(); ctx.go("transactions", { accountId: a.id }); } }));
-      host.append(btn("Reconcile", { block: true, onClick: () => { sheet.close(); openReconcile(ctx, a, card, bal); } }));
-      if (!card) host.append(btn("Transfer", { block: true, kind: "ghost", onClick: () => { sheet.close(); openTransfer(ctx, a.id); } }));
-      host.append(btn("Rename", { block: true, kind: "ghost", onClick: () => {
-        const input = textInput({ value: a.name });
-        const s2 = openSheet({ title: "Rename", body: (h2) => {
-          h2.append(field("Name", input), btn("Save", { block: true, onClick: () => {
-            const name = toTitleCase(input.value.trim());
-            const list = card ? budget.creditCards : budget.accounts;
-            if (list.some((x) => x.id !== a.id && x.name.toLowerCase() === name.toLowerCase())) { toast("That name is already used"); return; }
-            ctx.updateBudget((b) => renameAccount(b, a.id, card, name));
-            s2.close(); sheet.close();
-          }}));
-        }});
+      host.append(field("Name", input), btn("Save", { block: true, onClick: () => {
+        const name = toTitleCase(input.value.trim());
+        if (!name) { toast("Name is required"); return; }
+        const list = card ? budget.creditCards : budget.accounts;
+        if (list.some((x) => x.id !== a.id && x.name.toLowerCase() === name.toLowerCase())) { toast("That name is already used"); return; }
+        ctx.updateBudget((b) => renameAccount(b, a.id, card, name));
+        sheet.close();
       }}));
-      const hasTx = (budget.transactions || []).some((t) => t.accountId === a.id);
-      if (a.archived) {
-        host.append(btn("Restore", { block: true, kind: "ghost", onClick: () => { sheet.close(); requestAccountAction(ctx, a, card, "archive"); } }));
-        if (!hasTx) host.append(btn("Delete", { kind: "danger", block: true, onClick: () => { sheet.close(); requestAccountAction(ctx, a, card, "delete"); } }));
-      } else if (hasTx) {
-        host.append(btn("Archive", { block: true, kind: "ghost", onClick: () => { sheet.close(); requestAccountAction(ctx, a, card, "archive"); } }));
-      } else {
-        host.append(btn("Delete", { kind: "danger", block: true, onClick: () => { sheet.close(); requestAccountAction(ctx, a, card, "delete"); } }));
-      }
     },
   });
 }
