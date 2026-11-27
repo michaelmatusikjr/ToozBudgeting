@@ -1,22 +1,22 @@
-import { APP_VERSION, monthKey, prevMonth, nextMonth, deepClone } from "./util.js?v=151";
-import { loadState, saveState, subscribe, exportData, importData, deviceGet, deviceSet } from "./store.js?v=151";
-import { h, clear, icon, toast, closeAllModals, btn } from "./ui.js?v=151";
-import { renderIdentity, renderWizard, renderLoading } from "./views/gate.js?v=151";
-import { renderBudget, openInbox } from "./views/budget.js?v=151";
-import { renderTransactions, openTx } from "./views/transactions.js?v=151";
-import { renderAccounts } from "./views/accounts.js?v=151";
-import { renderPayees } from "./views/payees.js?v=151";
-import { renderSettings } from "./views/settings.js?v=151";
-import { registerSW, activateWaiting } from "./pwa.js?v=151";
-import { scheduleLocal, collectReminders } from "./notify.js?v=151";
-import { pushOnOpen } from "./push.js?v=151";
-import { bankOnOpen } from "./banksync.js?v=151";
-import { normalizeBudget } from "./mutate.js?v=151";
-import { announceIfUpdated } from "./whatsnew.js?v=151";
-import { paintTheme, resolveTheme } from "./theme.js?v=151";
-import { monthAccessible } from "./calc.js?v=151";
-import { account, redeemSignInCode, onAccountChange, signOut, withCode } from "./account.js?v=151";
-import { startAutoSync, syncSoon, syncNow, syncStatus, onSyncChange } from "./sync.js?v=151";
+import { APP_VERSION, monthKey, prevMonth, nextMonth, deepClone } from "./util.js?v=152";
+import { loadState, saveState, subscribe, exportData, importData, deviceGet, deviceSet } from "./store.js?v=152";
+import { h, clear, icon, toast, closeAllModals, btn } from "./ui.js?v=152";
+import { renderIdentity, renderWizard, renderLoading } from "./views/gate.js?v=152";
+import { renderBudget, openInbox } from "./views/budget.js?v=152";
+import { renderTransactions, openTx } from "./views/transactions.js?v=152";
+import { renderAccounts } from "./views/accounts.js?v=152";
+import { renderPayees } from "./views/payees.js?v=152";
+import { renderSettings } from "./views/settings.js?v=152";
+import { registerSW, activateWaiting } from "./pwa.js?v=152";
+import { scheduleLocal, collectReminders } from "./notify.js?v=152";
+import { pushOnOpen } from "./push.js?v=152";
+import { bankOnOpen } from "./banksync.js?v=152";
+import { normalizeBudget } from "./mutate.js?v=152";
+import { announceIfUpdated } from "./whatsnew.js?v=152";
+import { paintTheme, resolveTheme } from "./theme.js?v=152";
+import { monthAccessible } from "./calc.js?v=152";
+import { account, redeemSignInCode, onAccountChange, signOut, withCode, setPendingInvite, pendingInvite, isInviteId } from "./account.js?v=152";
+import { startAutoSync, syncSoon, syncNow, syncStatus, onSyncChange } from "./sync.js?v=152";
 
 const root = document.getElementById("app");
 const undoStack = [];
@@ -78,6 +78,7 @@ const ctx = {
   },
   async accountSignedIn(acct) {
     ctx.account = acct;
+    ctx.pendingInvite = null;
     const user = accountUser(acct);
     if (!user) return;
     const users = [...(ctx.state.users || []).filter((u) => u.userId !== user.userId), user];
@@ -206,7 +207,9 @@ function showRescue(err) {
 async function paintInner() {
   clear(root);
   const user = (ctx.state.users || []).find((u) => u.userId === ctx.state.activeUserId);
-  if (!user) { ctx.signedOutReason = ctx.account?.signedOutReason || ""; renderIdentity(root, ctx); return; }
+  // An invite link goes straight to Sign in with Google, even on a device that already has a local profile.
+  const invite = ctx.account?.token ? null : ctx.pendingInvite;
+  if (!user || invite) { ctx.signedOutReason = ctx.account?.signedOutReason || ""; renderIdentity(root, ctx, { invite }); return; }
   if (!ctx.state.setupComplete || !ctx.budget()) {
     const st = syncStatus();
     if (ctx.account?.token && (!ctx.account.linked || st.busy) && !st.error) {
@@ -311,10 +314,28 @@ async function finishRedirectSignIn() {
   catch (x) { setTimeout(() => toast(withCode(x.message, x.code || "REDEEM"), { ms: 9000 }), 300); return null; }
 }
 
+/** Opened from an invite link (?invite=<id>): remember it for sign-in, then tidy the address bar. */
+async function captureInvite() {
+  const params = new URLSearchParams(location.search);
+  const id = params.get("invite");
+  if (!id) return;
+  params.delete("invite");
+  const q = params.toString();
+  history.replaceState(null, "", location.pathname + (q ? "?" + q : "") + location.hash);
+  if (isInviteId(id)) await setPendingInvite(id);
+}
+
 async function boot() {
   ctx.state = await loadState();
+  await captureInvite();
+  ctx.pendingInvite = await pendingInvite();
   const redirected = await finishRedirectSignIn();
   ctx.account = await account();
+  if (ctx.account?.token && (await pendingInvite())) {
+    await setPendingInvite(null);
+    ctx.pendingInvite = null;
+    setTimeout(() => toast(`You’re already signed in as ${ctx.account.me?.user?.email || "a household member"}. Sign out first to use that invite with another account.`, { ms: 8000 }), 400);
+  }
   onAccountChange(async () => {
     const before = ctx.account?.token;
     ctx.account = await account();

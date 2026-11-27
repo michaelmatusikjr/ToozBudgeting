@@ -6,10 +6,10 @@
  * claims them, applies them to the shared budget, pushes the result, and acks. Transaction ids come from
  * Plaid (plaid-<id>), so applying the same batch twice never makes a duplicate.
  */
-import { deviceGet, deviceSet } from "./store.js?v=151";
-import { applyBankBatch, rememberBankAccounts, sumStats, statsLine } from "./bankmap.js?v=151";
-import { api, account, serverUrl, SERVER_DEFAULT, ApiError } from "./account.js?v=151";
-import { syncNow } from "./sync.js?v=151";
+import { deviceGet, deviceSet } from "./store.js?v=152";
+import { applyBankBatch, rememberBankAccounts, sumStats, statsLine } from "./bankmap.js?v=152";
+import { api, account, serverUrl, SERVER_DEFAULT, ApiError } from "./account.js?v=152";
+import { syncNow } from "./sync.js?v=152";
 
 export const BANK_DEFAULTS = { serverUrl: SERVER_DEFAULT };
 export const PLAID_LINK_SRC = "https://cdn.plaid.com/link/v2/stable/link-initialize.js";

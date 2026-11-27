@@ -7,8 +7,8 @@
  * Conflicts are last-write-wins per record (one transaction, one category, one month's amount for one
  * category), so two people editing different things never collide.
  */
-import { account, api, patchAccount, refreshMe, onAccountChange } from "./account.js?v=151";
-import { pendingRecords, markPushed, applyRemote, reloadState, markAllDirty, clearSharedRecords, exportData, deviceSet, deviceGet } from "./store.js?v=151";
+import { account, api, patchAccount, refreshMe, onAccountChange } from "./account.js?v=152";
+import { pendingRecords, markPushed, applyRemote, reloadState, markAllDirty, clearSharedRecords, exportData, deviceSet, deviceGet } from "./store.js?v=152";
 
 const PUSH_BYTES = 350 * 1024;
 const PUSH_MAX = 800;
@@ -135,7 +135,16 @@ export function startAutoSync(ctx) {
   window.addEventListener("online", run);
   window.addEventListener("focus", run);
   timer = setInterval(() => { if (document.visibilityState === "visible") run(); }, EVERY_MS);
-  onAccountChange(async () => { if ((await account())?.token && !running) run(); });
+  // Sync when this device signs in (a new token), not on every account save: syncing itself saves the
+  // account (cursor, lastSyncAt), and reacting to that kept the app syncing in a loop.
+  let lastToken = null;
+  account().then((x) => { lastToken = x?.token || null; });
+  onAccountChange(async () => {
+    const tok = (await account())?.token || null;
+    const fresh = tok && tok !== lastToken;
+    lastToken = tok;
+    if (fresh) run();
+  });
   void timer;
 }
 

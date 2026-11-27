@@ -1,12 +1,26 @@
 /** Settings > Household: who's signed in, the people in the household, invites, roles, and sync status. */
-import { h, btn, openSheet, field, textInput, toast, confirmDialog } from "../ui.js?v=151";
+import { h, btn, openSheet, field, textInput, toast, confirmDialog } from "../ui.js?v=152";
 import {
   account, renderGoogleButton, signOut, listMembers, invite, revokeInvite, setMember, removeMember, setMyName,
-  renameHousehold, refreshMe, ROLE_LABEL, ROLE_HINT,
-} from "../account.js?v=151";
-import { syncNow, syncStatus, preSyncBackup } from "../sync.js?v=151";
+  renameHousehold, refreshMe, ROLE_LABEL, ROLE_HINT, shareInvite, inviteMessage,
+} from "../account.js?v=152";
+import { syncNow, syncStatus, preSyncBackup } from "../sync.js?v=152";
 
-const APP_LINK = "https://michaelmatusikjr.github.io/ToozBudgeting/";
+/** "Share invite link": the share sheet, or copy. If neither works, show the message to copy by hand. */
+function shareButton(inv, householdName, { label = "Share invite link", kind = "ghost", block = false } = {}) {
+  return btn(label, { kind, block, onClick: async () => {
+    const how = await shareInvite(inv, householdName);
+    if (how === "copied") toast("Invite copied. Paste it in a text or email.");
+    else if (how === "manual") {
+      openSheet({ title: "Invite message", body: (el) => {
+        const ta = h("textarea", { class: "input", rows: 5, readonly: true });
+        ta.value = inviteMessage(inv, householdName);
+        el.append(h("p", { class: "hint", text: "Copy this and send it to them." }), ta);
+        setTimeout(() => { ta.focus(); ta.select(); }, 50);
+      } });
+    }
+  } });
+}
 
 export function avatar(user, size = 40) {
   const initials = String(user?.displayName || user?.name || user?.email || "?").trim().split(/\s+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase();
@@ -83,6 +97,7 @@ function roleSelect(value, { allowOwner = true } = {}) {
 
 export function openPeople(ctx) {
   let host = null;
+  let justInvited = null; // shown with its share button at the top of the form after creating it
   openSheet({ title: "People", body: (el) => { host = el; } });
   const paint = async () => {
     host.replaceChildren(h("p", { class: "hint", text: "Loading…" }));
@@ -130,15 +145,24 @@ export function openPeople(ctx) {
       if ((data.invites || []).length) {
         kids.push(h("h3", { class: "kicker", text: "Invited" }));
         for (const inv of data.invites) {
-          kids.push(h("div", { class: "line" },
+          kids.push(h("div", { class: "pair person invite-row" },
             h("span", { text: `${inv.email} · ${ROLE_LABEL[inv.role]} · until ${new Date(inv.expiresAt).toLocaleDateString()}` }),
-            btn("Cancel", { kind: "quiet", onClick: async () => { await revokeInvite(inv.id); paint(); } }),
+            h("div", { class: "row-actions" },
+              shareButton(inv, me.household?.name),
+              btn("Cancel", { kind: "quiet", onClick: async () => { await revokeInvite(inv.id); paint(); } }),
+            ),
           ));
         }
       }
       const email = textInput({ type: "email", placeholder: "their Google email", autocomplete: "off" });
       const sel = roleSelect("owner");
-      const out = h("p", { class: "hint", text: "" });
+      const out = h("div", { class: "invite-out" });
+      if (justInvited) {
+        out.append(
+          h("p", { class: "hint", text: `Invited ${justInvited.email}. Nothing is sent automatically, so share the link with them. They sign in with Google using that email. The invite lasts 14 days.` }),
+          shareButton(justInvited, me.household?.name, { kind: "primary", block: true }),
+        );
+      }
       kids.push(
         h("h3", { class: "kicker", text: "Invite someone" }),
         field("Email", email),
@@ -147,10 +171,10 @@ export function openPeople(ctx) {
           const b = e.currentTarget; b.disabled = true;
           try {
             const r = await invite(email.value, sel.value);
-            out.textContent = `Invited ${r.invite.email}. Tell them to open ${APP_LINK} and tap Sign in with Google using that email. The invite lasts 14 days.`;
-            email.value = "";
-            setTimeout(paint, 2500);
-          } catch (x) { out.textContent = x.message; }
+            justInvited = r.invite;
+            await paint();
+            return;
+          } catch (x) { out.replaceChildren(h("p", { class: "error", text: x.message })); }
           b.disabled = false;
         } }),
         out,

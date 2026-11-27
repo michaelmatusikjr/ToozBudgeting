@@ -1,10 +1,10 @@
-import { h, field, textInput, btn, toast, moneyButton } from "../ui.js?v=151";
-import { genUserId, guestSuffix, toTitleCase, uid } from "../util.js?v=151";
-import { DEFAULT_GROUPS, DEFAULT_CATS, finishWizard } from "../mutate.js?v=151";
-import { importData } from "../store.js?v=151";
-import { renderGoogleButton } from "../account.js?v=151";
+import { h, field, textInput, btn, toast, moneyButton } from "../ui.js?v=152";
+import { genUserId, guestSuffix, toTitleCase, uid } from "../util.js?v=152";
+import { DEFAULT_GROUPS, DEFAULT_CATS, finishWizard } from "../mutate.js?v=152";
+import { importData } from "../store.js?v=152";
+import { renderGoogleButton, inviteDetails, setPendingInvite, ROLE_LABEL } from "../account.js?v=152";
 
-export function renderIdentity(root, ctx) {
+export function renderIdentity(root, ctx, { invite = null } = {}) {
   root.append(h("main", { class: "gate" },
     h("div", { class: "gate-card" },
       h("p", { class: "brand-mark", text: "Tooz" }),
@@ -13,7 +13,33 @@ export function renderIdentity(root, ctx) {
       h("div", { id: "gate-body" }),
     ),
   ));
-  showChoice(document.getElementById("gate-body"), ctx);
+  const body = document.getElementById("gate-body");
+  if (invite) showInvite(body, ctx, invite.id);
+  else showChoice(body, ctx);
+}
+
+/** Opened from an invite link: who invited you, then straight to Sign in with Google. */
+function showInvite(host, ctx, id) {
+  const card = h("div", { class: "invite-card" }, h("p", { class: "hint", text: "Checking your invite…" }));
+  const gsi = h("div", { class: "gsi-host" });
+  const err = h("p", { class: "error", text: ctx.signedOutReason || "" });
+  host.replaceChildren(card, gsi, err,
+    btn("Not now", { kind: "quiet", block: true, onClick: async () => { await setPendingInvite(null); ctx.pendingInvite = null; ctx.render(); } }),
+  );
+  inviteDetails(id).then(({ invite }) => {
+    const who = invite.invitedBy || "A household owner";
+    card.replaceChildren(
+      h("p", { class: "kicker", text: "You’re invited" }),
+      h("p", { class: "invite-who", text: `${who} invited you to join ${invite.household} as ${(ROLE_LABEL[invite.role] || invite.role).toLowerCase()}.` }),
+      h("p", { class: "hint", text: `Sign in with Google using ${invite.emailHint}, the address the invite was sent to.` }),
+    );
+  }).catch((e) => {
+    card.replaceChildren(h("p", { class: "error", text: e.message }), h("p", { class: "hint", text: "If you’re already in the household, you can still sign in with Google." }));
+  });
+  renderGoogleButton(gsi, {
+    onSignedIn: (acct) => ctx.accountSignedIn(acct),
+    onError: (m) => { err.textContent = m; },
+  }).catch((e) => { err.textContent = e.message; });
 }
 
 /** Shown while a signed-in device downloads the household budget for the first time. */
