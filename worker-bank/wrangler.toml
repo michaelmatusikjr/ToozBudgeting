@@ -1,0 +1,29 @@
+name = "toozbudgeting-bank"
+main = "src/index.js"
+compatibility_date = "2026-07-01"
+workers_dev = true
+# Keep variables added in the Cloudflare dashboard (GOOGLE_CLIENT_ID) when deploying from here.
+keep_vars = true
+
+# Twice a day as a backup to Plaid's webhooks (11:00 and 23:00 UTC).
+[triggers]
+crons = ["0 11,23 * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "toozbudgeting-bank"
+database_id = "cf6eb4c2-1806-45cd-bca9-b424b0fe49a2"
+
+[vars]
+ALLOWED_ORIGINS = "https://michaelmatusikjr.github.io"
+APP_URL = "https://michaelmatusikjr.github.io/ToozBudgeting/"
+PLAID_ENV = "production"
+REDIRECT_URI = "https://michaelmatusikjr.github.io/ToozBudgeting/oauth.html"
+DAYS_REQUESTED = "30"
+ITEM_CAP = "10"
+# Public OAuth Web client ID (Google Cloud project matusik-apps). Not a secret.
+GOOGLE_CLIENT_ID = "288618019760-h116l0ov0v3c5l6apiq2bofeo5u7r83o.apps.googleusercontent.com"
+
+# Secrets (never committed):
+#   PLAID_CLIENT_ID, PLAID_SECRET, TOKEN_ENC_KEY (32 random bytes, base64url),
+#   ALLOWED_OWNER_EMAILS  comma-separated Google emails that become owners on first sign-in.

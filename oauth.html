@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="robots" content="noindex">
+  <title>ToozBudgeting · Back from your bank</title>
+  <style>body{font:16px/1.5 system-ui,sans-serif;margin:0;display:grid;place-items:center;min-height:100vh;background:#f6f3ee;color:#1d2327}p{max-width:22rem;padding:1rem;text-align:center}</style>
+</head>
+<body>
+  <p>Back from your bank. Returning to ToozBudgeting…</p>
+  <script>
+    // Plaid sends the user here after a bank's own sign-in page (OAuth).
+    // Keep the full address so Plaid Link can finish, then go back to Settings > Bank sync.
+    try { localStorage.setItem("toozbudgeting:bank:oauth", window.location.href); } catch (e) { /* storage blocked */ }
+    window.location.replace("./#settings/bank");
+  </script>
+</body>
+</html>

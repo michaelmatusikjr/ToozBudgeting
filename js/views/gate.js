@@ -1,21 +1,50 @@
-import { h, field, textInput, btn, toast, moneyButton } from "../ui.js?v=138";
-import { genUserId, guestSuffix, toTitleCase, uid } from "../util.js?v=138";
-import { DEFAULT_GROUPS, DEFAULT_CATS, finishWizard } from "../mutate.js?v=138";
-import { importData } from "../store.js?v=138";
+import { h, field, textInput, btn, toast, moneyButton } from "../ui.js?v=140";
+import { genUserId, guestSuffix, toTitleCase, uid } from "../util.js?v=140";
+import { DEFAULT_GROUPS, DEFAULT_CATS, finishWizard } from "../mutate.js?v=140";
+import { importData } from "../store.js?v=140";
+import { renderGoogleButton } from "../account.js?v=140";
 
 export function renderIdentity(root, ctx) {
   root.append(h("main", { class: "gate" },
     h("div", { class: "gate-card" },
       h("p", { class: "brand-mark", text: "Tooz" }),
       h("h1", { text: "Every dollar has a job." }),
-      h("p", { class: "lede", text: "A calm, zero-based budget that stays on this device." }),
+      h("p", { class: "lede", text: "A calm, zero-based budget for your household." }),
       h("div", { id: "gate-body" }),
     ),
   ));
   showChoice(document.getElementById("gate-body"), ctx);
 }
 
+/** Shown while a signed-in device downloads the household budget for the first time. */
+export function renderLoading(root, text) {
+  root.append(h("main", { class: "gate" },
+    h("div", { class: "gate-card" },
+      h("p", { class: "brand-mark", text: "Tooz" }),
+      h("h1", { text: "Getting your budget" }),
+      h("p", { class: "lede", text: text || "Bringing in your household’s budget…" }),
+    ),
+  ));
+}
+
 function showChoice(host, ctx) {
+  const gsi = h("div", { class: "gsi-host" });
+  const err = h("p", { class: "error", text: ctx.signedOutReason || "" });
+  host.replaceChildren(
+    h("p", { class: "hint", text: "Sign in with Google to share one budget with your household on every device." }),
+    gsi, err,
+    h("p", { class: "gate-or", text: "or use it on this device only" }),
+  );
+  renderGoogleButton(gsi, {
+    onSignedIn: (acct) => ctx.accountSignedIn(acct),
+    onError: (m) => { err.textContent = m; },
+  }).catch((e) => { err.textContent = e.message; });
+  const local = h("div", {});
+  host.append(local);
+  showLocal(local, ctx);
+}
+
+function showLocal(host, ctx) {
   host.replaceChildren(
     btn("Continue as guest", { block: true, onClick: () => {
       const userId = genUserId();
@@ -26,7 +55,8 @@ function showChoice(host, ctx) {
     }}),
     btn("Sign up", { block: true, kind: "ghost", onClick: () => showSignup(host, ctx) }),
     btn("Log in", { block: true, kind: "quiet", onClick: () => showLogin(host, ctx) }),
-    h("p", { class: "hint", text: "Guests can budget fully on this device. Sign up to keep a name and password here. There is no server account yet." }),
+    h("p", { class: "hint", text: "Guests and device accounts budget fully on this device only. Sign in with Google any time from Settings to start sharing." }),
+    h("p", { class: "hint legal-links" }, h("a", { href: "./privacy.html", text: "Privacy" }), " · ", h("a", { href: "./terms.html", text: "Terms" })),
   );
 }
 
@@ -55,7 +85,7 @@ function showSignup(host, ctx) {
         passwordHash: pass.value, createdAt: new Date().toISOString(),
       }, { create: true });
     }}),
-    btn("Back", { block: true, kind: "quiet", onClick: () => showChoice(host, ctx) }),
+    btn("Back", { block: true, kind: "quiet", onClick: () => showLocal(host, ctx) }),
   );
   name.focus();
 }
@@ -77,7 +107,7 @@ function showLogin(host, ctx) {
       }
       ctx.signIn(found, { create: false });
     }}),
-    btn("Back", { block: true, kind: "quiet", onClick: () => showChoice(host, ctx) }),
+    btn("Back", { block: true, kind: "quiet", onClick: () => showLocal(host, ctx) }),
   );
   email.focus();
 }

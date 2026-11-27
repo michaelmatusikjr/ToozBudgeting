@@ -1,5 +1,5 @@
 /** Zero-based budget math. Matches the ClearBudget rules: rollover, return, max, date goals, RTA. */
-import { monthKey, prevMonth, nextMonth, round2 } from "./util.js?v=138";
+import { monthKey, prevMonth, nextMonth, round2 } from "./util.js?v=140";
 
 const spentCache = new WeakMap();
 const monthsCache = new WeakMap();
