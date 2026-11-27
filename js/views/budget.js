@@ -1,7 +1,7 @@
 import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, openAmountPad, isTouchUi, amountInput, bindContextMenu, btnRow } from "../ui.js?v=154";
-import { fmt, monthLabel, monthKey, prevMonth, nextMonth, todayKey, toTitleCase, uid, round2 } from "../util.js?v=154";
+import { fmt, monthLabel, monthLabelShort, monthKey, prevMonth, nextMonth, todayKey, toTitleCase, uid, round2 } from "../util.js?v=154";
 import {
-  budgetSnapshot, getGoalMetrics, trailingAvg, monthAccessible, historySeries,
+  budgetSnapshot, getGoalMetrics, trailingAvg, monthAccessible, budgetStart, furthestMonth, readyToAssign,
   overspentMonths, available, globalFree, ccMismatches, catReturned,
 } from "../calc.js?v=154";
 import {
@@ -1435,73 +1435,140 @@ function openAddCategory(ctx) {
 }
 
 
-export function openHistory(ctx) {
-  const budget = ctx.budget();
-  const series = historySeries(budget);
-  const sheet = openSheet({
-    title: "History",
-    body: (host) => {
-      const canvas = h("canvas", { class: "chart", width: "640", height: "280" });
-      host.append(canvas,
-        h("div", { class: "legend" },
-          h("span", {}, h("i", { style: "background:var(--accent)" }), "Income"),
-          h("span", {}, h("i", { style: "background:var(--danger)" }), "Spending"),
-          h("span", {}, h("i", { style: "background:var(--brass)" }), "Ready to Assign"),
-        ),
-        h("p", { class: "hint", text: "Spending leaves out card-payment categories. The line is Ready to Assign, including when it’s negative." }));
-      const list = h("div", { class: "stack" });
-      for (const row of [...series].reverse()) {
-        list.append(h("button", { class: "line", type: "button", onclick: () => { ctx.setMonth(row.month); sheet.close(); } },
-          h("strong", { text: monthLabel(row.month) }),
-          h("span", { class: "muted", text: `in ${fmt(row.income)} · out ${fmt(row.spent)}` }),
-          h("span", { text: fmt(row.free) }),
-        ));
-      }
-      host.append(list);
-      requestAnimationFrame(() => drawChart(canvas, series));
-    },
+function svgEl(tag, attrs = {}, ...kids) {
+  const el = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v == null || v === false) continue;
+    if (k === "text") el.textContent = String(v);
+    else el.setAttribute(k, String(v));
+  }
+  for (const kid of kids.flat(Infinity)) {
+    if (kid == null || kid === false) continue;
+    el.append(kid);
+  }
+  return el;
+}
+
+function axisMoney(v) {
+  const n = Math.round(v);
+  const s = Math.abs(n).toLocaleString("en-US");
+  return (n < 0 ? "-$" : "$") + s;
+}
+
+function budgetHistoryData(budget, today = monthKey()) {
+  const start = budgetStart(budget) || today;
+  const end = [furthestMonth(budget, today), today].sort().pop();
+  const months = [];
+  let mk = start;
+  let guard = 0;
+  while (mk <= end && guard < 120) {
+    months.push(mk);
+    mk = nextMonth(mk);
+    guard++;
+  }
+  const mb = budget.monthlyBudgets || {};
+  const inf = budget.inflows || {};
+  return months.map((mk) => {
+    const income = Number(inf[mk] || 0);
+    const budgeted = Object.values(mb[mk] || {}).reduce((s, v) => s + Number(v || 0), 0);
+    const spent = (budget.transactions || []).filter((tx) => tx.date && tx.date.startsWith(mk) && tx.type === "expense").reduce((s, tx) => s + Number(tx.amount || 0), 0);
+    const trulyFree = readyToAssign(budget, mk, mb, inf, today);
+    return { month: mk, label: monthLabelShort(mk), income, budgeted, spent, trulyFree };
   });
 }
 
-function drawChart(canvas, series) {
-  const dpr = Math.min(3, window.devicePixelRatio || 1);
-  const w = canvas.clientWidth || 320;
-  const hgt = 180;
-  canvas.width = w * dpr;
-  canvas.height = hgt * dpr;
-  const g = canvas.getContext("2d");
-  g.scale(dpr, dpr);
-  g.clearRect(0, 0, w, hgt);
-  if (!series.length) return;
-  const css = getComputedStyle(document.documentElement);
-  const ink = (name, fallback) => css.getPropertyValue(name).trim() || fallback;
-  const income = ink("--accent", "#2f6f62");
-  const spend = ink("--danger", "#a33b32");
-  const free = ink("--brass", "#c4a574");
-  const max = Math.max(1, ...series.flatMap((s) => [s.income, s.spent, Math.abs(s.free)]));
-  const slot = w / series.length;
+function historyChart(series) {
+  const W = 320, H = 200;
+  const L = 40, R = 312, T = 8, B = 176;
+  const plotW = R - L, plotH = B - T;
+  const yMin = Math.min(0, ...series.map((s) => s.trulyFree));
+  const yMax = Math.max(1, ...series.map((s) => Math.max(s.income, s.spent, s.trulyFree, 0)));
+  const span = yMax - yMin || 1;
+  const y = (v) => B - ((v - yMin) / span) * plotH;
+  const n = series.length;
+  const slot = plotW / n;
+  const barW = Math.min(14, slot * 0.28);
+  const ticks = 4;
+  const kids = [];
+  for (let i = 0; i <= ticks; i++) {
+    const val = yMin + (span * i) / ticks;
+    const yy = y(val);
+    kids.push(svgEl("line", { x1: L, x2: R, y1: yy, y2: yy, stroke: "var(--line)", "stroke-width": "1", "stroke-dasharray": "3 3" }));
+    kids.push(svgEl("text", { x: L - 4, y: yy + 3, "text-anchor": "end", "font-size": "10", fill: "var(--ink-2)", text: axisMoney(val) }));
+  }
+  if (yMin < -0.005) {
+    const z = y(0);
+    kids.push(svgEl("line", { x1: L, x2: R, y1: z, y2: z, stroke: "var(--ink-2)", "stroke-width": "1" }));
+  }
   series.forEach((s, i) => {
-    const x = i * slot + slot * 0.2;
-    const bw = slot * 0.25;
-    const ih = (s.income / max) * (hgt - 24);
-    const sh = (s.spent / max) * (hgt - 24);
-    g.fillStyle = income;
-    g.fillRect(x, hgt - 16 - ih, bw, ih);
-    g.fillStyle = spend;
-    g.fillRect(x + bw + 2, hgt - 16 - sh, bw, sh);
+    const cx = L + (i + 0.5) * slot;
+    const iy = y(Math.max(0, s.income));
+    const sy = y(Math.max(0, s.spent));
+    kids.push(svgEl("rect", { x: cx - barW - 1, y: iy, width: barW, height: Math.max(0, B - iy), fill: "var(--good)" }));
+    kids.push(svgEl("rect", { x: cx + 1, y: sy, width: barW, height: Math.max(0, B - sy), fill: "var(--danger)" }));
+    kids.push(svgEl("text", { x: cx, y: H - 8, "text-anchor": "middle", "font-size": "10", fill: "var(--ink-2)", text: s.label }));
   });
-  const anyNeg = series.some((s) => s.free < -0.005);
-  const base = anyNeg ? hgt * 0.62 : hgt - 16;
-  const span = anyNeg ? hgt * 0.45 : hgt - 24;
-  g.strokeStyle = free;
-  g.lineWidth = 2;
-  g.beginPath();
-  series.forEach((s, i) => {
-    const x = i * slot + slot * 0.5;
-    const y = Math.max(6, Math.min(hgt - 6, base - (s.free / max) * span));
-    if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
+  const pts = series.map((s, i) => {
+    const cx = L + (i + 0.5) * slot;
+    return `${cx},${y(s.trulyFree)}`;
+  }).join(" ");
+  kids.push(svgEl("polyline", { points: pts, fill: "none", stroke: "var(--navy)", "stroke-width": "2", "stroke-linejoin": "round", "stroke-linecap": "round" }));
+  return svgEl("svg", {
+    class: "hist-chart",
+    viewBox: `0 0 ${W} ${H}`,
+    width: "100%",
+    height: "200",
+    role: "img",
+    "aria-label": "Budget history: income, spent, and truly free",
+  }, ...kids);
+}
+
+export function openHistory(ctx) {
+  const budget = ctx.budget();
+  const today = monthKey();
+  const series = budgetHistoryData(budget, today);
+  const sheet = openSheet({
+    title: "📈 Budget History",
+    body: (host) => {
+      host.append(btn(`📍 Jump to Today (${monthLabelShort(today)})`, {
+        kind: "primary",
+        block: true,
+        onClick: () => {
+          const card = host.querySelector("[data-hist-today]");
+          if (card) card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        },
+      }));
+      if (series.length > 1) {
+        host.append(
+          h("div", { class: "hist-chart-wrap" }, historyChart(series)),
+          h("div", { class: "legend" },
+            h("span", {}, h("i", { style: "background:var(--good)" }), "Income"),
+            h("span", {}, h("i", { style: "background:var(--danger)" }), "Spent"),
+            h("span", {}, h("i", { style: "background:var(--navy)" }), "Truly Free"),
+          ),
+        );
+      }
+      for (const row of [...series].reverse()) {
+        const isToday = row.month === today;
+        host.append(h("button", {
+          class: "hist-card" + (isToday ? " today" : ""),
+          type: "button",
+          "data-hist-today": isToday ? "1" : null,
+          onclick: () => { ctx.setMonth(row.month); sheet.close(); },
+        },
+          h("div", { class: "hist-card-h" },
+            h("span", { text: monthLabel(row.month) + (isToday ? " (Today)" : "") }),
+            h("span", { class: "hist-free", text: fmt(row.trulyFree) }),
+          ),
+          h("div", { class: "hist-card-meta" },
+            h("span", { text: `Income: ${fmt(row.income)}` }),
+            h("span", { text: `Budgeted: ${fmt(row.budgeted)}` }),
+            h("span", { text: `Spent: ${fmt(row.spent)}` }),
+          ),
+        ));
+      }
+    },
   });
-  g.stroke();
 }
 
 void uid;
@@ -1549,27 +1616,38 @@ export function openInbox(ctx) {
 function openLog(ctx) {
   const budget = ctx.budget();
   const month = ctx.month;
-  const label = (type) => type === "cover" ? "Cover overspending" : type === "cover-future" ? "Cover from future months" : type === "assign" ? "Budget assignment" : "Move money";
+  const label = (type) => type === "cover" ? "Cover Overspending" : type === "cover-future" ? "Cover from Future Months" : type === "assign" ? "Budget Assignment" : "Move Money";
+  const typeClass = (type) => (type === "cover" || type === "cover-future") ? "cover" : type === "assign" ? "assign" : "move";
   const when = (ts) => {
     const d = new Date(ts || 0);
     if (!ts || Number.isNaN(d.getTime())) return "";
-    return d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    const day = d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+    const time = d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+    return `Moved on: ${day} ${time}`;
   };
   const log = [...(budget.moneyMoveLog || [])].filter((e) => e.month === month).reverse();
-  openSheet({
-    title: `Move history — ${monthLabel(month)}`,
+  const sheet = openSheet({
+    title: `📋 Move History — ${monthLabel(month)}`,
     body: (host) => {
       if (!log.length) host.append(h("p", { class: "empty", text: `No moves recorded for ${monthLabel(month)}.` }));
       for (const entry of log) {
-        const head = h("div", { class: "line" }, h("strong", { text: label(entry.type) }), h("span", { class: "muted", text: when(entry.ts) }));
-        host.append(head);
+        const box = h("div", { class: "mlog-entry" },
+          h("div", { class: "mlog-head" },
+            h("span", { class: `mlog-type ${typeClass(entry.type)}`, text: label(entry.type) }),
+            h("span", { class: "mlog-when", text: when(entry.ts) }),
+          ),
+        );
         for (const e of entry.entries || []) {
-          host.append(h("div", { class: "line" },
-            h("span", { text: `${catName(budget, e.from)} → ${catName(budget, e.to)}` }),
-            h("span", { class: "money pos", text: fmt(e.amount) }),
+          box.append(h("div", { class: "mlog-row" },
+            h("span", { text: catName(budget, e.from) }),
+            h("span", { class: "mlog-arrow", text: "→" }),
+            h("span", { text: catName(budget, e.to) }),
+            h("span", { class: "mlog-amt", text: fmt(e.amount) }),
           ));
         }
+        host.append(box);
       }
+      host.append(btn("Close", { kind: "ghost", block: true, onClick: () => sheet.close() }));
     },
   });
 }
