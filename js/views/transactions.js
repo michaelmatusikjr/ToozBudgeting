@@ -360,8 +360,8 @@ export function renderTransactions(root, ctx) {
   for (const tx of shown) list.append(txRow(ctx, tx, selected));
   root.append(list);
   if (rows.length > shown.length) {
-    root.append(h("p", { class: "hint", text: `Showing ${shown.length} of ${rows.length}` }),
-      h("button", { class: "text-link", type: "button", text: "Show more", onclick: () => { ctx.ui.txLimit = limit + PAGE; ctx.render(); } }));
+    root.append(btn("Show more", { kind: "ghost", onClick: () => { ctx.ui.txLimit = limit + PAGE; ctx.render(); } }));
+    root.lastElementChild.classList.add("tx-show-more");
   }
   ctx.ui.searchEl = search;
   if (typing) { ctx.ui.txTyping = false; keepFocus(search); }
@@ -385,43 +385,164 @@ function monthRangeSafe(k) {
   return { from: `${k}-01`, to: `${k}-${String(last).padStart(2, "0")}` };
 }
 
+
+function shortTxDate(date) {
+  if (!date) return "";
+  return new Date(`${date}T12:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
 function txRow(ctx, tx, selected) {
   const budget = ctx.budget();
-  const name = tx.subtype === "starting_balance" ? "Starting Balance" : (displayName(budget, tx.originalPayee || tx.payee) || tx.payee || "—");
-  const cat = tx.splits?.length ? "Split" : (budget.categories.find((c) => c.id === tx.categoryId)?.name || (tx.type === "income" ? "Ready to Assign" : "No category"));
-  const acct = [...budget.accounts, ...budget.creditCards].find((a) => a.id === tx.accountId);
+  const isSplit = !!(tx.splits && tx.splits.length);
+  const isStartingBalance = tx.subtype === "starting_balance";
+  const isRefundTx = tx.type === "expense" && Number(tx.amount) < 0;
+  const isSuggested = !isStartingBalance && tx.categoryConfirmed === false && tx.categoryId && tx.type === "expense" && !tx.splits;
+  const isMissingCat = !isStartingBalance && tx.type === "expense" && !tx.categoryId && !tx.splits;
+  const isCardTx = (budget.creditCards || []).some((c) => c.id === tx.accountId);
+  const isCardPayment = tx.type === "payment" && isCardTx;
+  const acct = [...(budget.accounts || []), ...(budget.creditCards || [])].find((a) => a.id === tx.accountId);
+  const cat = (budget.categories || []).find((c) => c.id === tx.categoryId);
   const locked = isLocked(budget, tx);
-  const row = h("article", { class: `tx ${selected.has(tx.id) ? "sel" : ""}` });
+  const expanded = ctx.ui.expandedTxId === tx.id;
+  const selecting = selected.size > 0;
+  const payee = isStartingBalance ? (acct?.name || "Account") : (displayName(budget, tx.originalPayee || tx.payee) || tx.payee || "—");
+
+  const pill = txPill(ctx, tx, { isSplit, isStartingBalance, isRefundTx, isSuggested, isMissingCat, isCardTx, cat, acct, locked });
+
+  const sign = tx.type === "income" || (tx.type === "adjustment" && Number(tx.amount) >= 0) || isRefundTx || isCardPayment ? "+" : "-";
+  const amtClass = amountClass(budget, tx);
+  const amtText = `${sign}${fmt(Math.abs(Number(tx.amount) || 0))}`;
+
+  const monthNote = tx.categoryId && budget.categoryNotes?.[String(tx.date || "").slice(0, 7)]?.[tx.categoryId];
+  const noteBits = [];
+  if (tx.note) noteBits.push(tx.note);
+  if (monthNote) {
+    const when = new Date(`${String(tx.date || "").slice(0, 7)}-01T12:00:00`).toLocaleDateString("en-US", { month: "short", year: "2-digit" });
+    noteBits.push(`Note from category for ${when}: ${monthNote}`);
+  }
+  const row = h("article", { class: `tx${selected.has(tx.id) ? " sel" : ""}${selecting ? " selecting" : ""}` });
   let timer = null;
   row.addEventListener("contextmenu", (e) => { e.preventDefault(); selected.add(tx.id); ctx.render(); });
   row.addEventListener("touchstart", () => { timer = setTimeout(() => { selected.add(tx.id); ctx.render(); }, 480); }, { passive: true });
   row.addEventListener("touchend", () => clearTimeout(timer));
-  const box = h("input", { type: "checkbox", checked: selected.has(tx.id), onclick: (e) => { e.stopPropagation(); if (e.target.checked) selected.add(tx.id); else selected.delete(tx.id); ctx.render(); } });
-  if (selected.size) row.append(box);
+  row.addEventListener("click", () => {
+    if (selecting) {
+      if (selected.has(tx.id)) selected.delete(tx.id); else selected.add(tx.id);
+      ctx.render();
+      return;
+    }
+    if (isSplit) {
+      ctx.ui.expandedTxId = expanded ? null : tx.id;
+      ctx.render();
+      return;
+    }
+    openTx(ctx, tx);
+  });
+
+  if (selecting) {
+    const box = h("input", { type: "checkbox", checked: selected.has(tx.id), onclick: (e) => { e.stopPropagation(); if (e.target.checked) selected.add(tx.id); else selected.delete(tx.id); ctx.render(); } });
+    row.append(box);
+  }
+  const hasPayee = !!(payee && payee !== "—");
+  const title = hasPayee ? payee : (acct?.name || payee);
+  const subKids = [];
+  if (hasPayee && acct) subKids.push(h("span", { text: acct.name }));
+  if (!tx.accountId) subKids.push(h("span", { class: "tx-no-acct", text: "⚠️ no account" }));
+  subKids.push(h("span", { class: "tx-pill-wrap", onclick: (e) => e.stopPropagation() }, pill));
+  if (noteBits.length) subKids.push(h("span", { class: "tx-memo", text: `· ${noteBits.join(" · ")}` }));
+
   row.append(
-    h("div", { class: "tx-body" },
-      h("button", { class: "tx-main", type: "button", onclick: () => { if (selected.size) { if (selected.has(tx.id)) selected.delete(tx.id); else selected.add(tx.id); ctx.render(); } else openTx(ctx, tx); } },
-        h("span", { class: "tx-top" },
-          h("span", { class: "tx-payee", text: name }),
-          h("span", { class: amountClass(budget, tx), text: amountLabel(budget, tx) }),
-        ),
-        h("span", { class: "muted", text: `${tx.date} · ${acct?.name || "No account"}` }),
-      ),
-      h("div", { class: "tx-sub" },
-        h("button", { class: `pill ${tx.categoryConfirmed === false ? "bad" : ""}`, type: "button", text: tx.categoryConfirmed === false ? `${cat} · confirm` : cat, disabled: !!locked, onclick: (e) => { e.stopPropagation(); openInlineCat(ctx, tx); } }),
-        tx.type === "payment" ? h("button", { class: `quiet-link ${tx.paymentLinkStatus === "linked" ? "" : "bad"}`, type: "button", text: tx.paymentLinkStatus === "linked" ? "Linked" : "Other side", onclick: (e) => { e.stopPropagation(); if (tx.paymentLinkStatus === "linked") return; openMissingSide(ctx, tx); } }) : null,
-      ),
+    h("div", { class: "tx-date", text: shortTxDate(tx.date) }),
+    h("div", { class: "tx-mid" },
+      h("div", { class: "tx-payee", text: title }),
+      h("div", { class: "tx-meta" }, ...subKids),
     ),
+    h("div", { class: amtClass, text: amtText }),
+    locked
+      ? h("span", { class: "tx-lock", title: "Locked by reconciliation", text: "🔒" })
+      : h("button", { class: "tx-x", type: "button", text: "×", "aria-label": "Delete transaction", onclick: (e) => { e.stopPropagation(); confirmDeleteTx(ctx, tx); } }),
   );
+  if (expanded && isSplit) {
+    const box = h("div", { class: "tx-splits" });
+    for (const sp of tx.splits) {
+      const spCat = (budget.categories || []).find((c) => c.id === sp.categoryId);
+      box.append(h("div", { class: "tx-split-row" },
+        h("span", { text: spCat?.name || "—" }),
+        h("span", { text: fmt(sp.amount) }),
+      ));
+    }
+    row.append(box);
+  }
   return row;
 }
 
+function txPill(ctx, tx, flags) {
+  const { isSplit, isStartingBalance, isRefundTx, isSuggested, isMissingCat, isCardTx, cat, locked } = flags;
+  const budget = ctx.budget();
+  if (isStartingBalance) return h("span", { class: "tx-pill sb", text: "Starting Balance" });
+  if (isSplit) return h("span", { class: "tx-pill split", text: "🔀 Split" });
+  if (tx.type === "transfer") return h("span", { class: "tx-pill transfer", text: "🔄 Transfer" });
+  if (tx.type === "payment") {
+    const linkIcon = tx.paymentLinkStatus === "linked" ? "🔗" : tx.paymentLinkStatus === "broken" ? "⛓️‍💥" : "";
+    let label;
+    if (isCardTx) {
+      const fromAcct = tx.paymentFromAccountId ? (budget.accounts || []).find((a) => a.id === tx.paymentFromAccountId) : null;
+      label = fromAcct ? `Payment from ${fromAcct.name}` : "Card Payment";
+    } else {
+      label = cat?.name || "Payment";
+    }
+    const el = h("span", { class: "tx-pill payment" },
+      linkIcon ? h("span", { class: "tx-link-ico", title: tx.paymentLinkStatus === "linked" ? "Matched" : "Waiting for match", text: linkIcon }) : null,
+      h("span", { text: label }),
+    );
+    if (tx.paymentLinkStatus && tx.paymentLinkStatus !== "linked") {
+      el.style.cursor = "pointer";
+      el.addEventListener("click", (e) => { e.stopPropagation(); openMissingSide(ctx, tx); });
+    }
+    return el;
+  }
+  if (tx.type === "adjustment") return h("span", { class: "tx-pill adj", text: "⚖️ Adj" });
+  if (tx.type === "income") return h("span", { class: "tx-pill income", text: "Income" });
+  if (isMissingCat) {
+    return h("button", { class: "tx-pill missing", type: "button", text: "— No Category", onclick: (e) => { e.stopPropagation(); openInlineCat(ctx, tx); } });
+  }
+  if (isSuggested) {
+    return h("div", { class: "tx-pill suggested" },
+      h("span", { text: cat?.name || "—" }),
+      h("button", { type: "button", class: "tx-sug-yes", title: "Confirm", text: "✓", disabled: !!locked, onclick: (e) => { e.stopPropagation(); ctx.updateBudget((b) => confirmCategories(b, [tx.id])); } }),
+      h("button", { type: "button", class: "tx-sug-no", title: "Change", text: "✕", disabled: !!locked, onclick: (e) => { e.stopPropagation(); openInlineCat(ctx, tx); } }),
+    );
+  }
+  return h("span", { class: "tx-pill", text: cat?.name || (isRefundTx ? "↩ Refund" : "—") });
+}
+
+function confirmDeleteTx(ctx, tx) {
+  const budget = ctx.budget();
+  const payeeName = displayName(budget, tx.originalPayee || tx.payee) || tx.payee;
+  const acctName = [...(budget.accounts || []), ...(budget.creditCards || [])].find((a) => a.id === tx.accountId)?.name;
+  const name = (payeeName && payeeName !== "—") ? payeeName : (acctName || "this transaction");
+  let message = `Delete ${name} (${fmt(Math.abs(tx.amount))} on ${tx.date})? This cannot be undone.`;
+  if (tx.type === "transfer" && tx.transferLinkId) message += " Both sides of this transfer will be deleted.";
+  if (tx.type === "payment" && tx.paymentLinkStatus === "linked") message += " The matching payment on the other account will be unlinked.";
+  confirmDialog({
+    title: "Delete Transaction?",
+    message,
+    confirm: "Yes, Delete",
+    danger: true,
+    onConfirm: () => {
+      ctx.updateBudget((b) => deleteTransactions(b, [tx.id]));
+      toast("Deleted", { label: "Undo", action: () => ctx.undo() });
+    },
+  });
+}
+
 function amountClass(budget, tx) {
-  if (tx.type === "income") return "tx-amt in";
-  if (tx.type === "expense") return Number(tx.amount) < 0 ? "tx-amt in" : "tx-amt out";
-  if (tx.type === "transfer") return Number(tx.amount) < 0 ? "tx-amt out" : "tx-amt in";
-  if (tx.type === "payment") return (budget.creditCards || []).some((c) => c.id === tx.accountId) ? "tx-amt in" : "tx-amt out";
-  return "tx-amt";
+  const isRefundTx = tx.type === "expense" && Number(tx.amount) < 0;
+  const isCardPayment = tx.type === "payment" && (budget.creditCards || []).some((c) => c.id === tx.accountId);
+  if (tx.type === "income" || isRefundTx || isCardPayment) return "tx-amt in";
+  if (tx.type === "payment") return "tx-amt pay";
+  if (tx.type === "adjustment") return "tx-amt adj";
+  return "tx-amt out";
 }
 
 export function openMissingSide(ctx, tx) {

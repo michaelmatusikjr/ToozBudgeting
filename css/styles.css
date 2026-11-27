@@ -1634,3 +1634,56 @@ input, textarea, select, [contenteditable="true"] {
 .tx-attn { display: block; width: 100%; text-align: left; background: var(--amber-bg); border: 1px solid var(--amber); color: var(--amber-ink); border-radius: 10px; padding: 10px 12px; margin: 0 0 10px; font-family: inherit; cursor: pointer; }
 .tx-net { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; color: var(--ink-2); margin: 0 0 8px; }
 .tx-net-amt { font-weight: 700; color: var(--ink); }
+
+/* WU-18: transaction rows */
+.tx-list > .tx {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr) auto 28px;
+  align-items: start;
+  gap: 2px 8px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  border-bottom: 1px solid var(--line);
+  box-shadow: none;
+  padding: 10px 0;
+  min-height: 0;
+  width: 100%;
+  cursor: pointer;
+  font-family: inherit;
+  color: var(--ink);
+}
+.tx-list > .tx.selecting { grid-template-columns: 22px 46px minmax(0, 1fr) auto 28px; }
+.tx-list > .tx.sel { background: color-mix(in srgb, var(--navy) 8%, transparent); border-radius: 10px; padding-left: 8px; padding-right: 8px; }
+.tx-date { font-size: 12px; color: var(--ink-2); padding-top: 3px; }
+.tx-mid { min-width: 0; }
+.tx-list > .tx .tx-payee { font-weight: 700; font-size: 14px; display: block; flex: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tx-meta { font-size: 11px; color: var(--ink-2); margin-top: 2px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; }
+.tx-memo { color: var(--muted); }
+.tx-no-acct { color: var(--amber-ink); }
+.tx-pill-wrap { min-width: 0; max-width: 100%; }
+.tx-pill {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; font-weight: 600; font-family: inherit;
+  background: var(--bg); color: var(--ink-2);
+  border: 0; border-radius: 999px; padding: 3px 8px;
+  white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+}
+.tx-pill.split, .tx-pill.transfer, .tx-pill.payment, .tx-pill.income, .tx-pill.sb, .tx-pill.adj { background: var(--bg); color: var(--ink); }
+.tx-pill.missing { color: var(--danger); background: var(--red-bg); cursor: pointer; }
+.tx-pill.suggested { background: var(--amber-bg); color: var(--amber-ink); }
+.tx-sug-yes, .tx-sug-no { border: 0; background: none; cursor: pointer; font-size: 12px; padding: 0 2px; line-height: 1; }
+.tx-list > .tx .tx-amt { font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums; padding-top: 2px; }
+.tx-amt.in { color: var(--good); }
+.tx-amt.out { color: var(--ink); }
+.tx-amt.pay { color: var(--purple); }
+.tx-amt.adj { color: var(--gold); }
+.tx-x {
+  border: 0; background: none; color: var(--ink-2); cursor: pointer;
+  font-size: 18px; line-height: 1; padding: 0; width: 28px; height: 28px;
+  font-family: inherit;
+}
+.tx-lock { font-size: 14px; padding-top: 2px; text-align: center; }
+.tx-splits { grid-column: 2 / -2; display: grid; gap: 4px; padding: 4px 0 2px 0; }
+.tx-split-row { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--ink-2); }
+.tx-show-more { width: 100%; margin: 10px 0 16px; }
