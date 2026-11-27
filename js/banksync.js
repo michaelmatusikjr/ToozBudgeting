@@ -1,16 +1,18 @@
 /**
- * Bank sync client. Talks to the toozbudgeting-bank Worker, keeps this device's private key,
+ * Bank sync client. Talks to the toozbudgeting-bank Worker with the household session (Sign in with Google),
  * opens Plaid Link, and applies what the Worker delivers through ctx.commit so it can be undone.
+ *
+ * New bank transactions wait in the household's bank inbox on the server. One signed-in device at a time
+ * claims them, applies them to the shared budget, pushes the result, and acks. Transaction ids come from
+ * Plaid (plaid-<id>), so applying the same batch twice never makes a duplicate.
  */
-import { deviceGet, deviceSet } from "./store.js?v=139";
-import { b64urlToBytes } from "./util.js?v=139";
-import { applyBankBatch, rememberBankAccounts, sumStats, statsLine } from "./bankmap.js?v=139";
+import { deviceGet, deviceSet } from "./store.js?v=140";
+import { applyBankBatch, rememberBankAccounts, sumStats, statsLine } from "./bankmap.js?v=140";
+import { api, account, serverUrl, SERVER_DEFAULT, ApiError } from "./account.js?v=140";
+import { syncNow } from "./sync.js?v=140";
 
-export const BANK_DEFAULTS = {
-  serverUrl: "https://toozbudgeting-bank.michael-matusik-jr.workers.dev",
-};
+export const BANK_DEFAULTS = { serverUrl: SERVER_DEFAULT };
 export const PLAID_LINK_SRC = "https://cdn.plaid.com/link/v2/stable/link-initialize.js";
-const KEY_DB = "toozbudgeting-bank";
 const LINK_KEY = "toozbudgeting:bank:link";
 const OAUTH_KEY = "toozbudgeting:bank:oauth";
 const listeners = new Set();
@@ -18,12 +20,9 @@ const listeners = new Set();
 export function onBankChange(fn) { listeners.add(fn); return () => listeners.delete(fn); }
 const changed = () => listeners.forEach((fn) => { try { fn(); } catch { /* ignore */ } });
 
-export async function bankConfig() {
-  const o = (await deviceGet("bankConfig")) || {};
-  return { serverUrl: String(o.serverUrl || BANK_DEFAULTS.serverUrl).trim().replace(/\/+$/, "") };
-}
+export async function bankConfig() { return { serverUrl: await serverUrl() }; }
 export async function setBankConfig(patch) {
-  const next = { ...(await bankConfig()), ...patch };
+  const next = { ...(await deviceGet("bankConfig")), ...patch };
   next.serverUrl = String(next.serverUrl || "").trim().replace(/\/+$/, "") || BANK_DEFAULTS.serverUrl;
   await deviceSet("bankConfig", next);
   changed();
@@ -35,103 +34,25 @@ async function saveBankState(patch) {
   changed();
   return s;
 }
+/** Held batches from before household accounts (v1 kept them on the device). Sent back to the server on next pull. */
 export async function heldBatches() { return (await deviceGet("bankHeld")) || []; }
 export const heldCount = (held) => (held || []).reduce((n, b) => n + (b.added?.length || 0) + (b.removed?.length || 0), 0);
+const batchCount = (b) => (b?.added?.length || 0) + (b?.modified?.length || 0) + (b?.removed?.length || 0);
 
-/* ---------- device key: P-256 ECDH, private half never leaves this device ---------- */
+export const BankError = ApiError;
 
-function openKeyDb() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(KEY_DB, 1);
-    req.onupgradeneeded = () => { if (!req.result.objectStoreNames.contains("kv")) req.result.createObjectStore("kv"); };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
+/** Signed in with a role that can see bank sync. */
+export async function bankAccess() {
+  const a = await account();
+  if (!a?.token) return { signedIn: false, role: null, canManage: false, canApply: false };
+  const role = a.me?.role || null;
+  return { signedIn: true, role, canManage: role === "owner", canApply: role === "owner" || role === "member" };
 }
-async function idb(mode, fn) {
-  const db = await openKeyDb();
-  try {
-    return await new Promise((resolve, reject) => {
-      const tx = db.transaction("kv", mode);
-      const out = fn(tx.objectStore("kv"));
-      tx.oncomplete = () => resolve(out?.result);
-      tx.onerror = () => reject(tx.error);
-    });
-  } finally { db.close(); }
-}
-async function newDeviceKey() {
-  const pair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
-  await idb("readwrite", (s) => s.put(pair, "device"));
-  return pair;
-}
-async function deviceKey() { return idb("readonly", (s) => s.get("device")); }
-
-const te = new TextEncoder();
-/** Open a batch sealed by the Worker (ephemeral ECDH, HKDF-SHA256, AES-GCM). */
-export async function openSealed(privateKey, sealed) {
-  const o = typeof sealed === "string" ? JSON.parse(sealed) : sealed;
-  const epkRaw = b64urlToBytes(o.epk);
-  const epk = await crypto.subtle.importKey("raw", epkRaw, { name: "ECDH", namedCurve: "P-256" }, false, []);
-  const bits = await crypto.subtle.deriveBits({ name: "ECDH", public: epk }, privateKey, 256);
-  const ikm = await crypto.subtle.importKey("raw", bits, "HKDF", false, ["deriveKey"]);
-  const key = await crypto.subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt: epkRaw, info: te.encode("toozbudgeting-bank-v1") }, ikm, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
-  const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: b64urlToBytes(o.iv) }, key, b64urlToBytes(o.ct));
-  return JSON.parse(new TextDecoder().decode(pt));
-}
-
-/* ---------- server calls ---------- */
-
-export class BankError extends Error { constructor(status, message, data) { super(message); this.status = status; this.data = data; } }
-
-async function api(method, path, body, { auth = true } = {}) {
-  const cfg = await bankConfig();
-  const s = await bankState();
-  const headers = body === undefined ? {} : { "Content-Type": "application/json" };
-  if (auth) {
-    if (!s.token) throw new BankError(401, "Pair this device first");
-    headers.Authorization = "Bearer " + s.token;
-  }
-  let res;
-  try {
-    res = await fetch(cfg.serverUrl + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), mode: "cors" });
-  } catch { throw new BankError(0, navigator.onLine ? "Can’t reach the bank sync server" : "You’re offline"); }
-  let data = null;
-  try { data = await res.json(); } catch { /* empty */ }
-  if (!res.ok) {
-    if (res.status === 401 && auth) await saveBankState({ token: null, deviceId: null, error: "This device was unpaired. Pair it again." });
-    throw new BankError(res.status, data?.error || `HTTP ${res.status}`, data);
-  }
-  return data;
-}
-
-export const isPaired = async () => !!(await bankState()).token;
+export const isPaired = async () => (await bankAccess()).signedIn;
 
 export async function bankHealth() {
   try { return { reachable: true, ...(await api("GET", "/bank/health", undefined, { auth: false })) }; }
   catch (e) { return { reachable: false, error: e.message }; }
-}
-
-export async function pairDevice(secret, name) {
-  const pair = await newDeviceKey();
-  const publicKey = await crypto.subtle.exportKey("jwk", pair.publicKey);
-  const res = await api("POST", "/bank/pair", { secret: String(secret || "").trim(), publicKey, name: name || deviceName() }, { auth: false });
-  await saveBankState({ token: res.token, deviceId: res.deviceId, pairedAt: Date.now(), error: null });
-  return res;
-}
-
-export async function unpairDevice() {
-  try { await api("DELETE", "/bank/device"); } catch { /* already gone */ }
-  await saveBankState({ token: null, deviceId: null, items: null, error: null, lastPull: null });
-}
-
-function deviceName() {
-  const ua = navigator.userAgent || "";
-  if (/iPhone/.test(ua)) return "iPhone";
-  if (/iPad/.test(ua)) return "iPad";
-  if (/Android/.test(ua)) return "Android";
-  if (/Mac/.test(ua)) return "Mac";
-  if (/Windows/.test(ua)) return "Windows";
-  return "Browser";
 }
 
 /** Server's list of connected banks. Cached so Settings can show something offline. */
@@ -154,7 +75,7 @@ export const requestSync = (itemId) => api("POST", "/bank/sync", itemId ? { item
 
 let pulling = null;
 
-/** Pull the inbox, apply every batch (and anything held for mapping) in one undoable commit, then ack. */
+/** Claim the household's waiting bank batches, apply them in one undoable commit, push, then ack. */
 export function pullBank(ctx) {
   if (pulling) return pulling;
   pulling = (async () => {
@@ -165,53 +86,56 @@ export function pullBank(ctx) {
 }
 
 async function pullInner(ctx) {
-  const s = await bankState();
-  if (!s.token || !ctx.budget()) return { stats: null };
-  const pair = await deviceKey();
-  if (!pair?.privateKey) {
-    await saveBankState({ error: "This device lost its bank key. Unpair and pair again." });
-    return { stats: null };
-  }
-  const batches = [];
-  const ids = [];
-  let after = 0;
+  const access = await bankAccess();
+  if (!access.canApply || !ctx.budget()) return { stats: null };
+  // Start from the household's latest budget so bank transactions land on top of everyone's edits.
+  await syncNow(ctx);
+  const claimed = [];
   for (let page = 0; page < 10; page++) {
-    const res = await api("GET", `/bank/inbox?after=${after}`);
-    for (const row of res.batches || []) {
-      after = row.id;
-      try { batches.push(await openSealed(pair.privateKey, row.enc)); ids.push(row.id); }
-      catch { await saveBankState({ error: "A bank update couldn’t be opened on this device." }); }
-    }
-    if (!res.more) break;
+    const res = await api("GET", "/bank/inbox");
+    const fresh = (res.batches || []).filter((b) => !claimed.some((c) => c.id === b.id));
+    claimed.push(...fresh);
+    if (!res.more || !fresh.length) break;
   }
-  const held = await heldBatches();
-  if (!batches.length && !held.length) {
+  const legacy = await heldBatches();
+  if (!claimed.length && !legacy.length) {
     await saveBankState({ lastPull: Date.now(), error: null });
     return { stats: sumStats([]) };
   }
   let b = ctx.budget();
   const start = b;
   const results = [];
-  const nextHeld = [];
-  for (const batch of [...held, ...batches]) {
+  const done = []; const release = []; const held = [];
+  for (const row of claimed) {
+    const r = applyBankBatch(b, row.batch);
+    b = r.budget;
+    results.push(r.stats);
+    if (!r.held) done.push(row.id);
+    else if (batchCount(r.held) === batchCount(row.batch)) release.push(row.id);
+    else { done.push(row.id); held.push(r.held); }
+  }
+  for (const batch of legacy) {
     const r = applyBankBatch(b, batch);
     b = r.budget;
     results.push(r.stats);
-    if (r.held) nextHeld.push(r.held);
+    if (r.held) held.push(r.held);
   }
   if (b !== start) {
     const budgets = ctx.state.budgets.map((x) => x.id === b.id ? b : x);
     await ctx.commit({ ...ctx.state, budgets });
+    // The bank transactions must reach the server before the inbox lets go of them.
+    await syncNow(ctx);
   }
-  await deviceSet("bankHeld", nextHeld);
-  for (let i = 0; i < ids.length; i += 200) await api("POST", "/bank/ack", { ids: ids.slice(i, i + 200) });
+  await api("POST", "/bank/ack", { ids: done, release, held });
+  if (legacy.length) await deviceSet("bankHeld", []);
   const stats = sumStats(results);
-  await saveBankState({ lastPull: Date.now(), lastStats: stats, error: null });
+  await saveBankState({ lastPull: Date.now(), lastStats: stats, waiting: held.length + release.length, error: null });
   return { stats, text: statsLine(stats) };
 }
 
-/** Put the server's account list into the budget so each account can be mapped. */
-export function rememberItems(ctx, items) {
+/** Put the server's account list into the budget so each account can be mapped. Owners only (it changes bank links). */
+export async function rememberItems(ctx, items) {
+  if (!(await bankAccess()).canManage) return;
   let b = ctx.budget();
   if (!b) return;
   const start = b;
@@ -226,13 +150,16 @@ let lastAuto = 0;
 export async function bankOnOpen(ctx) {
   if (Date.now() - lastAuto < 5 * 60000) return;
   lastAuto = Date.now();
-  if (!(await isPaired()) || !navigator.onLine) return;
-  try {
-    const res = await pullBank(ctx);
-    const st = res?.stats;
-    if (st && (st.added || st.updated || st.removed)) ctx.toast(`Bank sync: ${statsLine(st)}`);
-  } catch (e) {
-    await saveBankState({ error: e.message });
+  const access = await bankAccess();
+  if (!access.signedIn || !navigator.onLine) return;
+  if (access.canApply) {
+    try {
+      const res = await pullBank(ctx);
+      const st = res?.stats;
+      if (st && (st.added || st.updated || st.removed)) ctx.toast(`Bank sync: ${statsLine(st)}`);
+    } catch (e) {
+      await saveBankState({ error: e.message });
+    }
   }
   try { await listItems(); } catch { /* shown in Settings */ }
 }
@@ -311,6 +238,7 @@ export function pendingOAuth() {
 export function plainBankError(e) {
   const m = String(e?.message || e || "");
   if (e?.status === 0) return m;
+  if (e?.data?.code === "SIGNED_OUT") return "Sign in with Google in Settings to use bank sync.";
   if (/Origin not allowed/.test(m)) return "The bank sync server doesn’t allow this app’s address yet.";
   return m || "Something went wrong";
 }

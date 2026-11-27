@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { freshBudgetShell, addAccount, addCreditCard, addCategory, addTransaction, reconcileAccount, normalizeBudget, setPayeeCategory } from "../js/mutate.js?v=139";
-import { accountBalances } from "../js/calc.js?v=139";
+import { freshBudgetShell, addAccount, addCreditCard, addCategory, addTransaction, reconcileAccount, normalizeBudget, setPayeeCategory } from "../js/mutate.js?v=140";
+import { accountBalances } from "../js/calc.js?v=140";
 import {
   applyBankBatch, setBankLink, bankSettings, bankTxId, findBankTx, payeeFromPlaid, BANK_CUTOVER_DEFAULT, setBankSettings, rememberBankAccounts, statsLine, sumStats,
-} from "../js/bankmap.js?v=139";
+} from "../js/bankmap.js?v=140";
 
 function fixture() {
   let b = normalizeBudget(freshBudgetShell("Test", "u1"));

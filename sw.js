@@ -1,9 +1,10 @@
-const CACHE = "tooz-shell-v12";
+const CACHE = "tooz-shell-v13";
 const SHELL = [
   "./",
   "./index.html",
   "./css/styles.css",
   "./manifest.webmanifest",
+  "./js/account.js",
   "./js/app.js",
   "./js/bankmap.js",
   "./js/banksync.js",
@@ -15,6 +16,8 @@ const SHELL = [
   "./js/push.js",
   "./js/pwa.js",
   "./js/store.js",
+  "./js/sync.js",
+  "./js/syncmerge.js",
   "./js/ui.js",
   "./js/util.js",
   "./js/theme.js",
@@ -23,6 +26,7 @@ const SHELL = [
   "./js/views/bank.js",
   "./js/views/budget.js",
   "./js/views/gate.js",
+  "./js/views/household.js",
   "./js/views/payees.js",
   "./js/views/settings.js",
   "./js/views/transactions.js",

@@ -1,7 +1,7 @@
 /** What's new: toast on a real version change, then a carousel of short animated recreations. */
-import { h, openSheet, btn, icon, toast } from "./ui.js?v=139";
-import { APP_VERSION } from "./util.js?v=139";
-import { deviceGet, deviceSet } from "./store.js?v=139";
+import { h, openSheet, btn, icon, toast } from "./ui.js?v=140";
+import { APP_VERSION } from "./util.js?v=140";
+import { deviceGet, deviceSet } from "./store.js?v=140";
 
 const RELEASES = [
   {
@@ -116,6 +116,21 @@ const RELEASES = [
         demo: "plan",
         title: "A short goal stays on the row.",
         body: "Underfunded goals are marked on the plan. They no longer raise a notice. The header no longer zooms or selects text.",
+      },
+    ],
+  },
+  {
+    version: "1.5.0",
+    slides: [
+      {
+        demo: "lists",
+        title: "One budget for the household.",
+        body: "Sign in with Google in Settings. Everyone you invite sees the same budget on every phone and computer, and changes show up for each other within a minute.",
+      },
+      {
+        demo: "inbox",
+        title: "Banks for everyone.",
+        body: "Bank transactions come in once for the whole household. Owners connect banks and invite people. View-only people can look but not change anything.",
       },
     ],
   },

@@ -1,35 +1,56 @@
-import { APP_VERSION, monthKey, prevMonth, nextMonth, deepClone } from "./util.js?v=139";
-import { loadState, saveState, subscribe, exportData, importData, deviceGet, deviceSet } from "./store.js?v=139";
-import { h, clear, icon, toast, closeAllModals, btn } from "./ui.js?v=139";
-import { renderIdentity, renderWizard } from "./views/gate.js?v=139";
-import { renderBudget, openInbox } from "./views/budget.js?v=139";
-import { renderTransactions, openTx } from "./views/transactions.js?v=139";
-import { renderAccounts } from "./views/accounts.js?v=139";
-import { renderPayees } from "./views/payees.js?v=139";
-import { renderSettings } from "./views/settings.js?v=139";
-import { registerSW, activateWaiting } from "./pwa.js?v=139";
-import { scheduleLocal, collectReminders } from "./notify.js?v=139";
-import { pushOnOpen } from "./push.js?v=139";
-import { bankOnOpen } from "./banksync.js?v=139";
-import { normalizeBudget } from "./mutate.js?v=139";
-import { announceIfUpdated } from "./whatsnew.js?v=139";
-import { paintTheme, resolveTheme } from "./theme.js?v=139";
-import { monthAccessible } from "./calc.js?v=139";
+import { APP_VERSION, monthKey, prevMonth, nextMonth, deepClone } from "./util.js?v=140";
+import { loadState, saveState, subscribe, exportData, importData, deviceGet, deviceSet } from "./store.js?v=140";
+import { h, clear, icon, toast, closeAllModals, btn } from "./ui.js?v=140";
+import { renderIdentity, renderWizard, renderLoading } from "./views/gate.js?v=140";
+import { renderBudget, openInbox } from "./views/budget.js?v=140";
+import { renderTransactions, openTx } from "./views/transactions.js?v=140";
+import { renderAccounts } from "./views/accounts.js?v=140";
+import { renderPayees } from "./views/payees.js?v=140";
+import { renderSettings } from "./views/settings.js?v=140";
+import { registerSW, activateWaiting } from "./pwa.js?v=140";
+import { scheduleLocal, collectReminders } from "./notify.js?v=140";
+import { pushOnOpen } from "./push.js?v=140";
+import { bankOnOpen } from "./banksync.js?v=140";
+import { normalizeBudget } from "./mutate.js?v=140";
+import { announceIfUpdated } from "./whatsnew.js?v=140";
+import { paintTheme, resolveTheme } from "./theme.js?v=140";
+import { monthAccessible } from "./calc.js?v=140";
+import { account, redeemSignInCode, onAccountChange, signOut } from "./account.js?v=140";
+import { startAutoSync, syncSoon, syncNow, syncStatus, onSyncChange } from "./sync.js?v=140";
 
 const root = document.getElementById("app");
 const undoStack = [];
 const redoStack = [];
 
+/** A local profile for the signed-in Google account, so the rest of the app knows who's here. */
+function accountUser(acct) {
+  const u = acct?.me?.user;
+  if (!u) return null;
+  return {
+    userId: "acct:" + u.id, displayName: u.displayName || u.name || u.email, email: u.email || "", picture: u.picture || null,
+    isGuest: false, account: true, role: acct.me.role, passwordHash: "", createdAt: new Date().toISOString(),
+  };
+}
+
+let pendingRemote = false;
+
 const ctx = {
   state: null,
+  account: null,
   month: monthKey(),
   nav: "budget",
   ui: { collapsed: {}, showArchived: false, txFilter: {}, txQuery: "", selected: new Set(), payeeQuery: "", avg: null },
   budget() {
     return ctx.state?.budgets?.find((b) => b.id === ctx.state.activeBudgetId) || ctx.state?.budgets?.[0] || null;
   },
+  readOnly() { return !!ctx.account?.token && ctx.account?.me?.role === "viewer"; },
   async commit(next, { undo = true } = {}) {
     if (!next) return;
+    if (ctx.readOnly() && next.budgets !== ctx.state?.budgets) {
+      toast("You have view-only access. Ask a household owner if you need to make changes.");
+      ctx.render();
+      return;
+    }
     if (undo && ctx.state?.setupComplete) {
       undoStack.push(deepClone(ctx.state));
       if (undoStack.length > 30) undoStack.shift();
@@ -39,6 +60,34 @@ const ctx = {
     await saveState(ctx.state);
     ctx.render();
     scheduleLocal(ctx.budget(), ctx.month);
+    syncSoon(ctx);
+  },
+  /** Changes from the household arrived. Undo history is cleared so Undo can't roll back someone else's edit. */
+  applyRemoteState(state) {
+    const next = { ...state };
+    if (!next.activeUserId && ctx.state?.activeUserId) next.activeUserId = ctx.state.activeUserId;
+    if (next.budgets.length && (!next.setupComplete || !next.budgets.some((b) => b.id === next.activeBudgetId))) {
+      next.setupComplete = true;
+      next.activeBudgetId = next.budgets.find((b) => !b.archived)?.id || next.budgets[0].id;
+      ctx.state = next;
+      saveState(next);
+    } else ctx.state = next;
+    undoStack.length = 0;
+    redoStack.length = 0;
+    renderWhenFree();
+  },
+  async accountSignedIn(acct) {
+    ctx.account = acct;
+    const user = accountUser(acct);
+    if (!user) return;
+    const users = [...(ctx.state.users || []).filter((u) => u.userId !== user.userId), user];
+    await ctx.commit({ ...ctx.state, users, activeUserId: user.userId }, { undo: false });
+    toast(`Signed in as ${user.displayName}`);
+    startAutoSync(ctx);
+  },
+  accountSignedOut() {
+    ctx.account = null;
+    ctx.commit({ ...ctx.state, activeUserId: null }, { undo: false });
   },
   updateBudget(fn) {
     const b = ctx.budget();
@@ -73,22 +122,25 @@ const ctx = {
     if (!next.users?.length) next.users = ctx.state.users;
     ctx.commit(next, { undo: false });
   },
-  reset() {
-    ctx.commit({ sv: 1, setupComplete: false, activeBudgetId: null, activeUserId: ctx.state.activeUserId, users: ctx.state.users, budgets: [] }, { undo: false });
+  async reset() {
+    // Signed in: sign out first, so erasing this device never erases the household's budget.
+    const wasAccount = !!ctx.account?.token;
+    if (wasAccount) { await signOut(); ctx.account = null; }
+    ctx.commit({ sv: 1, setupComplete: false, activeBudgetId: null, activeUserId: wasAccount ? null : ctx.state.activeUserId, users: ctx.state.users, budgets: [] }, { undo: false });
   },
   undo() {
-    if (!undoStack.length) return;
+    if (!undoStack.length || ctx.readOnly()) return;
     redoStack.push(deepClone(ctx.state));
     const prev = undoStack.pop();
     ctx.state = prev;
-    saveState(ctx.state).then(() => ctx.render());
+    saveState(ctx.state).then(() => { ctx.render(); syncSoon(ctx); });
   },
   redo() {
-    if (!redoStack.length) return;
+    if (!redoStack.length || ctx.readOnly()) return;
     undoStack.push(deepClone(ctx.state));
     const next = redoStack.pop();
     ctx.state = next;
-    saveState(ctx.state).then(() => ctx.render());
+    saveState(ctx.state).then(() => { ctx.render(); syncSoon(ctx); });
   },
   setMonth(m) { ctx.month = m; closeAllModals(); if (location.hash.startsWith("#budget")) history.replaceState(null, "", `#budget/${m}`); ctx.render(); },
   go(nav, filter) {
@@ -118,6 +170,20 @@ function applyHash() {
   }
 }
 
+/** Don't repaint under an open sheet or while typing; catch up as soon as it closes. */
+function renderWhenFree() {
+  const busy = document.querySelector(".scrim") || ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName);
+  if (!busy) { pendingRemote = false; ctx.render(); return; }
+  if (pendingRemote) return;
+  pendingRemote = true;
+  const wait = setInterval(() => {
+    if (document.querySelector(".scrim") || ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) return;
+    clearInterval(wait);
+    pendingRemote = false;
+    ctx.render();
+  }, 1000);
+}
+
 async function paint() {
   try {
     await paintInner();
@@ -140,8 +206,16 @@ function showRescue(err) {
 async function paintInner() {
   clear(root);
   const user = (ctx.state.users || []).find((u) => u.userId === ctx.state.activeUserId);
-  if (!user) { renderIdentity(root, ctx); return; }
-  if (!ctx.state.setupComplete || !ctx.budget()) { renderWizard(root, ctx); return; }
+  if (!user) { ctx.signedOutReason = ctx.account?.signedOutReason || ""; renderIdentity(root, ctx); return; }
+  if (!ctx.state.setupComplete || !ctx.budget()) {
+    const st = syncStatus();
+    if (ctx.account?.token && (!ctx.account.linked || st.busy) && !st.error) {
+      renderLoading(root, st.total && st.uploaded < st.total ? `Uploading your budget… ${st.uploaded} of ${st.total}` : null);
+      return;
+    }
+    renderWizard(root, ctx);
+    return;
+  }
 
   const shell = h("div", { class: "shell" });
   const side = h("nav", { class: "side", "aria-label": "Primary" });
@@ -221,8 +295,27 @@ window.addEventListener("gestureend", (e) => e.preventDefault(), { passive: fals
 
 window.addEventListener("hashchange", () => { closeAllModals(); applyHash(); ctx.render(); });
 
+/** Back from Google on the installed iPhone app: #signin=<one-time code> or #signin-error=<message>. */
+async function finishRedirectSignIn() {
+  const m = /^#signin=([\w-]+)/.exec(location.hash);
+  const e = /^#signin-error=(.*)$/.exec(location.hash);
+  if (!m && !e) return null;
+  history.replaceState(null, "", location.pathname + location.search);
+  if (e) { setTimeout(() => toast(decodeURIComponent(e[1]) || "Sign-in failed", { ms: 7000 }), 300); return null; }
+  try { return await redeemSignInCode(m[1]); }
+  catch (x) { setTimeout(() => toast(x.message, { ms: 7000 }), 300); return null; }
+}
+
 async function boot() {
   ctx.state = await loadState();
+  const redirected = await finishRedirectSignIn();
+  ctx.account = await account();
+  onAccountChange(async () => {
+    const before = ctx.account?.token;
+    ctx.account = await account();
+    if (before && !ctx.account?.token) ctx.render();
+  });
+  onSyncChange((st) => { if (!ctx.budget() && ctx.account?.token) renderWhenFree(); void st; });
   const theme = await deviceGet("theme");
   const custom = await deviceGet("customTheme");
   ctx.applyTheme(theme || "system", custom);
@@ -232,6 +325,18 @@ async function boot() {
   });
   applyHash();
   subscribe(() => {});
+  if (redirected) await ctx.accountSignedIn(redirected);
+  else if (ctx.account?.token) {
+    // Signed in on this device: open straight into the household, like any other app.
+    const user = accountUser(ctx.account);
+    const known = (ctx.state.users || []).find((u) => u.userId === user.userId);
+    if (!known || ctx.state.activeUserId !== user.userId || known.displayName !== user.displayName || known.picture !== user.picture) {
+      const users = [...(ctx.state.users || []).filter((u) => u.userId !== user.userId), { ...known, ...user }];
+      ctx.state = { ...ctx.state, users, activeUserId: user.userId };
+      await saveState(ctx.state);
+    }
+    startAutoSync(ctx);
+  }
   registerSW((reg) => {
     const existing = document.getElementById("toasts")?.textContent || "";
     if (existing.includes("App updated to version")) return;
@@ -246,6 +351,7 @@ async function boot() {
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible" && ctx.budget() && ctx.state?.activeUserId) bankOnOpen(ctx);
   });
+  void syncNow;
   document.title = `ToozBudgeting ${APP_VERSION}`;
   if (ctx.state?.setupComplete) setTimeout(() => announceIfUpdated(ctx), 700);
 }

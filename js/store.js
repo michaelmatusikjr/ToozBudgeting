@@ -5,8 +5,9 @@
  * Device-only settings (theme, push credentials, fired reminders, session chrome)
  * live in a separate store and are never part of the budget export.
  */
-import { SCHEMA_VERSION, deepClone, randomDeviceId, b64url } from "./util.js?v=139";
-import { emptyApp, normalizeBudget } from "./mutate.js?v=139";
+import { SCHEMA_VERSION, deepClone, randomDeviceId, b64url } from "./util.js?v=140";
+import { emptyApp, normalizeBudget } from "./mutate.js?v=140";
+import { SYNC_KINDS, remoteWins, cellId } from "./syncmerge.js?v=140";
 
 const DB_NAME = "toozbudgeting";
 const DB_VER = 1;
@@ -16,6 +17,7 @@ const DEV_KEY = "toozbudgeting:device";
 let dbp = null;
 let deviceId = null;
 let memoryRecords = new Map();
+let storeGen = 0;
 const listeners = new Set();
 
 function openDb() {
@@ -128,8 +130,14 @@ function explode(state) {
     for (const tx of b.transactions || []) put(rec("transaction", "tx:" + tx.id, b.id, tx, memoryRecords.get("tx:" + tx.id)));
     for (const p of b.payees || []) put(rec("payee", "payee:" + p.id, b.id, p, memoryRecords.get("payee:" + p.id)));
     for (const [mk, amounts] of Object.entries(b.monthlyBudgets || {})) {
+      // One marker per month (so empty months still exist) plus one record per category, so two people
+      // assigning different categories in the same month never overwrite each other.
       const id = `mb:${b.id}:${mk}`;
-      put(rec("assignment", id, b.id, { month: mk, amounts }, memoryRecords.get(id)));
+      put(rec("assignment", id, b.id, { month: mk, amounts: {} }, memoryRecords.get(id)));
+      for (const [catId, amount] of Object.entries(amounts || {})) {
+        const cid = cellId(b.id, mk, catId);
+        put(rec("assignmentCell", cid, b.id, { month: mk, categoryId: catId, amount }, memoryRecords.get(cid)));
+      }
     }
     for (const [mk, amount] of Object.entries(b.inflows || {})) {
       const id = `in:${b.id}:${mk}`;
@@ -162,7 +170,11 @@ function assemble(records) {
       reminders: kids.filter((x) => x.kind === "reminder").map((x) => x.body),
       monthlyBudgets: {}, inflows: {}, categoryNotes: {},
     };
-    for (const x of kids.filter((k) => k.kind === "assignment")) b.monthlyBudgets[x.body.month] = x.body.amounts || {};
+    for (const x of kids.filter((k) => k.kind === "assignment")) b.monthlyBudgets[x.body.month] = { ...(x.body.amounts || {}) };
+    for (const x of kids.filter((k) => k.kind === "assignmentCell")) {
+      const m = (b.monthlyBudgets[x.body.month] ||= {});
+      m[x.body.categoryId] = x.body.amount;
+    }
     for (const x of kids.filter((k) => k.kind === "inflow")) b.inflows[x.body.month] = x.body.amount || 0;
     for (const x of kids.filter((k) => k.kind === "note")) b.categoryNotes[x.body.month] = x.body.notes || {};
     return normalizeBudget(b);
@@ -228,6 +240,7 @@ async function writeChanges(changed) {
       const ch = tx.objectStore("changes");
       for (const r of changed) {
         const { _json, ...stored } = r;
+        if (SYNC_KINDS.has(r.kind)) stored.dirty = 1;
         recs.put(stored);
         ch.add({ id: uidChange(), recordId: r.id, kind: r.kind, op: r.deleted ? "delete" : "upsert", t: r.t, dev: r.dev, sv: r.sv });
       }
@@ -257,6 +270,7 @@ export async function saveState(state) {
     }
   }
   memoryRecords = next;
+  if (changed.length) storeGen++;
   await writeChanges(changed);
   try { localStorage.setItem(SNAP_KEY, JSON.stringify(state)); } catch { /* quota */ }
   return changed.length;
@@ -307,3 +321,113 @@ export async function readChanges(sinceSeq = 0, limit = 500) {
 
 export function subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); }
 export const emit = () => listeners.forEach((fn) => { try { fn(); } catch { /* ignore */ } });
+
+/* ---------- shared household sync ---------- */
+
+/** Records changed on this device that the server hasn't confirmed yet (tombstones included). */
+export async function pendingRecords() {
+  try {
+    const db = await openDb();
+    return await new Promise((resolve, reject) => {
+      const req = db.transaction("records", "readonly").objectStore("records").getAll();
+      req.onsuccess = () => resolve((req.result || []).filter((r) => r.dirty && SYNC_KINDS.has(r.kind)).map((r) => ({
+        id: r.id, kind: r.kind, budgetId: r.budgetId ?? null, body: r.deleted ? null : r.body, deleted: !!r.deleted, t: r.t, dev: r.dev,
+      })));
+      req.onerror = () => reject(req.error);
+    });
+  } catch { return []; }
+}
+
+/** The server has these. Clear the flag unless the record changed again while the push was in flight. */
+export async function markPushed(sent) {
+  if (!sent.length) return;
+  const db = await openDb();
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction("records", "readwrite");
+    const s = tx.objectStore("records");
+    for (const r of sent) {
+      const g = s.get(r.id);
+      g.onsuccess = () => {
+        const cur = g.result;
+        if (cur && cur.dirty && cur.t === r.t && cur.dev === r.dev) { cur.dirty = 0; s.put(cur); }
+      };
+    }
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+/** Flag every shared record for upload (first sign-in into an empty household). */
+export async function markAllDirty() {
+  const db = await openDb();
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction("records", "readwrite");
+    const s = tx.objectStore("records");
+    const req = s.getAll();
+    req.onsuccess = () => { for (const r of req.result || []) if (SYNC_KINDS.has(r.kind) && !r.deleted) { r.dirty = 1; s.put(r); } };
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+/** Drop this device's shared records so the household's copy replaces them (device-only settings stay). */
+export async function clearSharedRecords() {
+  const db = await openDb();
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction("records", "readwrite");
+    const s = tx.objectStore("records");
+    const req = s.getAll();
+    req.onsuccess = () => { for (const r of req.result || []) if (SYNC_KINDS.has(r.kind)) s.delete(r.id); };
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+/**
+ * Apply records from the server. Last write wins per record by (t, dev): a local edit that is newer and
+ * not yet pushed is kept (it goes up next push); otherwise the server copy replaces it.
+ * Returns how many records changed.
+ */
+export async function applyRemote(remote) {
+  if (!remote.length) return 0;
+  const db = await openDb();
+  let changed = 0;
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction("records", "readwrite");
+    const s = tx.objectStore("records");
+    for (const r of remote) {
+      if (!SYNC_KINDS.has(r.kind)) continue;
+      const g = s.get(r.id);
+      g.onsuccess = () => {
+        const local = g.result;
+        if (!remoteWins(local, r)) return;
+        let body = r.body;
+        if (typeof body === "string") { try { body = JSON.parse(body); } catch { body = null; } }
+        const next = { id: r.id, kind: r.kind, budgetId: r.budgetId ?? null, t: r.t, dev: r.dev, sv: SCHEMA_VERSION, deleted: !!r.deleted, body: r.deleted ? (local?.body ?? null) : body, dirty: 0 };
+        if (local && !local.dirty && local.t === next.t && local.dev === next.dev && !!local.deleted === next.deleted) return;
+        s.put(next);
+        changed++;
+      };
+    }
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+  return changed;
+}
+
+/** Rebuild the app state from what's stored, after applyRemote. Keeps this device's own choices. */
+export async function reloadState() {
+  // If a local save lands while we read, read again so memory and state include it.
+  let records; let gen;
+  for (let i = 0; i < 5; i++) {
+    gen = storeGen;
+    records = await readAllRecords();
+    if (gen === storeGen) break;
+  }
+  for (const [id, r] of records) if (r.deleted) records.delete(id);
+  memoryRecords = records;
+  const state = assemble(memoryRecords);
+  try { localStorage.setItem(SNAP_KEY, JSON.stringify(state)); } catch { /* quota */ }
+  return state;
+}
+

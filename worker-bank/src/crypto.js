@@ -116,3 +116,16 @@ export function jwtHeader(jwt) {
   const first = String(jwt || "").split(".")[0];
   return JSON.parse(td.decode(b64urlToBytes(first)));
 }
+
+/** Verify a compact RS256 JWT with an RSA public JWK (Google's ID tokens). Returns the payload or throws. */
+export async function verifyRs256(jwt, jwk) {
+  const parts = String(jwt || "").split(".");
+  if (parts.length !== 3) throw new Error("malformed JWT");
+  const header = JSON.parse(td.decode(b64urlToBytes(parts[0])));
+  if (header.alg !== "RS256") throw new Error("unexpected JWT alg");
+  if (!jwk || jwk.kty !== "RSA" || !jwk.n || !jwk.e) throw new Error("bad RSA key");
+  const key = await crypto.subtle.importKey("jwk", { kty: "RSA", n: jwk.n, e: jwk.e, alg: "RS256", ext: true }, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"]);
+  const ok = await crypto.subtle.verify("RSASSA-PKCS1-v1_5", key, b64urlToBytes(parts[2]), te.encode(parts[0] + "." + parts[1]));
+  if (!ok) throw new Error("bad JWT signature");
+  return JSON.parse(td.decode(b64urlToBytes(parts[1])));
+}

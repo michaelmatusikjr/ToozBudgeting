@@ -1,69 +1,38 @@
 /**
- * toozbudgeting-bank: Plaid bank sync for ToozBudgeting.
+ * toozbudgeting-bank: household accounts, shared budget sync, and Plaid bank sync for ToozBudgeting.
  *
- * The app stays local-first. This Worker holds the Plaid access tokens (encrypted with TOKEN_ENC_KEY),
- * follows Plaid's /transactions/sync cursor for each bank login, and drops new transactions into a
- * per-device inbox encrypted to that device's public key. The device pulls, applies, and acks.
+ * People sign in with Google (see auth.js). Each person is a member of one household with a role
+ * (owner, member, viewer; see roles.js). The household's budget is stored as records and synced with
+ * last-write-wins per record (see sync.js).
+ *
+ * Bank sync: this Worker holds the Plaid access tokens (encrypted with TOKEN_ENC_KEY), follows Plaid's
+ * /transactions/sync cursor for each bank login, and drops new transactions into the household's bank inbox
+ * (encrypted at rest with TOKEN_ENC_KEY). One signed-in device claims a batch, applies it to the shared
+ * budget, pushes the result, and acks. Only owners can connect, reconnect, or remove banks.
  */
-import {
-  randomToken, sha256Hex, safeEqual, sealToken, openToken, checkDeviceKey, sealForDevice,
-  verifyEs256, jwtHeader,
-} from "./crypto.js";
+import { sealToken, openToken, verifyEs256, jwtHeader, sha256Hex, safeEqual } from "./crypto.js";
 import { plaidClient, PlaidError, LOGIN_CODES, slimTx, slimAccount } from "./plaid.js";
+import { HttpError, now, corsHeaders, json, readJson, meta, setMeta } from "./http.js";
+import {
+  authSession, requireAction, signInGoogle, signInRedirect, redeemCode, signOut, meView, updateMe,
+  listMembers, createInvite, revokeInvite, updateMember, removeMember, renameHousehold, signInReady, ownerEmailCount,
+} from "./auth.js";
+import { push, pull } from "./sync.js";
 
-const VERSION = "1.0.0";
+const VERSION = "2.0.0";
 const DEFAULT_CAP = 10;
-const MAX_DEVICES = 10;
 const CHUNK = 400;
-const PAIR_FAILS_PER_HOUR = 10;
 const SYNC_LOCK_MS = 5 * 60000;
 const SYNC_NOW_GAP_MS = 30000;
 const INBOX_KEEP_DAYS = 45;
-
-class HttpError extends Error { constructor(status, message, extra) { super(message); this.status = status; this.extra = extra; } }
-
-const now = () => Date.now();
-
-function allowedOrigins(env) {
-  return String(env.ALLOWED_ORIGINS || "").split(",").map((s) => s.trim().replace(/\/+$/, "")).filter(Boolean);
-}
-
-function corsHeaders(env, req) {
-  const origin = req.headers.get("Origin");
-  if (!origin || !allowedOrigins(env).includes(origin)) return {};
-  return {
-    "Access-Control-Allow-Origin": origin,
-    "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Authorization, Content-Type",
-    "Access-Control-Max-Age": "600",
-    Vary: "Origin",
-  };
-}
-
-function json(data, status = 200, headers = {}) {
-  return new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers } });
-}
-
-async function readJson(req) {
-  const text = await req.text();
-  if (text.length > 64 * 1024) throw new HttpError(413, "Body too large");
-  if (!text) return {};
-  try { return JSON.parse(text); } catch { throw new HttpError(400, "Body must be JSON"); }
-}
+const CLAIM_MS = 2 * 60000;
+const MAX_ACK_BYTES = 1500 * 1024;
 
 function serverBase(env, req) {
   return String(env.PUBLIC_URL || new URL(req.url).origin).replace(/\/+$/, "");
 }
 
-/* ---------- D1 helpers ---------- */
-
-async function meta(env, k) {
-  const row = await env.DB.prepare("SELECT v FROM meta WHERE k = ?").bind(k).first();
-  return row ? row.v : null;
-}
-async function setMeta(env, k, v) {
-  await env.DB.prepare("INSERT INTO meta (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(k, v == null ? null : String(v)).run();
-}
+const inboxAad = (householdId) => "inbox:" + householdId;
 
 function itemView(row) {
   let accounts = [];
@@ -83,39 +52,28 @@ function itemView(row) {
   };
 }
 
-/* ---------- auth ---------- */
-
-async function authDevice(env, req) {
-  const m = /^Bearer\s+([\w-]+)\.([\w-]+)$/.exec(req.headers.get("Authorization") || "");
-  if (!m) throw new HttpError(401, "Pair this device first");
-  const row = await env.DB.prepare("SELECT * FROM devices WHERE id = ?").bind(m[1]).first();
-  if (!row || !(await safeEqual(row.token_hash, await sha256Hex(m[2])))) throw new HttpError(401, "This device isn’t paired");
-  if (!row.last_seen || now() - row.last_seen > 3600000) {
-    await env.DB.prepare("UPDATE devices SET last_seen = ? WHERE id = ?").bind(now(), row.id).run();
-  }
-  return row;
-}
-
 /* ---------- handlers ---------- */
 
 async function health(env) {
-  let db = false; let items = 0; let devices = 0;
+  let db = false; let items = 0; let households = 0; let users = 0;
   try {
     items = (await env.DB.prepare("SELECT COUNT(*) AS n FROM items WHERE status != 'removed'").first())?.n || 0;
-    devices = (await env.DB.prepare("SELECT COUNT(*) AS n FROM devices").first())?.n || 0;
+    households = (await env.DB.prepare("SELECT COUNT(*) AS n FROM households").first())?.n || 0;
+    users = (await env.DB.prepare("SELECT COUNT(*) AS n FROM users").first())?.n || 0;
     db = true;
   } catch { db = false; }
   return {
-    ok: db && !!env.PLAID_CLIENT_ID && !!env.PLAID_SECRET && !!env.TOKEN_ENC_KEY && !!env.PAIRING_SECRET,
+    ok: db && !!env.PLAID_CLIENT_ID && !!env.PLAID_SECRET && !!env.TOKEN_ENC_KEY && signInReady(env),
     version: VERSION,
     time: now(),
     db,
     plaidEnv: env.PLAID_ENV || "production",
     plaidKeys: !!env.PLAID_CLIENT_ID && !!env.PLAID_SECRET,
     tokenKey: !!env.TOKEN_ENC_KEY,
-    pairingSecret: !!env.PAIRING_SECRET,
+    googleSignIn: signInReady(env),
+    ownerEmails: ownerEmailCount(env) > 0,
     redirectUri: env.REDIRECT_URI || null,
-    items, devices,
+    items, households, users,
     itemsCreated: db ? Number(await meta(env, "items_created") || 0) : null,
     itemCap: Number(env.ITEM_CAP || DEFAULT_CAP),
     lastCronAt: db ? Number(await meta(env, "last_cron_at") || 0) || null : null,
@@ -123,43 +81,32 @@ async function health(env) {
   };
 }
 
-async function pair(env, req) {
-  if (!env.PAIRING_SECRET) throw new HttpError(503, "Pairing isn’t set up on the server");
-  const ip = req.headers.get("CF-Connecting-IP") || "unknown";
-  const hour = now() - 3600000;
-  const fails = (await env.DB.prepare("SELECT COUNT(*) AS n FROM attempts WHERE ip = ? AND at > ?").bind(ip, hour).first())?.n || 0;
-  if (fails >= PAIR_FAILS_PER_HOUR) throw new HttpError(429, "Too many tries. Wait an hour.");
-  const body = await readJson(req);
-  if (!(await safeEqual(String(body.secret || "").trim(), env.PAIRING_SECRET))) {
-    await env.DB.prepare("INSERT INTO attempts (ip, at) VALUES (?, ?)").bind(ip, now()).run();
-    throw new HttpError(403, "That pairing code isn’t right");
-  }
-  let pub;
-  try { pub = await checkDeviceKey(body.publicKey); } catch (e) { throw new HttpError(400, e.message); }
-  const count = (await env.DB.prepare("SELECT COUNT(*) AS n FROM devices").first())?.n || 0;
-  if (count >= MAX_DEVICES) throw new HttpError(409, "Too many paired devices. Unpair one first.");
-  const id = randomToken(12);
-  const token = randomToken(32);
-  const name = String(body.name || "Device").slice(0, 60);
-  await env.DB.prepare("INSERT INTO devices (id, token_hash, public_key, name, created_at, last_seen) VALUES (?, ?, ?, ?, ?, ?)")
-    .bind(id, await sha256Hex(token), JSON.stringify(pub), name, now(), now()).run();
-  return { deviceId: id, token: `${id}.${token}` };
+/** Public settings the app needs before sign-in. The Google client ID is not a secret. */
+function authConfig(env) {
+  const id = String(env.GOOGLE_CLIENT_ID || "").split(",").map((s) => s.trim()).filter(Boolean)[0] || null;
+  return { googleClientId: id, ready: !!id };
 }
 
-async function linkToken(env, req, plaid) {
+async function householdItem(env, session, itemId) {
+  const row = await env.DB.prepare("SELECT * FROM items WHERE item_id = ? AND household_id = ? AND status != 'removed'").bind(String(itemId), session.householdId).first();
+  if (!row) throw new HttpError(404, "That bank isn’t connected");
+  return row;
+}
+
+async function linkToken(env, req, plaid, session) {
+  requireAction(session, "bank.manage", "Only a household owner can connect banks");
   const body = await readJson(req);
   const cap = Number(env.ITEM_CAP || DEFAULT_CAP);
   const request = {
     client_name: "ToozBudgeting",
     language: "en",
     country_codes: ["US"],
-    user: { client_user_id: "toozbudgeting-owner" },
+    user: { client_user_id: session.householdId },
     webhook: serverBase(env, req) + "/bank/webhook",
   };
   let mode = "create";
   if (body.itemId) {
-    const row = await env.DB.prepare("SELECT * FROM items WHERE item_id = ? AND status != 'removed'").bind(String(body.itemId)).first();
-    if (!row) throw new HttpError(404, "That bank isn’t connected");
+    const row = await householdItem(env, session, body.itemId);
     request.access_token = await openToken(env.TOKEN_ENC_KEY, row.item_id, row.access_enc);
     if (row.new_accounts || body.accountSelection) request.update = { account_selection_enabled: true };
     mode = "update";
@@ -184,7 +131,8 @@ async function linkToken(env, req, plaid) {
   return { linkToken: res.link_token, expiration: res.expiration, mode, oauthRedirect, warning };
 }
 
-async function exchange(env, req, plaid, ctx) {
+async function exchange(env, req, plaid, ctx, session) {
+  requireAction(session, "bank.manage", "Only a household owner can connect banks");
   const body = await readJson(req);
   const publicToken = String(body.publicToken || "");
   if (!publicToken) throw new HttpError(400, "publicToken is required");
@@ -192,10 +140,11 @@ async function exchange(env, req, plaid, ctx) {
   const ex = await plaid("/item/public_token/exchange", { public_token: publicToken });
   const itemId = ex.item_id;
   const accessToken = ex.access_token;
-  const prior = await env.DB.prepare("SELECT item_id FROM items WHERE item_id = ?").bind(itemId).first();
+  const prior = await env.DB.prepare("SELECT item_id, household_id FROM items WHERE item_id = ?").bind(itemId).first();
+  if (prior && prior.household_id && prior.household_id !== session.householdId) throw new HttpError(409, "That bank login belongs to another household");
   if (!prior) await setMeta(env, "items_created", Number(await meta(env, "items_created") || 0) + 1);
   const dupe = inst.institution_id
-    ? await env.DB.prepare("SELECT item_id, institution_name FROM items WHERE institution_id = ? AND status != 'removed' AND item_id != ?").bind(String(inst.institution_id), itemId).first()
+    ? await env.DB.prepare("SELECT item_id, institution_name FROM items WHERE institution_id = ? AND household_id = ? AND status != 'removed' AND item_id != ?").bind(String(inst.institution_id), session.householdId, itemId).first()
     : null;
   if (dupe) {
     try { await plaid("/item/remove", { access_token: accessToken }); } catch { /* best effort */ }
@@ -205,27 +154,29 @@ async function exchange(env, req, plaid, ctx) {
   try { accounts = (await plaid("/accounts/get", { access_token: accessToken })).accounts || []; }
   catch { accounts = Array.isArray(body.accounts) ? body.accounts.map((a) => ({ account_id: a.id, name: a.name, mask: a.mask, type: a.type, subtype: a.subtype })) : []; }
   const sealed = await sealToken(env.TOKEN_ENC_KEY, itemId, accessToken);
-  await env.DB.prepare(`INSERT INTO items (item_id, institution_id, institution_name, access_enc, cursor, status, accounts, created_at)
-    VALUES (?, ?, ?, ?, '', 'ok', ?, ?)
-    ON CONFLICT(item_id) DO UPDATE SET access_enc = excluded.access_enc, status = 'ok', error = NULL, accounts = excluded.accounts`)
-    .bind(itemId, inst.institution_id ? String(inst.institution_id) : null, String(inst.name || "Bank").slice(0, 80), sealed, JSON.stringify(accounts.map(slimAccount)), now()).run();
+  await env.DB.prepare(`INSERT INTO items (item_id, household_id, institution_id, institution_name, access_enc, cursor, status, accounts, created_at, added_by)
+    VALUES (?, ?, ?, ?, ?, '', 'ok', ?, ?, ?)
+    ON CONFLICT(item_id) DO UPDATE SET access_enc = excluded.access_enc, status = 'ok', error = NULL, accounts = excluded.accounts, household_id = excluded.household_id`)
+    .bind(itemId, session.householdId, inst.institution_id ? String(inst.institution_id) : null, String(inst.name || "Bank").slice(0, 80), sealed, JSON.stringify(accounts.map(slimAccount)), now(), session.user.id).run();
   const row = await env.DB.prepare("SELECT * FROM items WHERE item_id = ?").bind(itemId).first();
   ctx?.waitUntil?.(syncItem(env, plaid, itemId).catch(() => {}));
   return { item: itemView(row) };
 }
 
-async function listItems(env) {
-  const rows = (await env.DB.prepare("SELECT * FROM items WHERE status != 'removed' ORDER BY created_at").all()).results || [];
+async function listItems(env, session) {
+  requireAction(session, "bank.view");
+  const rows = (await env.DB.prepare("SELECT * FROM items WHERE household_id = ? AND status != 'removed' ORDER BY created_at").bind(session.householdId).all()).results || [];
   return {
     items: rows.map(itemView),
     used: Number(await meta(env, "items_created") || 0),
     cap: Number(env.ITEM_CAP || DEFAULT_CAP),
+    canManage: session.member.role === "owner",
   };
 }
 
-async function removeItem(env, plaid, itemId) {
-  const row = await env.DB.prepare("SELECT * FROM items WHERE item_id = ? AND status != 'removed'").bind(itemId).first();
-  if (!row) throw new HttpError(404, "That bank isn’t connected");
+async function removeItem(env, plaid, session, itemId) {
+  requireAction(session, "bank.manage", "Only a household owner can disconnect banks");
+  const row = await householdItem(env, session, itemId);
   try {
     await plaid("/item/remove", { access_token: await openToken(env.TOKEN_ENC_KEY, row.item_id, row.access_enc) });
   } catch (e) {
@@ -236,9 +187,9 @@ async function removeItem(env, plaid, itemId) {
 }
 
 /** After Reconnect (Link update mode) succeeds, clear the flags and pull anything that was waiting. */
-async function repaired(env, plaid, itemId, ctx) {
-  const row = await env.DB.prepare("SELECT * FROM items WHERE item_id = ? AND status != 'removed'").bind(itemId).first();
-  if (!row) throw new HttpError(404, "That bank isn’t connected");
+async function repaired(env, plaid, session, itemId, ctx) {
+  requireAction(session, "bank.manage", "Only a household owner can reconnect banks");
+  const row = await householdItem(env, session, itemId);
   let accounts = null;
   try {
     const res = await plaid("/accounts/get", { access_token: await openToken(env.TOKEN_ENC_KEY, row.item_id, row.access_enc) });
@@ -250,11 +201,12 @@ async function repaired(env, plaid, itemId, ctx) {
   return { item: itemView(next) };
 }
 
-async function syncNow(env, req, plaid) {
+async function syncNow(env, req, plaid, session) {
+  requireAction(session, "bank.apply", "You have view-only access");
   const body = await readJson(req);
   const rows = body.itemId
-    ? [await env.DB.prepare("SELECT * FROM items WHERE item_id = ? AND status != 'removed'").bind(String(body.itemId)).first()].filter(Boolean)
-    : ((await env.DB.prepare("SELECT * FROM items WHERE status != 'removed'").all()).results || []);
+    ? [await householdItem(env, session, body.itemId)]
+    : ((await env.DB.prepare("SELECT * FROM items WHERE household_id = ? AND status != 'removed'").bind(session.householdId).all()).results || []);
   const results = [];
   for (const row of rows) {
     if (row.last_sync_at && now() - row.last_sync_at < SYNC_NOW_GAP_MS) { results.push({ itemId: row.item_id, skipped: "recent" }); continue; }
@@ -263,40 +215,67 @@ async function syncNow(env, req, plaid) {
   return { results };
 }
 
-async function inbox(env, device, url) {
-  const after = Number(url.searchParams.get("after") || 0) || 0;
-  const rows = (await env.DB.prepare("SELECT id, item_id, created_at, enc FROM inbox WHERE device_id = ? AND id > ? ORDER BY id LIMIT 20").bind(device.id, after).all()).results || [];
-  const more = rows.length === 20;
-  return { batches: rows.map((r) => ({ id: r.id, itemId: r.item_id, createdAt: r.created_at, enc: r.enc })), more };
+/**
+ * GET /bank/inbox: claim up to 20 waiting batches for this session for 2 minutes, so two devices don't
+ * apply the same bank transactions at once. Batches come back decrypted, over TLS, to a signed-in member.
+ */
+async function inbox(env, session) {
+  requireAction(session, "bank.apply", "You have view-only access");
+  const hid = session.householdId;
+  const sid = session.sessionId;
+  await env.DB.prepare(`UPDATE bank_inbox SET claimed_by = ?, claim_until = ? WHERE id IN (
+      SELECT id FROM bank_inbox WHERE household_id = ? AND (claim_until IS NULL OR claim_until < ? OR claimed_by = ?) ORDER BY id LIMIT 20)`)
+    .bind(sid, now() + CLAIM_MS, hid, now(), sid).run();
+  const rows = (await env.DB.prepare("SELECT id, item_id, created_at, enc, held FROM bank_inbox WHERE household_id = ? AND claimed_by = ? AND claim_until > ? ORDER BY id")
+    .bind(hid, sid, now()).all()).results || [];
+  const waiting = (await env.DB.prepare("SELECT COUNT(*) AS n FROM bank_inbox WHERE household_id = ?").bind(hid).first())?.n || 0;
+  const batches = [];
+  for (const r of rows) {
+    try { batches.push({ id: r.id, itemId: r.item_id, createdAt: r.created_at, held: !!r.held, batch: JSON.parse(await openToken(env.TOKEN_ENC_KEY, inboxAad(hid), r.enc)) }); }
+    catch { await env.DB.prepare("DELETE FROM bank_inbox WHERE id = ?").bind(r.id).run(); }
+  }
+  return { batches, more: waiting > rows.length };
 }
 
-async function ack(env, device, req) {
-  const body = await readJson(req);
-  const ids = (Array.isArray(body.ids) ? body.ids : []).map(Number).filter((n) => Number.isInteger(n) && n > 0).slice(0, 200);
-  for (const id of ids) await env.DB.prepare("DELETE FROM inbox WHERE device_id = ? AND id = ?").bind(device.id, id).run();
-  return { ok: true, acked: ids.length };
-}
-
-async function unpair(env, device) {
-  await env.DB.prepare("DELETE FROM inbox WHERE device_id = ?").bind(device.id).run();
-  await env.DB.prepare("DELETE FROM devices WHERE id = ?").bind(device.id).run();
-  return { ok: true };
+/**
+ * POST /bank/ack { ids: [done], release: [still waiting, unchanged], held: [remainder batches to keep] }
+ * held batches are for bank accounts nobody has chosen a home for yet. They go back in the household inbox
+ * so whichever device maps the account first brings them in.
+ */
+async function ack(env, req, session) {
+  requireAction(session, "bank.apply", "You have view-only access");
+  const body = await readJson(req, MAX_ACK_BYTES);
+  const hid = session.householdId;
+  const nums = (a) => (Array.isArray(a) ? a : []).map(Number).filter((n) => Number.isInteger(n) && n > 0).slice(0, 200);
+  const ids = nums(body.ids);
+  const release = nums(body.release);
+  const held = (Array.isArray(body.held) ? body.held : []).slice(0, 50);
+  const stmts = [];
+  if (ids.length) stmts.push(env.DB.prepare("DELETE FROM bank_inbox WHERE household_id = ? AND id IN (SELECT value FROM json_each(?))").bind(hid, JSON.stringify(ids)));
+  if (release.length) stmts.push(env.DB.prepare("UPDATE bank_inbox SET claimed_by = NULL, claim_until = NULL WHERE household_id = ? AND id IN (SELECT value FROM json_each(?))").bind(hid, JSON.stringify(release)));
+  for (const b of held) {
+    if (!b || typeof b !== "object") continue;
+    stmts.push(env.DB.prepare("INSERT INTO bank_inbox (household_id, item_id, created_at, enc, held) VALUES (?, ?, ?, ?, 1)")
+      .bind(hid, b.itemId ? String(b.itemId) : null, now(), await sealToken(env.TOKEN_ENC_KEY, inboxAad(hid), JSON.stringify(b))));
+  }
+  if (stmts.length) await env.DB.batch(stmts);
+  return { ok: true, acked: ids.length, released: release.length, held: held.length };
 }
 
 /* ---------- sync ---------- */
 
 async function deliver(env, itemRow, payload) {
-  const devices = (await env.DB.prepare("SELECT id, public_key FROM devices").all()).results || [];
-  if (!devices.length) return 0;
-  const chunks = [];
+  const hid = itemRow.household_id;
+  if (!hid) return 0;
   const all = [
     ...payload.added.map((t) => ["added", t]),
     ...payload.modified.map((t) => ["modified", t]),
     ...payload.removed.map((t) => ["removed", t]),
   ];
+  const stmts = [];
   for (let i = 0; i < Math.max(1, all.length); i += CHUNK) {
     const part = all.slice(i, i + CHUNK);
-    chunks.push({
+    const chunk = {
       v: 1,
       itemId: itemRow.item_id,
       institution: itemRow.institution_name,
@@ -305,20 +284,16 @@ async function deliver(env, itemRow, payload) {
       modified: part.filter((x) => x[0] === "modified").map((x) => x[1]),
       removed: part.filter((x) => x[0] === "removed").map((x) => x[1]),
       at: now(),
-    });
+    };
+    stmts.push(env.DB.prepare("INSERT INTO bank_inbox (household_id, item_id, created_at, enc, held) VALUES (?, ?, ?, ?, 0)")
+      .bind(hid, itemRow.item_id, now(), await sealToken(env.TOKEN_ENC_KEY, inboxAad(hid), JSON.stringify(chunk))));
   }
-  for (const d of devices) {
-    const jwk = JSON.parse(d.public_key);
-    for (const c of chunks) {
-      await env.DB.prepare("INSERT INTO inbox (device_id, item_id, created_at, enc) VALUES (?, ?, ?, ?)")
-        .bind(d.id, itemRow.item_id, now(), await sealForDevice(jwk, c)).run();
-    }
-  }
-  return devices.length;
+  await env.DB.batch(stmts);
+  return 1;
 }
 
 /**
- * Follow /transactions/sync from the saved cursor and deliver every change to each paired device.
+ * Follow /transactions/sync from the saved cursor and deliver every change to the household's bank inbox.
  * The cursor only moves after the changes are in the inbox, so a failure re-sends instead of losing.
  */
 export async function syncItem(env, plaid, itemId) {
@@ -441,8 +416,10 @@ export async function runScheduled(env, plaid) {
   try {
     const rows = (await env.DB.prepare("SELECT item_id FROM items WHERE status IN ('ok', 'expiring', 'error')").all()).results || [];
     for (const r of rows) await syncItem(env, plaid, r.item_id);
-    await env.DB.prepare("DELETE FROM inbox WHERE created_at < ?").bind(now() - INBOX_KEEP_DAYS * 86400000).run();
+    await env.DB.prepare("DELETE FROM bank_inbox WHERE created_at < ? AND held = 0").bind(now() - INBOX_KEEP_DAYS * 86400000).run();
     await env.DB.prepare("DELETE FROM attempts WHERE at < ?").bind(now() - 86400000).run();
+    await env.DB.prepare("DELETE FROM sessions WHERE expires_at < ?").bind(now()).run();
+    await env.DB.prepare("DELETE FROM login_codes WHERE expires_at < ?").bind(now()).run();
     await setMeta(env, "last_cron_at", now());
     await setMeta(env, "last_cron_error", null);
   } catch (e) {
@@ -453,29 +430,45 @@ export async function runScheduled(env, plaid) {
 /* ---------- router ---------- */
 
 export function makeHandler({ fetchImpl } = {}) {
+  const doFetch = fetchImpl || ((...a) => fetch(...a));
   return async function handle(req, env, ctx) {
     const url = new URL(req.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
     const cors = corsHeaders(env, req);
     const origin = req.headers.get("Origin");
-    if (req.method === "OPTIONS") return new Response(null, { status: Object.keys(cors).length ? 204 : 403, headers: cors });
+    const m = req.method;
+    if (m === "OPTIONS") return new Response(null, { status: Object.keys(cors).length ? 204 : 403, headers: cors });
     try {
-      const plaid = plaidClient(env, fetchImpl || fetch);
-      if (path === "/bank/webhook" && req.method === "POST") return json(await webhook(env, req, plaid, ctx));
+      const plaid = plaidClient(env, doFetch);
+      if (path === "/bank/webhook" && m === "POST") return json(await webhook(env, req, plaid, ctx));
+      if (path === "/auth/google/redirect" && m === "POST") return await signInRedirect(env, req, doFetch);
       if (origin && !Object.keys(cors).length) throw new HttpError(403, "Origin not allowed");
-      if ((path === "/" || path === "/health" || path === "/bank/health") && req.method === "GET") return json(await health(env), 200, cors);
-      if (path === "/bank/pair" && req.method === "POST") return json(await pair(env, req), 200, cors);
-      const device = await authDevice(env, req);
+      if ((path === "/" || path === "/health" || path === "/bank/health") && m === "GET") return json(await health(env), 200, cors);
+      if (path === "/auth/config" && m === "GET") return json(authConfig(env), 200, cors);
+      if (path === "/auth/google" && m === "POST") return json(await signInGoogle(env, req, doFetch), 200, cors);
+      if (path === "/auth/redeem" && m === "POST") return json(await redeemCode(env, req), 200, cors);
+      if (path === "/bank/pair") throw new HttpError(410, "Pairing was replaced by Sign in with Google. Update the app.");
+      const s = await authSession(env, req);
       let out;
-      if (path === "/bank/link-token" && req.method === "POST") out = await linkToken(env, req, plaid);
-      else if (path === "/bank/exchange" && req.method === "POST") out = await exchange(env, req, plaid, ctx);
-      else if (path === "/bank/items" && req.method === "GET") out = await listItems(env);
-      else if (/^\/bank\/items\/[^/]+\/repaired$/.test(path) && req.method === "POST") out = await repaired(env, plaid, decodeURIComponent(path.split("/")[3]), ctx);
-      else if (path.startsWith("/bank/items/") && req.method === "DELETE") out = await removeItem(env, plaid, decodeURIComponent(path.slice(12)));
-      else if (path === "/bank/sync" && req.method === "POST") out = await syncNow(env, req, plaid);
-      else if (path === "/bank/inbox" && req.method === "GET") out = await inbox(env, device, url);
-      else if (path === "/bank/ack" && req.method === "POST") out = await ack(env, device, req);
-      else if (path === "/bank/device" && req.method === "DELETE") out = await unpair(env, device);
+      if (path === "/me" && m === "GET") out = await meView(env, s);
+      else if (path === "/me" && m === "PATCH") out = await updateMe(env, req, s);
+      else if (path === "/auth/logout" && m === "POST") out = await signOut(env, s, url.searchParams.get("all") === "1");
+      else if (path === "/household" && m === "PATCH") out = await renameHousehold(env, req, s);
+      else if (path === "/household/members" && m === "GET") out = await listMembers(env, s);
+      else if (/^\/household\/members\/[^/]+$/.test(path) && m === "PATCH") out = await updateMember(env, req, s, decodeURIComponent(path.split("/")[3]));
+      else if (/^\/household\/members\/[^/]+$/.test(path) && m === "DELETE") out = await removeMember(env, s, decodeURIComponent(path.split("/")[3]));
+      else if (path === "/household/invites" && m === "POST") out = await createInvite(env, req, s);
+      else if (/^\/household\/invites\/[^/]+$/.test(path) && m === "DELETE") out = await revokeInvite(env, s, decodeURIComponent(path.split("/")[3]));
+      else if (path === "/sync/pull" && m === "GET") out = await pull(env, url, s);
+      else if (path === "/sync/push" && m === "POST") out = await push(env, req, s);
+      else if (path === "/bank/link-token" && m === "POST") out = await linkToken(env, req, plaid, s);
+      else if (path === "/bank/exchange" && m === "POST") out = await exchange(env, req, plaid, ctx, s);
+      else if (path === "/bank/items" && m === "GET") out = await listItems(env, s);
+      else if (/^\/bank\/items\/[^/]+\/repaired$/.test(path) && m === "POST") out = await repaired(env, plaid, s, decodeURIComponent(path.split("/")[3]), ctx);
+      else if (path.startsWith("/bank/items/") && m === "DELETE") out = await removeItem(env, plaid, s, decodeURIComponent(path.slice(12)));
+      else if (path === "/bank/sync" && m === "POST") out = await syncNow(env, req, plaid, s);
+      else if (path === "/bank/inbox" && m === "GET") out = await inbox(env, s);
+      else if (path === "/bank/ack" && m === "POST") out = await ack(env, req, s);
       else throw new HttpError(404, "Not found");
       return json(out, 200, cors);
     } catch (e) {

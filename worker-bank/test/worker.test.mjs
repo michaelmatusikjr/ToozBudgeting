@@ -1,69 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { makeHandler, syncItem, runScheduled } from "../src/index.js";
+import { syncItem, runScheduled } from "../src/index.js";
 import { plaidClient } from "../src/plaid.js";
-import { b64url, openForDevice, sha256Hex, sealToken } from "../src/crypto.js";
-import { makeD1 } from "./d1-mock.mjs";
-
-const ORIGIN = "https://michaelmatusikjr.github.io";
-const BASE = "https://bank.test";
-
-function fakePlaid() {
-  const calls = [];
-  const state = { syncPages: [], linkFailRedirect: false, itemSeq: 0, accounts: [{ account_id: "acc-chk", name: "Checking", mask: "3769", type: "depository", subtype: "checking", balances: { current: 10 } }], whKey: null, syncError: null, mutateOnce: false };
-  const routes = {
-    "/link/token/create": (b) => {
-      if (state.linkFailRedirect && b.redirect_uri) return [400, { error_code: "INVALID_FIELD", error_message: "OAuth redirect URI must be configured in the developer dashboard" }];
-      return [200, { link_token: "link-production-abc", expiration: "2026-11-27T20:00:00Z" }];
-    },
-    "/item/public_token/exchange": () => { state.itemSeq++; return [200, { item_id: "item-" + state.itemSeq, access_token: "access-production-SECRET" + state.itemSeq }]; },
-    "/accounts/get": () => [200, { accounts: state.accounts }],
-    "/item/remove": () => [200, { removed: true }],
-    "/transactions/sync": (b) => {
-      if (state.syncError) return [400, { error_code: state.syncError, error_message: "the login details of this item have changed" }];
-      if (state.mutateOnce && b.cursor === "p1") { state.mutateOnce = false; return [400, { error_code: "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION", error_message: "mutation" }]; }
-      const page = state.syncPages.find((p) => (p.cursor || "") === (b.cursor || ""));
-      if (!page) return [200, { added: [], modified: [], removed: [], next_cursor: b.cursor || "", has_more: false, accounts: state.accounts }];
-      return [200, { ...page.res, accounts: state.accounts }];
-    },
-    "/webhook_verification_key/get": () => [200, { key: state.whKey }],
-  };
-  const fetchImpl = async (url, init) => {
-    const path = new URL(url).pathname;
-    const body = JSON.parse(init.body);
-    calls.push({ path, body });
-    const [status, data] = routes[path](body);
-    return new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
-  };
-  return { calls, state, fetchImpl };
-}
-
-function setup(over = {}) {
-  const DB = makeD1();
-  const env = {
-    DB, ALLOWED_ORIGINS: ORIGIN, PLAID_ENV: "production", PLAID_CLIENT_ID: "cid", PLAID_SECRET: "psecret",
-    TOKEN_ENC_KEY: b64url(crypto.getRandomValues(new Uint8Array(32))), PAIRING_SECRET: "pair-me-123",
-    REDIRECT_URI: "https://michaelmatusikjr.github.io/ToozBudgeting/oauth.html", ...over,
-  };
-  const plaid = fakePlaid();
-  const handle = makeHandler({ fetchImpl: plaid.fetchImpl });
-  const waits = [];
-  const ctx = { waitUntil: (p) => waits.push(p) };
-  const call = async (method, path, body, headers = {}) => {
-    const res = await handle(new Request(BASE + path, { method, headers: { Origin: ORIGIN, "Content-Type": "application/json", ...headers }, body: body === undefined ? undefined : (typeof body === "string" ? body : JSON.stringify(body)) }), env, ctx);
-    let data = null; try { data = await res.json(); } catch { /* empty */ }
-    return { status: res.status, data, headers: res.headers };
-  };
-  return { env, plaid, call, waits, ctx, DB };
-}
-
-async function paired(t) {
-  const keys = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
-  const pub = await crypto.subtle.exportKey("jwk", keys.publicKey);
-  const r = await t.call("POST", "/bank/pair", { secret: "pair-me-123", publicKey: pub, name: "Test phone" });
-  assert.equal(r.status, 200);
-  return { ...r.data, keys, auth: { Authorization: "Bearer " + r.data.token } };
-}
+import { b64url, sha256Hex, sealToken } from "../src/crypto.js";
+import { setup, BASE, ORIGIN, tx } from "./helpers.mjs";
 
 test("health reports config without leaking secrets", async () => {
   const t = setup();
@@ -73,7 +13,7 @@ test("health reports config without leaking secrets", async () => {
   assert.equal(r.data.plaidKeys, true);
   assert.equal(r.headers.get("Access-Control-Allow-Origin"), ORIGIN);
   const text = JSON.stringify(r.data);
-  for (const s of ["psecret", "pair-me-123", t.env.TOKEN_ENC_KEY]) assert.ok(!text.includes(s));
+  for (const s of ["psecret", t.env.TOKEN_ENC_KEY, t.env.GOOGLE_CLIENT_ID]) assert.ok(!text.includes(s));
 });
 
 test("CORS blocks other origins", async () => {
@@ -87,26 +27,7 @@ test("CORS blocks other origins", async () => {
   assert.equal(ok.status, 204);
 });
 
-test("pairing checks the secret, rate limits, and issues a token", async () => {
-  const t = setup();
-  const keys = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
-  const pub = await crypto.subtle.exportKey("jwk", keys.publicKey);
-  const bad = await t.call("POST", "/bank/pair", { secret: "nope", publicKey: pub });
-  assert.equal(bad.status, 403);
-  const priv = await crypto.subtle.exportKey("jwk", keys.privateKey);
-  const leaky = await t.call("POST", "/bank/pair", { secret: "pair-me-123", publicKey: priv });
-  assert.equal(leaky.status, 400, "refuses a JWK with a private part");
-  const good = await t.call("POST", "/bank/pair", { secret: "pair-me-123", publicKey: pub });
-  assert.equal(good.status, 200);
-  assert.match(good.data.token, /^[\w-]+\.[\w-]+$/);
-  const row = t.DB.raw.prepare("SELECT token_hash FROM devices").get();
-  assert.notEqual(row.token_hash, good.data.token.split(".")[1]);
-  for (let i = 0; i < 9; i++) await t.call("POST", "/bank/pair", { secret: "x" + i, publicKey: pub });
-  const locked = await t.call("POST", "/bank/pair", { secret: "pair-me-123", publicKey: pub });
-  assert.equal(locked.status, 429);
-});
-
-test("API needs a paired device", async () => {
+test("API needs a signed-in session", async () => {
   const t = setup();
   assert.equal((await t.call("GET", "/bank/items")).status, 401);
   assert.equal((await t.call("GET", "/bank/items", undefined, { Authorization: "Bearer abc.def" })).status, 401);
@@ -114,7 +35,7 @@ test("API needs a paired device", async () => {
 
 test("link token: webhook, redirect, transactions, and the redirect fallback", async () => {
   const t = setup();
-  const d = await paired(t);
+  const d = await t.signIn();
   const r = await t.call("POST", "/bank/link-token", {}, d.auth);
   assert.equal(r.status, 200);
   assert.equal(r.data.linkToken, "link-production-abc");
@@ -134,7 +55,7 @@ test("link token: webhook, redirect, transactions, and the redirect fallback", a
 
 test("link token refuses new logins at the cap but allows reconnect", async () => {
   const t = setup({ ITEM_CAP: "1" });
-  const d = await paired(t);
+  const d = await t.signIn();
   const ex = await t.call("POST", "/bank/exchange", { publicToken: "public-1", institution: { institution_id: "ins_usaa", name: "USAA" } }, d.auth);
   assert.equal(ex.status, 200);
   const r = await t.call("POST", "/bank/link-token", {}, d.auth);
@@ -150,7 +71,7 @@ test("link token refuses new logins at the cap but allows reconnect", async () =
 
 test("exchange encrypts the token at rest and refuses a second login at the same bank", async () => {
   const t = setup();
-  const d = await paired(t);
+  const d = await t.signIn();
   const ex = await t.call("POST", "/bank/exchange", { publicToken: "public-1", institution: { institution_id: "ins_usaa", name: "USAA" } }, d.auth);
   assert.equal(ex.status, 200);
   assert.equal(ex.data.item.institution, "USAA");
@@ -167,14 +88,12 @@ test("exchange encrypts the token at rest and refuses a second login at the same
   assert.equal(items.data.used, 2, "the refused login still counts against the cap");
 });
 
-const tx = (id, amount, extra = {}) => ({ transaction_id: id, account_id: "acc-chk", amount, date: "2026-11-28", name: "SHOP " + id, merchant_name: null, pending: false, personal_finance_category: { primary: "GENERAL_MERCHANDISE", detailed: "GENERAL_MERCHANDISE_OTHER" }, location: { address: "x" }, ...extra });
-
-test("sync pages through Plaid, encrypts per device, advances the cursor, and acks", async () => {
+test("sync pages through Plaid, encrypts the household inbox at rest, advances the cursor, and acks", async () => {
   const t = setup();
-  const d = await paired(t);
+  const d = await t.signIn();
   const ex = await t.call("POST", "/bank/exchange", { publicToken: "public-1", institution: { institution_id: "ins_usaa", name: "USAA" } }, d.auth);
   await Promise.all(t.waits.splice(0));
-  t.DB.raw.exec("UPDATE items SET cursor = '', last_sync_at = NULL; DELETE FROM inbox");
+  t.DB.raw.exec("UPDATE items SET cursor = '', last_sync_at = NULL; DELETE FROM bank_inbox");
   t.plaid.state.syncPages = [
     { cursor: "", res: { added: [tx("t1", 12.5), tx("t2", -100)], modified: [], removed: [], next_cursor: "p1", has_more: true } },
     { cursor: "p1", res: { added: [tx("t3", 4)], modified: [tx("t0", 9)], removed: [{ transaction_id: "tx-gone", account_id: "acc-chk" }], next_cursor: "p2", has_more: false } },
@@ -185,8 +104,9 @@ test("sync pages through Plaid, encrypts per device, advances the cursor, and ac
   assert.equal(t.DB.raw.prepare("SELECT cursor FROM items").get().cursor, "p2");
   const ib = await t.call("GET", "/bank/inbox", undefined, d.auth);
   assert.equal(ib.data.batches.length, 1);
-  assert.ok(!ib.data.batches[0].enc.includes("SHOP"), "inbox is ciphertext");
-  const batch = await openForDevice(d.keys.privateKey, ib.data.batches[0].enc);
+  const stored = t.DB.raw.prepare("SELECT enc FROM bank_inbox").get().enc;
+  assert.ok(stored.startsWith("v1.") && !stored.includes("SHOP"), "inbox is ciphertext at rest");
+  const batch = ib.data.batches[0].batch;
   assert.equal(batch.institution, "USAA");
   assert.deepEqual(batch.added.map((x) => x.transaction_id), ["t1", "t2", "t3"]);
   assert.equal(batch.added[0].pfc.primary, "GENERAL_MERCHANDISE");
@@ -199,10 +119,10 @@ test("sync pages through Plaid, encrypts per device, advances the cursor, and ac
 
 test("sync restarts on mutation during pagination", async () => {
   const t = setup();
-  const d = await paired(t);
+  const d = await t.signIn();
   const ex = await t.call("POST", "/bank/exchange", { publicToken: "public-1", institution: { institution_id: "ins_usaa", name: "USAA" } }, d.auth);
   await Promise.all(t.waits.splice(0));
-  t.DB.raw.exec("UPDATE items SET cursor = ''; DELETE FROM inbox");
+  t.DB.raw.exec("UPDATE items SET cursor = ''; DELETE FROM bank_inbox");
   t.plaid.state.mutateOnce = true;
   t.plaid.state.syncPages = [
     { cursor: "", res: { added: [tx("t1", 1)], modified: [], removed: [], next_cursor: "p1", has_more: true } },
@@ -212,12 +132,12 @@ test("sync restarts on mutation during pagination", async () => {
   assert.equal(res.added, 2, "no duplicates from the aborted pass");
 });
 
-test("sync with no paired devices keeps the cursor so nothing is lost", async () => {
+test("sync for a bank with no household keeps the cursor so nothing is lost", async () => {
   const t = setup();
-  const d = await paired(t);
+  const d = await t.signIn();
   const ex = await t.call("POST", "/bank/exchange", { publicToken: "public-1", institution: { institution_id: "ins_usaa", name: "USAA" } }, d.auth);
   await Promise.all(t.waits.splice(0));
-  t.DB.raw.exec("UPDATE items SET cursor = 'c0'; DELETE FROM devices");
+  t.DB.raw.exec("UPDATE items SET cursor = 'c0', household_id = NULL");
   t.plaid.state.syncPages = [{ cursor: "c0", res: { added: [tx("t1", 1)], modified: [], removed: [], next_cursor: "c1", has_more: false } }];
   await syncItem(t.env, plaidClient(t.env, t.plaid.fetchImpl), ex.data.item.itemId);
   assert.equal(t.DB.raw.prepare("SELECT cursor FROM items").get().cursor, "c0");
@@ -225,7 +145,7 @@ test("sync with no paired devices keeps the cursor so nothing is lost", async ()
 
 test("ITEM_LOGIN_REQUIRED during sync flags the item; Reconnect clears it", async () => {
   const t = setup();
-  const d = await paired(t);
+  const d = await t.signIn();
   const ex = await t.call("POST", "/bank/exchange", { publicToken: "public-1", institution: { institution_id: "ins_usaa", name: "USAA" } }, d.auth);
   await Promise.all(t.waits.splice(0));
   t.plaid.state.syncError = "ITEM_LOGIN_REQUIRED";
@@ -250,7 +170,7 @@ async function signWebhook(body, { iat = Math.floor(Date.now() / 1000), tamper =
 
 test("webhooks: verified SYNC_UPDATES_AVAILABLE syncs; forged, tampered, or stale ones are refused", async () => {
   const t = setup();
-  const d = await paired(t);
+  const d = await t.signIn();
   const ex = await t.call("POST", "/bank/exchange", { publicToken: "public-1", institution: { institution_id: "ins_usaa", name: "USAA" } }, d.auth);
   await Promise.all(t.waits.splice(0));
   const itemId = ex.data.item.itemId;
@@ -276,7 +196,7 @@ test("webhooks: verified SYNC_UPDATES_AVAILABLE syncs; forged, tampered, or stal
 
 test("webhooks flag ITEM_LOGIN_REQUIRED and PENDING_EXPIRATION", async () => {
   const t = setup();
-  const d = await paired(t);
+  const d = await t.signIn();
   const ex = await t.call("POST", "/bank/exchange", { publicToken: "public-1", institution: { institution_id: "ins_usaa", name: "USAA" } }, d.auth);
   await Promise.all(t.waits.splice(0));
   const itemId = ex.data.item.itemId;
@@ -300,7 +220,7 @@ test("webhooks flag ITEM_LOGIN_REQUIRED and PENDING_EXPIRATION", async () => {
 
 test("scheduled run syncs healthy items and records the time", async () => {
   const t = setup();
-  const d = await paired(t);
+  const d = await t.signIn();
   await t.call("POST", "/bank/exchange", { publicToken: "public-1", institution: { institution_id: "ins_usaa", name: "USAA" } }, d.auth);
   await Promise.all(t.waits.splice(0));
   const before = t.plaid.calls.filter((c) => c.path === "/transactions/sync").length;
@@ -311,15 +231,15 @@ test("scheduled run syncs healthy items and records the time", async () => {
   assert.equal(h.data.lastCronError, null);
 });
 
-test("remove and unpair", async () => {
+test("remove a bank and sign out", async () => {
   const t = setup();
-  const d = await paired(t);
+  const d = await t.signIn();
   const ex = await t.call("POST", "/bank/exchange", { publicToken: "public-1", institution: { institution_id: "ins_usaa", name: "USAA" } }, d.auth);
   await Promise.all(t.waits.splice(0));
   const rm = await t.call("DELETE", `/bank/items/${ex.data.item.itemId}`, undefined, d.auth);
   assert.equal(rm.status, 200);
   assert.equal(t.DB.raw.prepare("SELECT access_enc FROM items").get().access_enc, "");
-  assert.equal((await t.call("DELETE", "/bank/device", undefined, d.auth)).status, 200);
+  assert.equal((await t.call("POST", "/auth/logout", {}, d.auth)).status, 200);
   assert.equal((await t.call("GET", "/bank/items", undefined, d.auth)).status, 401);
 });
 
@@ -329,4 +249,65 @@ test("sealed tokens are bound to their item", async () => {
   const { openToken } = await import("../src/crypto.js");
   assert.equal(await openToken(key, "item-a", sealed), "access-x");
   await assert.rejects(openToken(key, "item-b", sealed));
+});
+
+test("the old pairing endpoint is gone", async () => {
+  const t = setup();
+  assert.equal((await t.call("POST", "/bank/pair", { secret: "x" })).status, 410);
+});
+
+test("bank roles: only owners manage banks; viewers can't apply; members can apply", async () => {
+  const t = setup();
+  const owner = await t.signIn();
+  for (const [email, role] of [["kid@example.com", "viewer"], ["helper@example.com", "member"]]) {
+    assert.equal((await t.call("POST", "/household/invites", { email, role }, owner.auth)).status, 200);
+  }
+  const viewer = await t.signIn("kid@example.com");
+  const member = await t.signIn("helper@example.com");
+  assert.equal((await t.call("POST", "/bank/link-token", {}, member.auth)).status, 403);
+  assert.equal((await t.call("POST", "/bank/link-token", {}, viewer.auth)).status, 403);
+  assert.equal((await t.call("POST", "/bank/exchange", { publicToken: "p" }, member.auth)).status, 403);
+  const ex = await t.call("POST", "/bank/exchange", { publicToken: "public-1", institution: { institution_id: "ins_usaa", name: "USAA" } }, owner.auth);
+  assert.equal(ex.status, 200);
+  await Promise.all(t.waits.splice(0));
+  assert.equal((await t.call("DELETE", `/bank/items/${ex.data.item.itemId}`, undefined, member.auth)).status, 403);
+  assert.equal((await t.call("GET", "/bank/items", undefined, viewer.auth)).data.items.length, 1, "viewers can see bank status");
+  assert.equal((await t.call("GET", "/bank/inbox", undefined, viewer.auth)).status, 403);
+  assert.equal((await t.call("POST", "/bank/sync", {}, viewer.auth)).status, 403);
+  assert.equal((await t.call("GET", "/bank/inbox", undefined, member.auth)).status, 200);
+});
+
+test("bank inbox: one device claims a batch at a time; held batches go back for later", async () => {
+  const t = setup();
+  const phone = await t.signIn();
+  const laptop = await t.signIn();
+  const ex = await t.call("POST", "/bank/exchange", { publicToken: "public-1", institution: { institution_id: "ins_usaa", name: "USAA" } }, phone.auth);
+  await Promise.all(t.waits.splice(0));
+  t.DB.raw.exec("UPDATE items SET cursor = '', last_sync_at = NULL; DELETE FROM bank_inbox");
+  t.plaid.state.syncPages = [{ cursor: "", res: { added: [tx("t1", 5), tx("t2", 6)], modified: [], removed: [], next_cursor: "c1", has_more: false } }];
+  await syncItem(t.env, plaidClient(t.env, t.plaid.fetchImpl), ex.data.item.itemId);
+  const a = await t.call("GET", "/bank/inbox", undefined, phone.auth);
+  assert.equal(a.data.batches.length, 1);
+  const b = await t.call("GET", "/bank/inbox", undefined, laptop.auth);
+  assert.equal(b.data.batches.length, 0, "claimed by the phone");
+  const remainder = { ...a.data.batches[0].batch, added: [a.data.batches[0].batch.added[1]] };
+  const ack = await t.call("POST", "/bank/ack", { ids: [a.data.batches[0].id], held: [remainder] }, phone.auth);
+  assert.equal(ack.data.held, 1);
+  const c = await t.call("GET", "/bank/inbox", undefined, laptop.auth);
+  assert.equal(c.data.batches.length, 1);
+  assert.equal(c.data.batches[0].held, true);
+  assert.deepEqual(c.data.batches[0].batch.added.map((x) => x.transaction_id), ["t2"]);
+  await t.call("POST", "/bank/ack", { release: [c.data.batches[0].id] }, laptop.auth);
+  assert.equal((await t.call("GET", "/bank/inbox", undefined, phone.auth)).data.batches.length, 1, "released batches can be claimed again");
+});
+
+test("banks are private to their household", async () => {
+  const t = setup({ ALLOWED_OWNER_EMAILS: "mickey@example.com" });
+  const owner = await t.signIn();
+  const ex = await t.call("POST", "/bank/exchange", { publicToken: "public-1", institution: { institution_id: "ins_usaa", name: "USAA" } }, owner.auth);
+  await Promise.all(t.waits.splice(0));
+  t.DB.raw.exec("INSERT INTO households (id, name, created_at, seq) VALUES ('h_other', 'Other', 1, 0)");
+  t.DB.raw.exec("UPDATE memberships SET household_id = 'h_other'; UPDATE sessions SET household_id = 'h_other'");
+  assert.equal((await t.call("GET", "/bank/items", undefined, owner.auth)).data.items.length, 0);
+  assert.equal((await t.call("DELETE", `/bank/items/${ex.data.item.itemId}`, undefined, owner.auth)).status, 404);
 });

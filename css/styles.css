@@ -771,3 +771,12 @@ input, textarea, select, [contenteditable="true"] {
   box-shadow: inset 3px 0 0 var(--brass);
 }
 .cat.under .goal-bar > span { background: var(--brass); }
+
+/* Household accounts */
+.avatar { display: inline-grid; place-items: center; border-radius: 999px; background: var(--bg-2); color: var(--muted); font-weight: 600; font-size: 0.85rem; object-fit: cover; flex: 0 0 auto; border: 1px solid var(--line); }
+.who { display: flex; align-items: center; gap: 12px; margin: 6px 0px; }
+.who > span { display: flex; flex-direction: column; min-width: 0; }
+.who .muted { font-size: 0.85rem; overflow-wrap: anywhere; }
+.gsi-host { min-height: 44px; display: flex; justify-content: center; margin: 10px 0px; }
+.gate-or { text-align: center; color: var(--muted); font-size: 0.85rem; margin: 14px 0px 6px; }
+.person .field { margin-top: 8px; }

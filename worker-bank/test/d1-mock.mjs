@@ -1,4 +1,4 @@
-/** A tiny D1 stand-in backed by node:sqlite, enough for the Worker's queries. */
+/** A tiny D1 stand-in backed by node:sqlite, enough for the Worker's queries. batch() is one transaction, like D1. */
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 
@@ -10,6 +10,15 @@ export function makeD1() {
     first: async () => db.prepare(sql).get(...args) ?? null,
     all: async () => ({ results: db.prepare(sql).all(...args) }),
     run: async () => { const r = db.prepare(sql).run(...args); return { meta: { changes: Number(r.changes) } }; },
+    runSync: () => { const r = db.prepare(sql).run(...args); return { meta: { changes: Number(r.changes) } }; },
   });
-  return { prepare: (sql) => stmt(sql), raw: db };
+  const batch = async (stmts) => {
+    db.exec("BEGIN");
+    try {
+      const out = stmts.map((s) => s.runSync());
+      db.exec("COMMIT");
+      return out;
+    } catch (e) { db.exec("ROLLBACK"); throw e; }
+  };
+  return { prepare: (sql) => stmt(sql), batch, raw: db };
 }

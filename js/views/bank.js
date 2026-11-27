@@ -1,10 +1,10 @@
-/** Settings > Bank sync: pair this device, connect banks through Plaid, map accounts, and sync. */
-import { h, btn, openSheet, field, textInput, toast, confirmDialog } from "../ui.js?v=139";
-import { bankSettings, setBankLink, setBankSettings } from "../bankmap.js?v=139";
+/** Settings > Bank sync: connect banks through Plaid (owners), map accounts, and sync. Uses the household sign-in. */
+import { h, btn, openSheet, field, textInput, toast, confirmDialog } from "../ui.js?v=140";
+import { bankSettings, setBankLink, setBankSettings } from "../bankmap.js?v=140";
 import {
-  bankState, bankConfig, setBankConfig, isPaired, pairDevice, unpairDevice, listItems, linkToken, openLink,
-  pendingOAuth, pullBank, requestSync, disconnectItem, rememberItems, heldBatches, heldCount, plainBankError, bankHealth, BANK_DEFAULTS,
-} from "../banksync.js?v=139";
+  bankState, bankConfig, setBankConfig, bankAccess, listItems, linkToken, openLink,
+  pendingOAuth, pullBank, requestSync, disconnectItem, rememberItems, plainBankError, bankHealth, BANK_DEFAULTS,
+} from "../banksync.js?v=140";
 
 const STATUS = {
   ok: ["Connected", ""],
@@ -16,18 +16,19 @@ const STATUS = {
 /** The short status line and button for the Settings page. */
 export async function bankSection(ctx) {
   const s = await bankState();
-  let text = "Off. Bring in new bank transactions automatically.";
-  if (s.token) {
+  const access = await bankAccess();
+  let text = "Sign in with Google above to bring in new bank transactions automatically.";
+  if (access.signedIn) {
     const items = s.items?.items || [];
     const trouble = items.find((i) => i.status !== "ok");
     if (s.error) text = s.error;
     else if (trouble) text = `${trouble.institution}: ${STATUS[trouble.status]?.[0] || "needs attention"}.`;
     else if (items.length) text = `${items.length} bank${items.length === 1 ? "" : "s"} connected.${s.lastPull ? ` Checked ${new Date(s.lastPull).toLocaleString()}.` : ""}`;
-    else text = "Paired. Connect a bank to start.";
+    else text = access.canManage ? "Connect a bank to start." : "No banks connected yet. A household owner can connect them.";
   }
   return [
     h("p", { class: "hint", text }),
-    btn(s.token ? "Bank sync" : "Set up bank sync", { block: true, kind: s.token ? "ghost" : "primary", onClick: () => openBankSheet(ctx) }),
+    btn(access.signedIn && (s.items?.items || []).length ? "Bank sync" : "Set up bank sync", { block: true, kind: access.signedIn ? "ghost" : "primary", disabled: !access.signedIn, onClick: () => openBankSheet(ctx) }),
   ];
 }
 
@@ -47,7 +48,8 @@ export function openBankSheet(ctx) {
 
 async function paint(ctx, host, repaint, sheet) {
   const s = await bankState();
-  if (!s.token) { paintPair(host, repaint); return; }
+  const access = await bankAccess();
+  if (!access.signedIn) { paintSignedOut(host); return; }
   host.replaceChildren(h("p", { class: "hint", text: "Loading banks…" }));
   let data = s.items || { items: [], used: 0, cap: 10 };
   let offline = null;
@@ -56,27 +58,28 @@ async function paint(ctx, host, repaint, sheet) {
     rememberItems(ctx, data.items);
   } catch (e) {
     offline = plainBankError(e);
-    if (!(await isPaired())) { paintPair(host, repaint, offline); return; }
+    if (!(await bankAccess()).signedIn) { paintSignedOut(host, offline); return; }
   }
+  const owner = access.canManage;
   const budget = ctx.budget();
   const settings = bankSettings(budget);
-  const held = heldCount(await heldBatches());
   const kids = [];
-  kids.push(h("p", { class: "lede", text: "New transactions from your banks come in on their own. Your bank sign-in goes to Plaid, never to this app or the sync server." }));
+  kids.push(h("p", { class: "lede", text: "New transactions from your banks come in on their own, for everyone in the household. Your bank sign-in goes to Plaid, never to this app or the sync server." }));
   if (offline) kids.push(h("p", { class: "error", text: offline }));
   if (s.error && !offline) kids.push(h("p", { class: "error", text: s.error }));
-  kids.push(h("p", { class: "hint", text: `${data.used} of ${data.cap} free bank logins used. Each new bank uses one for good, even if it’s disconnected later. Use Reconnect to fix a bank instead of adding it again.` }));
+  if (!owner) kids.push(h("p", { class: "hint", text: access.canApply ? "Only a household owner can connect banks or choose where accounts go. You can sync." : "You have view-only access to bank sync." }));
+  if (owner) kids.push(h("p", { class: "hint", text: `${data.used} of ${data.cap} free bank logins used. Each new bank uses one for good, even if it’s disconnected later. Use Reconnect to fix a bank instead of adding it again.` }));
 
-  for (const item of data.items || []) kids.push(itemCard(ctx, item, settings, data, repaint));
+  for (const item of data.items || []) kids.push(itemCard(ctx, item, settings, data, repaint, owner));
 
+  if (s.waiting) kids.push(h("p", { class: "hint", text: "Some transactions are waiting until an owner chooses an account above." }));
   const full = data.used >= data.cap;
-  kids.push(btn(full ? "No free bank logins left" : "Connect a bank", { block: true, disabled: full || !!offline, onClick: () => confirmDialog({
+  if (owner) kids.push(btn(full ? "No free bank logins left" : "Connect a bank", { block: true, disabled: full || !!offline, onClick: () => confirmDialog({
     title: "Connect a bank?",
     message: `This uses 1 of your ${data.cap} free bank logins (${data.cap - data.used} left), and it can’t be given back. Connect each bank once. Start with your main bank.`,
     confirm: "Continue",
     onConfirm: () => startLink(ctx, null, data, repaint),
   }) }));
-  if (held) kids.push(h("p", { class: "hint", text: `${held} transaction${held === 1 ? " is" : "s are"} waiting until you choose an account above.` }));
 
   const cut = h("input", { class: "input", type: "date", value: settings.cutover });
   cut.addEventListener("change", () => {
@@ -86,7 +89,7 @@ async function paint(ctx, host, repaint, sheet) {
   });
   const pend = h("input", { type: "checkbox", checked: settings.includePending });
   pend.addEventListener("change", () => ctx.updateBudget((b) => setBankSettings(b, { includePending: pend.checked })));
-  kids.push(
+  if (owner) kids.push(
     h("h3", { class: "kicker", text: "Options" }),
     field("Bring in transactions from", cut),
     h("label", { class: "choice" }, pend, h("span", {},
@@ -94,7 +97,7 @@ async function paint(ctx, host, repaint, sheet) {
       h("span", { class: "hint", text: "Off: only posted ones. On: pending ones show up early and update when they post." }),
     )),
   );
-  kids.push(btn("Sync now", { block: true, kind: "ghost", disabled: !!offline, onClick: async (e) => {
+  if (access.canApply) kids.push(btn("Sync now", { block: true, kind: "ghost", disabled: !!offline, onClick: async (e) => {
     const b = e.currentTarget; b.disabled = true;
     try {
       const res = await requestSync();
@@ -106,35 +109,19 @@ async function paint(ctx, host, repaint, sheet) {
   } }));
   kids.push(h("p", { class: "hint", text: s.lastPull ? `Last checked ${new Date(s.lastPull).toLocaleString()}. Bank sync also checks when the app opens, and the server checks twice a day.` : "Bank sync checks when the app opens, and the server checks twice a day." }));
   kids.push(btn("Server", { kind: "quiet", block: true, onClick: () => editServer(repaint) }));
-  kids.push(btn("Unpair this device", { kind: "danger", block: true, onClick: () => confirmDialog({
-    title: "Unpair this device?",
-    message: "Banks stay connected on the server. This device stops getting new transactions until it’s paired again.",
-    confirm: "Unpair", danger: true,
-    onConfirm: async () => { await unpairDevice(); repaint(); },
-  }) }));
   host.replaceChildren(...kids);
   void sheet;
 }
 
-function paintPair(host, repaint, message) {
-  const code = textInput({ type: "password", placeholder: "Pairing code", autocomplete: "off" });
-  const err = h("p", { class: "error", text: message || "" });
+function paintSignedOut(host, message) {
   host.replaceChildren(
     h("p", { class: "lede", text: "Bring new transactions in from your bank automatically, through Plaid." }),
-    h("p", { class: "hint", text: "First, pair this device with your bank sync server. Enter the pairing code that was set on the server. Each device you use gets its own copy of new transactions." }),
-    field("Pairing code", code),
-    err,
-    btn("Pair this device", { block: true, onClick: async (e) => {
-      if (!code.value.trim()) { err.textContent = "Enter the pairing code."; return; }
-      const b = e.currentTarget; b.disabled = true;
-      try { await pairDevice(code.value); toast("Paired"); repaint(); }
-      catch (x) { err.textContent = plainBankError(x); b.disabled = false; }
-    } }),
-    btn("Server", { kind: "quiet", block: true, onClick: () => editServer(repaint) }),
+    h("p", { class: "hint", text: message || "First, sign in with Google in Settings › Household. Bank sync uses your household sign-in, so there’s nothing to pair." }),
+    btn("Server", { kind: "quiet", block: true, onClick: () => editServer(() => {}) }),
   );
 }
 
-function itemCard(ctx, item, settings, data, repaint) {
+function itemCard(ctx, item, settings, data, repaint, owner) {
   const [label, tone] = STATUS[item.status] || ["Needs attention", "bad"];
   const needs = item.status !== "ok" || item.newAccounts;
   const budget = ctx.budget();
@@ -148,6 +135,7 @@ function itemCard(ctx, item, settings, data, repaint) {
     if (accts.length) sel.append(h("optgroup", { label: "Accounts" }, ...accts.map((x) => h("option", { value: x.id, text: x.name }))));
     if (cards.length) sel.append(h("optgroup", { label: "Cards" }, ...cards.map((x) => h("option", { value: x.id, text: x.name }))));
     sel.value = settings.accounts[a.id]?.target || "";
+    sel.disabled = !owner;
     sel.addEventListener("change", async () => {
       ctx.updateBudget((b) => setBankLink(b, a.id, sel.value, { itemId: item.itemId, institution: item.institution, name: a.name, mask: a.mask || "", type: a.type || "", subtype: a.subtype || "" }));
       if (sel.value && sel.value !== "skip") {
@@ -166,7 +154,7 @@ function itemCard(ctx, item, settings, data, repaint) {
     ),
     h("p", { class: "hint", text: when + expires + newAcc }),
     ...rows,
-    h("div", { class: "row gap" },
+    !owner ? null : h("div", { class: "row gap" },
       btn("Reconnect", { kind: needs ? "primary" : "quiet", onClick: () => startLink(ctx, item.itemId, data, repaint) }),
       btn("Disconnect", { kind: "quiet", onClick: () => confirmDialog({
         title: `Disconnect ${item.institution}?`,
