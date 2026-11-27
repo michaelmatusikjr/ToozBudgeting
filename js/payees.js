@@ -149,6 +149,12 @@ export function payeeSuggestedCategory(budget, canonical) {
   return "";
 }
 
+export function payeeCategoryState(budget, name) {
+  const def = payeeDefaultCategory(budget, name);
+  const sug = payeeSuggestedCategory(budget, name);
+  return { mode: def ? "default" : sug ? "suggested" : "none", catId: def || sug || "" };
+}
+
 export function ensurePayee(list, originalName, defaultCategoryId = "", suggestedCategoryId = "") {
   if (!originalName) return list;
   const existing = list.find((p) => p.name === originalName);
