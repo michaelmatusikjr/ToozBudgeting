@@ -2,7 +2,7 @@ import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog,
 import { fmt, todayKey, toTitleCase, isCard, isPayFrom, ccPayCat, makePayFrom, RTA, uid, monthLabel } from "../util.js?v=154";
 import { deviceSet } from "../store.js?v=154";
 import { displayName, payeeDefaultCategory, payeeSuggestedCategory, findFuzzyDuplicates, isAccountPayee } from "../payees.js?v=154";
-import { addTransaction, deleteTransactions, isLocked, setTxCategory, updateTransaction, replaceTransaction, confirmCategories, unreconcileTransaction } from "../mutate.js?v=154";
+import { addTransaction, deleteTransactions, isLocked, setTxCategory, updateTransaction, replaceTransaction, confirmCategories, unreconcileTransaction, resolveDuplicatePair } from "../mutate.js?v=154";
 import { parseCSV, guessColumnMapping, applyMapping } from "../csv.js?v=154";
 
 
@@ -305,14 +305,18 @@ export function renderTransactions(root, ctx) {
   if (ctx.ui.showTxFilters) root.append(txFilterPanel(ctx, budget, f, clearAllFilters));
 
   if (attentionAll.length) {
-    root.append(h("button", { class: "tx-attn", type: "button", onclick: () => {
+    const filterAttn = () => {
       ctx.ui.txFilter = { ...blankTxFilters(), categoryId: UNCONFIRMED_FILTER };
       ctx.ui.txQuery = "";
       ctx.ui.showTxFilters = true;
       ctx.render();
-    } },
-      h("strong", { text: `⚠️ ${attentionAll.length} transaction${attentionAll.length !== 1 ? "s" : ""} need${attentionAll.length === 1 ? "s" : ""} attention` }),
-      h("span", { text: " · Missing or Unconfirmed Categories · Tap to fix" }),
+    };
+    root.append(h("div", { class: "tx-attn-row" },
+      h("button", { class: "tx-attn", type: "button", onclick: filterAttn },
+        h("strong", { text: `⚠️ ${attentionAll.length} transaction${attentionAll.length !== 1 ? "s" : ""} need${attentionAll.length === 1 ? "s" : ""} attention` }),
+        h("span", { text: " · Missing or Unconfirmed Categories · Tap to fix" }),
+      ),
+      btn("🔧 Fix", { kind: "ghost small", onClick: () => openFixTransactions(ctx) }),
     ));
   }
 
@@ -1433,31 +1437,170 @@ function openImport(ctx) {
   });
 }
 
-function openDupes(ctx) {
-  const budget = ctx.budget();
-  const pairs = (budget.pendingDuplicates || []).filter((p) => budget.transactions.some((t) => t.id === p.newTxId) && budget.transactions.some((t) => t.id === p.existingTxId));
+function liveDuplicatePairs(budget) {
+  return (budget.pendingDuplicates || []).filter((p) => budget.transactions.some((t) => t.id === p.newTxId) && budget.transactions.some((t) => t.id === p.existingTxId));
+}
+
+function dupCard(budget, tx) {
+  if (!tx) return h("div", { class: "tx-dup-card" }, h("div", { class: "tx-dup-payee", text: "—" }));
+  const acct = [...(budget.accounts || []), ...(budget.creditCards || [])].find((a) => a.id === tx.accountId);
+  const cat = tx.categoryId ? (budget.categories || []).find((c) => c.id === tx.categoryId) : null;
+  const amt = amountLabel(budget, tx);
+  const isOut = tx.type === "expense" || (tx.type === "payment" && !isCard(budget, tx.accountId)) || (tx.type !== "income" && Number(tx.amount) < 0);
+  return h("div", { class: "tx-dup-card" },
+    h("div", { class: "tx-dup-payee", text: displayName(budget, tx.originalPayee || tx.payee) || "—" }),
+    h("div", { class: "tx-dup-date", text: tx.date }),
+    h("div", { class: `tx-dup-amt${isOut ? " out" : " in"}`, text: amt }),
+    acct ? h("div", { class: "tx-dup-meta", text: `📂 ${acct.name}` }) : null,
+    cat ? h("div", { class: "tx-dup-meta", text: `🏷 ${cat.name}` }) : null,
+    tx.note ? h("div", { class: "tx-dup-note", text: `"${tx.note}"` }) : null,
+  );
+}
+
+function setSheetTitle(host, title) {
+  const el = host.closest(".sheet")?.querySelector(".sheet-title");
+  if (el) el.textContent = title;
+}
+
+export function openDupes(ctx) {
+  const initial = liveDuplicatePairs(ctx.budget()).length;
   const sheet = openSheet({
-    title: "Possible duplicates",
+    title: `⚠️ Potential Duplicate (${initial} remaining)`,
     body: (host) => {
-      for (const p of pairs) {
-        const a = budget.transactions.find((t) => t.id === p.newTxId);
-        const b = budget.transactions.find((t) => t.id === p.existingTxId);
-        host.append(h("div", { class: "pair" },
-          h("p", { text: `${a.date} ${displayName(budget, a.originalPayee || a.payee)} ${fmt(a.amount)}` }),
-          h("p", { class: "muted", text: `Existing ${b.date} ${displayName(budget, b.originalPayee || b.payee)} ${fmt(b.amount)}` }),
-          h("div", { class: "row gap" },
-            btn("Keep both", { kind: "ghost", onClick: () => {
-              ctx.updateBudget((bud) => ({ ...bud, pendingDuplicates: (bud.pendingDuplicates || []).filter((x) => x !== p && !(x.newTxId === p.newTxId && x.existingTxId === p.existingTxId)) }));
-              sheet.close(); ctx.render(); openDupes(ctx);
-            }}),
-            btn("Delete new", { kind: "danger", onClick: () => {
-              ctx.updateBudget((bud) => deleteTransactions({ ...bud, pendingDuplicates: (bud.pendingDuplicates || []).filter((x) => x.newTxId !== p.newTxId) }, [p.newTxId]));
-              sheet.close();
-            }}),
+      const paint = () => {
+        const budget = ctx.budget();
+        const pairs = liveDuplicatePairs(budget);
+        clear(host);
+        setSheetTitle(host, `⚠️ Potential Duplicate (${pairs.length} remaining)`);
+        if (!pairs.length) {
+          host.append(h("p", { class: "tx-dup-lede", text: "All caught up." }));
+          return;
+        }
+        const pair = pairs[0];
+        const txA = budget.transactions.find((t) => t.id === pair.newTxId);
+        const txB = budget.transactions.find((t) => t.id === pair.existingTxId);
+        const resolve = (keep) => {
+          if (ctx.readOnly()) { toast("View only — this budget can’t be edited"); return; }
+          let err = null;
+          ctx.updateBudget((bud) => {
+            const out = resolveDuplicatePair(bud, pair, keep);
+            if (out.error) { err = out.error; return null; }
+            return out.budget;
+          });
+          if (err) { toast(err); return; }
+          ctx.render();
+          if (!liveDuplicatePairs(ctx.budget()).length) sheet.close();
+          else paint();
+        };
+        host.append(
+          h("p", { class: "tx-dup-lede", text: "These two transactions look like they might be the same. Choose which one to keep, or keep both if they're different transactions." }),
+          h("div", { class: "tx-dup-pair" },
+            dupCard(budget, txA),
+            h("div", { class: "tx-dup-swap", text: "⟷" }),
+            dupCard(budget, txB),
           ),
-        ));
-      }
-      if (!pairs.length) host.append(h("p", { text: "All caught up." }));
+          h("div", { class: "tx-dup-actions" },
+            h("div", { class: "tx-dup-keep-row" },
+              btn("Keep Left", { onClick: () => resolve("left") }),
+              btn("Keep Right", { onClick: () => resolve("right") }),
+            ),
+            btn("Keep Both", { kind: "ghost", onClick: () => resolve("both") }),
+          ),
+        );
+      };
+      paint();
+    },
+  });
+}
+
+function fixDateLabel(date) {
+  if (!date) return "";
+  return new Date(`${date}T12:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
+function fixAccountSelect(budget, tx) {
+  const sel = h("select", { class: "input" });
+  sel.append(h("option", { value: "", text: "Select an account..." }));
+  const cash = (budget.accounts || []).filter((a) => !a.archived || a.id === tx.accountId);
+  const cards = (budget.creditCards || []).filter((c) => !c.archived || c.id === tx.accountId);
+  if (cash.length) {
+    const og = h("optgroup", { label: "Cash & Bank Accounts" });
+    for (const a of cash) og.append(h("option", { value: a.id, text: a.name }));
+    sel.append(og);
+  }
+  if (cards.length) {
+    const og = h("optgroup", { label: "Credit Cards" });
+    for (const c of cards) og.append(h("option", { value: c.id, text: c.name }));
+    sel.append(og);
+  }
+  sel.value = tx.accountId || "";
+  return sel;
+}
+
+function fixCategorySelect(budget, tx) {
+  const sel = h("select", { class: "input" });
+  sel.append(h("option", { value: "", text: "Select a category..." }));
+  for (const g of budget.categoryGroups || []) {
+    const og = h("optgroup", { label: g.name });
+    for (const c of (budget.categories || []).filter((c) => c.groupId === g.id && !c.archived)) {
+      og.append(h("option", { value: c.id, text: c.name }));
+    }
+    sel.append(og);
+  }
+  sel.value = tx.categoryId || "";
+  return sel;
+}
+
+export function openFixTransactions(ctx) {
+  const sheet = openSheet({
+    title: "⚠️ Fix Transactions",
+    body: (host) => {
+      const paint = () => {
+        const budget = ctx.budget();
+        const rows = (budget.transactions || []).filter(needsAttention);
+        clear(host);
+        host.append(h("p", { class: "tx-fix-lede", text: "These transactions are missing an account and/or category. Assign what's needed for each." }));
+        if (!rows.length) {
+          host.append(h("p", { class: "tx-fix-empty", text: "All transactions have an account and category." }));
+        }
+        for (const tx of rows) {
+          const row = h("div", { class: "tx-fix-row" });
+          const payee = displayName(budget, tx.originalPayee || tx.payee) || "—";
+          row.append(h("div", { class: "tx-fix-head" },
+            h("span", { text: `${payee} — ${amountLabel(budget, tx)} ` }),
+            h("span", { class: "tx-fix-date", text: `(${fixDateLabel(tx.date)})` }),
+          ));
+          const needAccount = !tx.accountId;
+          const needCategory = !tx.splits && (!tx.categoryId || tx.categoryConfirmed === false);
+          if (needAccount) {
+            const sel = fixAccountSelect(budget, tx);
+            sel.disabled = !!ctx.readOnly();
+            sel.addEventListener("change", () => {
+              if (!sel.value || ctx.readOnly()) return;
+              ctx.updateBudget((b) => updateTransaction(b, tx.id, { accountId: sel.value }));
+              ctx.render();
+              paint();
+            });
+            row.append(sel);
+          }
+          if (needCategory) {
+            const wrap = h("div", { class: "tx-fix-cat" });
+            const sel = fixCategorySelect(budget, tx);
+            sel.disabled = !!ctx.readOnly();
+            sel.addEventListener("change", () => {
+              if (!sel.value || ctx.readOnly()) return;
+              ctx.updateBudget((b) => setTxCategory(b, tx.id, sel.value));
+              ctx.render();
+              paint();
+            });
+            wrap.append(sel);
+            row.append(wrap);
+          }
+          host.append(row);
+        }
+        host.append(btn("Done", { block: true, onClick: () => sheet.close() }));
+      };
+      paint();
     },
   });
 }

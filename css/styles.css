@@ -1752,3 +1752,28 @@ input, textarea, select, [contenteditable="true"] {
 .tx-import-dup { font-size: 12px; color: var(--amber); font-weight: 700; margin-bottom: 6px; }
 .tx-import-skip { display: flex; align-items: center; gap: 8px; font-size: 13px; margin: 6px 0; }
 .tx-import-empty { font-size: 13px; color: var(--ink-2); padding: 8px 0 16px; }
+
+/* WU-23: Duplicate review + Fix Transactions */
+.tx-attn-row { display: flex; gap: 8px; align-items: stretch; margin: 0 0 10px; }
+.tx-attn-row .tx-attn { margin: 0; flex: 1; }
+.tx-attn-row > .btn { flex-shrink: 0; align-self: center; }
+.tx-dup-lede, .tx-fix-lede { font-size: 13px; color: var(--ink-2); margin: 0 0 14px; line-height: 1.6; }
+.tx-dup-pair { display: flex; gap: 10px; margin-bottom: 14px; }
+.tx-dup-card { border: 1px solid var(--line); border-radius: 10px; padding: 14px; flex: 1; min-width: 0; }
+.tx-dup-payee { font-size: 13px; font-weight: 700; color: var(--ink); margin-bottom: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tx-dup-date { font-size: 12px; color: var(--ink-2); margin-bottom: 3px; }
+.tx-dup-amt { font-size: 16px; font-weight: 800; margin-bottom: 6px; }
+.tx-dup-amt.in { color: var(--good); }
+.tx-dup-amt.out { color: var(--danger); }
+.tx-dup-meta { font-size: 11px; color: var(--muted); margin-bottom: 3px; }
+.tx-dup-note { font-size: 11px; color: var(--muted); font-style: italic; }
+.tx-dup-swap { display: flex; align-items: center; color: var(--muted); font-size: 18px; flex-shrink: 0; }
+.tx-dup-actions { display: flex; flex-direction: column; gap: 8px; }
+.tx-dup-keep-row { display: flex; gap: 8px; }
+.tx-dup-keep-row .btn { flex: 1; }
+.tx-dup-actions > .btn { width: 100%; }
+.tx-fix-row { border-bottom: 1px solid var(--line); padding-bottom: 12px; margin-bottom: 12px; }
+.tx-fix-head { font-size: 13px; font-weight: 700; margin-bottom: 6px; }
+.tx-fix-date { color: var(--muted); font-weight: 400; }
+.tx-fix-cat { margin-top: 8px; }
+.tx-fix-empty { font-size: 13px; color: var(--ink-2); padding: 4px 0 16px; }

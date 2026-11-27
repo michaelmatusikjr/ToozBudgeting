@@ -332,6 +332,19 @@ export function deleteTransactions(budget, ids) {
   return touch(budget, { transactions: txs, monthlyBudgets: mb, inflows: inf, payees: prunePayees(budget.payees || [], txs) });
 }
 
+/** keep: "left" keeps the new (left) transaction, "right" keeps the existing (right) one, "both" keeps both. */
+export function resolveDuplicatePair(budget, pair, keep) {
+  const pending = (budget.pendingDuplicates || []).filter((p) => !(p.newTxId === pair.newTxId && p.existingTxId === pair.existingTxId));
+  if (keep === "both") return { budget: touch(budget, { pendingDuplicates: pending }) };
+  const deleteId = keep === "left" ? pair.existingTxId : pair.newTxId;
+  const tx = (budget.transactions || []).find((t) => t.id === deleteId);
+  if (!tx) return { budget: touch(budget, { pendingDuplicates: pending }) };
+  if (tx.subtype === "starting_balance") return { budget, error: "Starting balances can’t be deleted." };
+  if (isLocked(budget, tx)) return { budget, error: "That transaction is locked (reconciled) and can’t be deleted." };
+  const next = deleteTransactions(budget, [deleteId]);
+  return { budget: touch(next, { pendingDuplicates: pending }) };
+}
+
 export function replaceTransaction(budget, id, form) {
   const old = (budget.transactions || []).find((t) => t.id === id);
   if (!old || old.subtype === "starting_balance") return { budget, error: "That transaction can’t be edited." };
