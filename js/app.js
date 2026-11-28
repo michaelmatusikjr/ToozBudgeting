@@ -317,6 +317,7 @@ async function paintInner() {
   shell.append(side, main, tabs);
   root.append(shell);
   if (ctx.ui.notifOpen) root.append(renderNotifPanel(ctx, notes));
+  if (ctx.ui.showShortcuts) root.append(renderShortcuts(ctx));
   if (ctx.nav === "budget") renderBudget(view, ctx);
   else if (ctx.nav === "transactions") renderTransactions(view, ctx);
   else if (ctx.nav === "accounts") renderAccounts(view, ctx);
@@ -424,13 +425,57 @@ function renderNotifPanel(ctx, notes) {
   return overlay;
 }
 
+
+function renderShortcuts(ctx) {
+  const close = () => { ctx.ui.showShortcuts = false; ctx.render(); };
+  const rows = [
+    { heading: "Navigation" },
+    { keys: ["G", "B"], desc: "Go to Budget" },
+    { keys: ["G", "T"], desc: "Go to Transactions" },
+    { keys: ["G", "A"], desc: "Go to Accounts" },
+    { keys: ["G", "P"], desc: "Go to Payees" },
+    { keys: ["G", "S"], desc: "Go to Settings" },
+    { heading: "Budget" },
+    { keys: ["←"], desc: "Previous month" },
+    { keys: ["→"], desc: "Next month" },
+    { heading: "Transactions" },
+    { keys: ["N"], desc: "New transaction" },
+    { keys: ["/"], desc: "Focus search" },
+    { heading: "General" },
+    { keys: ["⌘", "Z"], desc: "Undo" },
+    { keys: ["⌘", "⇧", "Z"], desc: "Redo" },
+    { keys: ["Esc"], desc: "Close modal / panel" },
+    { keys: ["?"], desc: "Show this help" },
+  ];
+  const overlay = h("div", { class: "notif-overlay", onclick: (e) => { if (e.target === overlay) close(); } });
+  const modal = h("div", { class: "notif-modal sc-modal", role: "dialog", "aria-modal": "true", "aria-label": "Keyboard Shortcuts" });
+  modal.append(h("div", { class: "notif-head" },
+    h("div", { class: "notif-title", text: "⌨️ Keyboard Shortcuts" }),
+    h("button", { class: "notif-close", type: "button", "aria-label": "Close", text: "✕", onclick: close }),
+  ));
+  rows.forEach((row, i) => {
+    if (row.heading) {
+      modal.append(h("div", { class: "sc-h" + (i === 0 ? " first" : ""), text: row.heading }));
+    } else {
+      modal.append(h("div", { class: "sc-row" },
+        h("span", { class: "sc-desc", text: row.desc }),
+        h("div", { class: "sc-keys" }, ...row.keys.map((k) => h("kbd", { class: "sc-key", text: k }))),
+      ));
+    }
+  });
+  modal.append(h("div", { class: "sc-note", text: "G-prefix shortcuts have a 1-second window" }));
+  overlay.append(modal);
+  return overlay;
+}
+
 let gPending = false;
 let gTimer = null;
 window.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && ctx.ui?.notifOpen) {
+  if (e.key === "Escape" && (ctx.ui?.notifOpen || ctx.ui?.showShortcuts)) {
     e.preventDefault();
     ctx.ui.notifOpen = false;
     ctx.ui.expandedNotifId = null;
+    ctx.ui.showShortcuts = false;
     ctx.render();
     return;
   }
@@ -439,7 +484,13 @@ window.addEventListener("keydown", (e) => {
   if (document.querySelector(".scrim")) return;
   const meta = e.metaKey || e.ctrlKey;
   if (meta && e.key.toLowerCase() === "z") { e.preventDefault(); if (e.shiftKey) ctx.redo(); else ctx.undo(); return; }
-  if (e.key === "?" ) { e.preventDefault(); toast("g then b/t/a/p/s jumps views. Arrows change month. n adds a transaction. / searches."); return; }
+  if (e.key === "?") {
+    e.preventDefault();
+    ctx.ui.showShortcuts = true;
+    ctx.ui.notifOpen = false;
+    ctx.render();
+    return;
+  }
   if (e.key === "g" || e.key === "G") { gPending = true; clearTimeout(gTimer); gTimer = setTimeout(() => { gPending = false; }, 1000); return; }
   if (gPending) {
     gPending = false;

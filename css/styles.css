@@ -2222,3 +2222,39 @@ input, textarea, select, [contenteditable="true"] {
   .main { min-width: 0; }
   .view { padding: 8px 32px 48px; }
 }
+
+
+/* WU-33: keyboard shortcuts modal */
+.sc-modal { max-width: 420px; }
+.sc-h {
+  font-size: 10px;
+  font-weight: 800;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-top: 14px;
+  margin-bottom: 6px;
+}
+.sc-h.first { margin-top: 0; }
+.sc-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--line);
+  gap: 12px;
+}
+.sc-desc { font-size: 13px; color: var(--ink); }
+.sc-keys { display: flex; gap: 4px; flex-shrink: 0; }
+kbd.sc-key {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 2px 7px;
+  font-size: 12px;
+  font-family: inherit;
+  font-weight: 700;
+  color: var(--navy);
+  box-shadow: 0 1px 0 rgba(0,0,0,0.15);
+}
+.sc-note { font-size: 11px; color: var(--muted); margin-top: 14px; text-align: center; }
