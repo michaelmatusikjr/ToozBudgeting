@@ -105,12 +105,12 @@ test("installed-app sign-in returns to the app that started it (sealed in the st
   let g = await start("?app=daily-tracker");
   assert.equal(g.searchParams.get("redirect_uri"), BASE + "/auth/google/redirect", "same Google redirect URI for every app");
   let r = await post({ id_token: await idToken({ nonce: g.searchParams.get("nonce") }), state: g.searchParams.get("state") });
-  assert.match(r.headers.get("Location"), /^https:\/\/michaelmatusikjr\.github\.io\/daily-tracker\/#signin=[\w-]+$/);
+  assert.match(r.headers.get("Location"), /^https:\/\/michaelmatusikjr\.github\.io\/Daily-tracker\/#signin=[\w-]+$/, "GitHub Pages path is case-sensitive (repo Daily-tracker)");
   const red = await t.call("POST", "/auth/redeem", { code: r.headers.get("Location").split("#signin=")[1] });
   assert.equal(red.status, 200);
   // A failure after a Daily Tracker start still goes back to Daily Tracker.
   r = await post({ id_token: await idToken({ nonce: "wrong" }), state: g.searchParams.get("state") });
-  assert.match(r.headers.get("Location"), /\/daily-tracker\/#signin-error=.*signin-code=BAD_NONCE/);
+  assert.match(r.headers.get("Location"), /\/Daily-tracker\/#signin-error=.*signin-code=BAD_NONCE/);
   // No app, an unknown app, or a URL: ToozBudgeting.
   for (const q of ["", "?app=nope", "?app=" + encodeURIComponent("https://evil.example/")]) {
     g = await start(q);
@@ -120,6 +120,6 @@ test("installed-app sign-in returns to the app that started it (sealed in the st
   // Not configured: the error goes back to the app that asked.
   const t2 = setup({ GOOGLE_CLIENT_ID: "" });
   const nc = await t2.handle(new Request(BASE + "/auth/google/start?app=daily-tracker"), t2.env, t2.ctx);
-  assert.match(nc.headers.get("Location"), /\/daily-tracker\/#signin-error=.*NOT_CONFIGURED/);
+  assert.match(nc.headers.get("Location"), /\/Daily-tracker\/#signin-error=.*NOT_CONFIGURED/);
   void ORIGIN;
 });

@@ -16,7 +16,8 @@ import { requireAction } from "./auth.js";
 
 export const APPS = {
   "toozbudgeting": { name: "ToozBudgeting", path: "/ToozBudgeting/" },
-  "daily-tracker": { name: "Daily Tracker", path: "/daily-tracker/", link: true, linkRoles: ["owner", "member"] },
+  // GitHub Pages is case-sensitive: the repo is Daily-tracker, so /daily-tracker/ 404s.
+  "daily-tracker": { name: "Daily Tracker", path: "/Daily-tracker/", link: true, linkRoles: ["owner", "member"] },
 };
 
 const PREFS_MAX = 4096;

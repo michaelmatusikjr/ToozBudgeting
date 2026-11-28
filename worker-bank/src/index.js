@@ -20,7 +20,7 @@ import {
 import { push, pull } from "./sync.js";
 import { appStatus, appKeys, setAppLink, removeAppLink, getPrefs, setPrefs } from "./apps.js";
 
-const VERSION = "2.1.2";
+const VERSION = "2.1.3";
 const DEFAULT_CAP = 10;
 const CHUNK = 400;
 const SYNC_LOCK_MS = 5 * 60000;
