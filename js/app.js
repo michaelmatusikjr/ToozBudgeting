@@ -305,11 +305,12 @@ async function paintInner() {
     h("button", { class: "ico-btn", type: "button", "aria-label": "Undo", title: "Undo", disabled: !undoStack.length, onclick: () => ctx.undo() }, "↩"),
     h("button", { class: "ico-btn", type: "button", "aria-label": "Redo", title: "Redo", disabled: !redoStack.length, onclick: () => ctx.redo() }, "↪"),
   );
+  side.append(h("div", { class: "side-brand", text: "Tooz" }));
   for (const [id, emoji, label] of items) {
     side.append(navBtn(id, emoji, label));
     tabs.append(navBtn(id, emoji, label));
   }
-  // Desktop keeps Undo/Redo in the sidebar until WU-07 restyles it; phone puts them in the bottom nav.
+  // Desktop: Undo/Redo sit at the bottom of the sidebar. Phone: right end of the bottom nav.
   side.append(undoRedo());
   tabs.append(undoRedo());
   main.append(top, view);
