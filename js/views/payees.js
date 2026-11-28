@@ -393,7 +393,7 @@ function currentSuggestionGroups(ctx) {
     .filter((names) => names.length > 1);
 }
 
-function openSuggestions(ctx, groups) {
+export function openSuggestions(ctx, groups) {
   const start = toModalGroups((groups || currentSuggestionGroups(ctx)).map((names) => names.filter((n) => !isAccountPayee(ctx.budget(), n))).filter((names) => names.length > 1));
   if (!start.length) return;
   let state = { groups: start, currentIdx: 0 };

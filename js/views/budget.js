@@ -823,7 +823,7 @@ function catName(budget, id) {
   return budget.categories?.find((c) => c.id === id)?.name || "Unknown";
 }
 
-function openCover(ctx, month, note) {
+export function openCover(ctx, month, note) {
   const budget = ctx.budget();
   const snap = budgetSnapshot(budget, month);
   const overs = (budget.categories || []).filter((c) => !c.archived && !c.creditCardId && (snap.available[c.id] || 0) < -0.005);

@@ -1,7 +1,8 @@
 /** Local reminders while the app is open. Closed-app delivery is js/push.js. */
 import { deviceGet, deviceSet } from "./store.js?v=154";
-import { monthKey, todayKey, timeZone, monthLabel, fmt } from "./util.js?v=154";
+import { monthKey, todayKey, timeZone, monthLabel, fmt, daysSince } from "./util.js?v=154";
 import { overspentMonths, staleReconcile, ccMismatches } from "./calc.js?v=154";
+import { buildMergeGroups, payeeDirectory, displayName } from "./payees.js?v=154";
 
 const timers = new Set();
 
@@ -38,39 +39,60 @@ function atTime(dateKey, hhmm) {
   return new Date(y, m - 1, d, hh || 9, mm || 0, 0, 0).getTime();
 }
 
-/** Derived rules from the budget plus any custom reminders the user saved. */
+function suggestedMergeGroups(budget) {
+  const counts = {};
+  for (const tx of budget.transactions || []) {
+    if (tx.subtype === "starting_balance") continue;
+    const n = displayName(budget, tx.originalPayee || tx.payee);
+    if (!n) continue;
+    counts[n] = (counts[n] || 0) + 1;
+  }
+  const shown = payeeDirectory(budget).filter((n) => counts[n]);
+  return buildMergeGroups(shown, budget.rejectedMerges || [], budget.mergeExcludeWords || ["TST*"]);
+}
+
+function pendingFuzzyDuplicates(budget) {
+  return (budget.pendingDuplicates || []).filter((p) =>
+    (budget.transactions || []).some((t) => t.id === p.newTxId)
+    && (budget.transactions || []).some((t) => t.id === p.existingTxId)
+  );
+}
+
+function dateLabel(date) {
+  if (!date) return "";
+  return new Date(date + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+/** Alerts for the bell panel. Custom reminders, bills, and low Ready to Assign are not included. */
 export function collectReminders(budget, month) {
   if (!budget) return [];
   const today = todayKey();
   const rules = [];
-  const push = (r) => rules.push({ time: "09:00", offsetDays: 0, ...r });
+  const push = (r) => rules.push({ time: "09:00", offsetDays: 0, date: today, recur: { type: "none" }, ...r });
+
+  const merges = suggestedMergeGroups(budget);
+  if (merges.length) {
+    const n = merges.length;
+    push({
+      id: "merge-suggestions", kind: "merge", icon: "🔀", tag: "Payees",
+      title: `${n} payee merge suggestion${n !== 1 ? "s" : ""}`,
+      body: `${n} group${n !== 1 ? "s" : ""} of payees look like they might be the same vendor. Merging duplicates keeps your payee list clean and makes reports more accurate.`,
+      action: { label: "Review Merge Suggestions", color: "purple" },
+      panelOnly: true,
+    });
+  }
 
   const overs = overspentMonths(budget);
   if (overs.length) {
     const oldest = overs[0].month;
     const count = overs.length;
-    const extra = count > 1 ? ` (+${count - 1} more)` : "";
+    const more = count > 1 ? ` (+${count - 1} more month${count - 1 !== 1 ? "s" : ""})` : "";
     push({
-      id: `overspend:${oldest}`, kind: "overspend",
-      title: `Overspending in ${monthLabel(oldest)}${extra}`,
-      body: `${count > 1 ? `${count} months have` : `${monthLabel(oldest)} has`} unresolved overspending. Covering moves funds from other categories to bring them back to zero. Start with the oldest month.`,
-      url: `./#budget/${oldest}`, tag: `overspend:${oldest}`,
-      date: today, recur: { type: "none" },
-    });
-  }
-  for (const s of staleReconcile(budget)) {
-    push({
-      id: `recon:${s.id}`, kind: "reconcile", title: "Reconcile " + s.name,
-      body: s.when ? `${s.name} hasn’t been reconciled since ${s.when}.` : `${s.name} has never been reconciled.`,
-      url: `./#accounts/${s.id}`, tag: `recon:${s.id}`, date: today, recur: { type: "none" },
-    });
-  }
-  for (const m of ccMismatches(budget, monthKey())) {
-    push({
-      id: `cc:${m.card.id}`, kind: "cc", title: `${m.card.name} payment is short`,
-      body: `The card balance is ${fmt(m.owed)}, and ${fmt(Math.max(0, m.setAside))} is set aside. Assign ${fmt(m.short)} more to the payment category.`,
-      url: `./#budget/${monthKey()}`, tag: `cc:${m.card.id}`,
-      date: today, recur: { type: "none" },
+      id: `overspend:${oldest}`, kind: "overspend", icon: "🔴", tag: "Budget",
+      title: `Overspending in ${monthLabel(oldest)}${more}`,
+      body: `${count > 1 ? `${count} months have` : `${monthLabel(oldest)} has`} unresolved overspending. Covering overspending moves funds from other categories to bring the overspent categories back to zero. Start with the oldest month first — after covering it the notification will advance to the next.`,
+      action: { label: `Cover Overspending in ${monthLabel(oldest)}`, color: "danger" },
+      url: `./#budget/${oldest}`, targetMonth: oldest,
     });
   }
   for (const tx of budget.transactions || []) {
@@ -79,15 +101,48 @@ export function collectReminders(budget, month) {
     const acct = cardSide
       ? (budget.creditCards || []).find((c) => c.id === tx.accountId)
       : (budget.accounts || []).find((a) => a.id === tx.accountId);
-    const who = acct?.name || (cardSide ? "a card" : "a bank account");
+    const who = acct?.name || "Unknown";
+    const when = dateLabel(tx.date);
+    const amt = fmt(Math.abs(tx.amount));
     push({
-      id: `payment:${tx.id}`, kind: "payment",
-      title: `${fmt(Math.abs(tx.amount))} payment unmatched`,
+      id: `payment:${tx.id}`, kind: "payment", icon: "⛓️‍💥", tag: who,
+      title: `${amt} payment on ${when} — unmatched`,
       body: cardSide
-        ? `A payment on ${tx.date} was recorded on ${who}, but the bank side is missing.`
-        : `A payment on ${tx.date} from ${who} hasn’t been matched to the card.`,
-      url: "./#transactions", tag: `payment:${tx.id}`,
-      date: today, recur: { type: "none" },
+        ? `A ${amt} payment on ${when} was recorded on ${who} but hasn't been matched to the bank side. Tap to enter the missing bank transaction.`
+        : `A ${amt} payment on ${when} from ${who} hasn't been matched to the credit card side. Tap to enter the missing card transaction.`,
+      action: { label: "Enter Missing Transaction", color: "primary" },
+      url: "./#transactions",
+    });
+  }
+  const mk = month || monthKey();
+  for (const m of ccMismatches(budget, mk)) {
+    push({
+      id: `cc:${m.card.id}`, kind: "cc", icon: "💳", tag: "Credit Cards",
+      title: `${m.card.name} payment category is underfunded`,
+      body: `Your ${m.card.name} balance is ${fmt(m.owed)}, but you've only set aside ${fmt(Math.max(0, m.setAside))} in the payment category — a shortfall of ${fmt(m.short)}. Budget an additional ${fmt(m.short)} to the ${m.card.name} payment category to cover the full balance.`,
+      action: { label: "Go to Budget", color: "primary" },
+      url: `./#budget/${mk}`,
+    });
+  }
+  for (const s of staleReconcile(budget)) {
+    const days = s.when ? daysSince(s.when) : null;
+    push({
+      id: `recon:${s.id}`, kind: "reconcile", icon: "📋", tag: s.isCard ? "Credit Card" : "Account",
+      title: `${s.name} hasn't been reconciled${days !== null ? ` in ${days} days` : " yet"}`,
+      body: `Regular reconciliation confirms your ToozBudgeting balances match your actual bank statements and helps catch errors early. ${days !== null ? `${s.name} was last reconciled ${days} days ago.` : `${s.name} has never been reconciled.`} Go to the Accounts tab to reconcile.`,
+      action: { label: `Reconcile ${s.name}`, color: "primary" },
+      url: `./#accounts/${s.id}`,
+    });
+  }
+  const dups = pendingFuzzyDuplicates(budget);
+  if (dups.length) {
+    const n = dups.length;
+    push({
+      id: "fuzzy-duplicates", kind: "fuzzy", icon: "⚠️", tag: "Transactions",
+      title: `Potential duplicate transaction${n !== 1 ? "s" : ""} found`,
+      body: `${n} transaction${n !== 1 ? "s" : ""} may be duplicated — similar amount and date found in the same account. Review each pair and choose which to keep.`,
+      action: { label: "Review Duplicates", color: "gold" },
+      panelOnly: true,
     });
   }
   return rules;
@@ -100,6 +155,7 @@ export async function scheduleLocal(budget, month) {
   const now = Date.now();
   const horizon = now + 36 * 3600000;
   for (const r of collectReminders(budget, month)) {
+    if (r.panelOnly) continue;
     const day = r.date || todayKey();
     const when = atTime(day, r.time || "09:00") + (r.offsetDays || 0) * 86400000;
     const key = `${r.id}:${day}`;
@@ -110,7 +166,7 @@ export async function scheduleLocal(budget, month) {
     const t = setTimeout(async () => {
       const again = await firedSet();
       if (again.has(key)) return;
-      await showLocal(r.title, r.body, r.url, r.tag);
+      await showLocal(r.title, r.body, r.url, r.id);
       await markFired(key);
     }, Math.min(delay, 2 ** 31 - 1));
     timers.add(t);

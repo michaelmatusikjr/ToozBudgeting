@@ -2,10 +2,10 @@ import { APP_VERSION, monthKey, prevMonth, nextMonth, deepClone, fmt, monthLabel
 import { loadState, saveState, subscribe, exportData, importData, deviceGet, deviceSet } from "./store.js?v=154";
 import { h, clear, icon, toast, closeAllModals, btn } from "./ui.js?v=154";
 import { renderIdentity, renderWizard, renderLoading } from "./views/gate.js?v=154";
-import { renderBudget, openInbox, openHistory } from "./views/budget.js?v=154";
-import { renderTransactions, openTx, applyTxNav } from "./views/transactions.js?v=154";
+import { renderBudget, openCover, openHistory } from "./views/budget.js?v=154";
+import { renderTransactions, openTx, applyTxNav, openMissingSide, openDupes } from "./views/transactions.js?v=154";
 import { renderAccounts } from "./views/accounts.js?v=154";
-import { renderPayees } from "./views/payees.js?v=154";
+import { renderPayees, openSuggestions } from "./views/payees.js?v=154";
 import { renderSettings } from "./views/settings.js?v=154";
 import { registerSW, activateWaiting } from "./pwa.js?v=154";
 import { scheduleLocal, collectReminders } from "./notify.js?v=154";
@@ -234,7 +234,11 @@ async function paintInner() {
     class: notes.length ? "hdr-bell has" : "hdr-bell",
     type: "button",
     "aria-label": notes.length ? `${notes.length} alerts` : "Alerts",
-    onclick: () => openInbox(ctx),
+    onclick: () => {
+      ctx.ui.notifOpen = !ctx.ui.notifOpen;
+      ctx.ui.expandedNotifId = ctx.ui.notifOpen ? ctx.ui.expandedNotifId : null;
+      ctx.render();
+    },
   }, notes.length ? `🔔 ${notes.length}` : "🔔");
   let center;
   if (ctx.nav === "budget") {
@@ -311,6 +315,7 @@ async function paintInner() {
   main.append(top, view);
   shell.append(side, main, tabs);
   root.append(shell);
+  if (ctx.ui.notifOpen) root.append(renderNotifPanel(ctx, notes));
   if (ctx.nav === "budget") renderBudget(view, ctx);
   else if (ctx.nav === "transactions") renderTransactions(view, ctx);
   else if (ctx.nav === "accounts") renderAccounts(view, ctx);
@@ -318,9 +323,116 @@ async function paintInner() {
   else await renderSettings(view, ctx);
 }
 
+
+function runAlertAction(ctx, n) {
+  if (n.kind === "merge") {
+    ctx.go("payees");
+    queueMicrotask(() => openSuggestions(ctx));
+    return;
+  }
+  if (n.kind === "overspend") {
+    const mk = n.targetMonth || String(n.id || "").split(":")[1];
+    if (mk) ctx.month = mk;
+    ctx.go("budget");
+    queueMicrotask(() => openCover(ctx, mk || ctx.month));
+    return;
+  }
+  if (n.kind === "payment") {
+    const id = String(n.id || "").replace(/^payment:/, "");
+    const tx = (ctx.budget().transactions || []).find((t) => t.id === id);
+    if (tx) openMissingSide(ctx, tx);
+    else toast("That payment is already matched");
+    return;
+  }
+  if (n.kind === "cc") {
+    ctx.go("budget");
+    return;
+  }
+  if (n.kind === "reconcile") {
+    const id = String(n.id || "").replace(/^recon:/, "");
+    ctx.ui.focusAccount = id;
+    ctx.go("accounts");
+    return;
+  }
+  if (n.kind === "fuzzy") {
+    ctx.go("transactions");
+    queueMicrotask(() => openDupes(ctx));
+  }
+}
+
+function renderNotifPanel(ctx, notes) {
+  const close = () => { ctx.ui.notifOpen = false; ctx.ui.expandedNotifId = null; ctx.render(); };
+  const overlay = h("div", { class: "notif-overlay", onclick: (e) => { if (e.target === overlay) close(); } });
+  const modal = h("div", { class: "notif-modal", role: "dialog", "aria-modal": "true", "aria-label": "Notifications" });
+  const title = `🔔 Notifications${notes.length ? ` (${notes.length})` : ""}`;
+  modal.append(h("div", { class: "notif-head" },
+    h("div", { class: "notif-title", text: title }),
+    h("button", { class: "notif-close", type: "button", "aria-label": "Close", text: "✕", onclick: close }),
+  ));
+  if (!notes.length) {
+    modal.append(h("div", { class: "notif-empty" },
+      h("div", { class: "notif-empty-ico", text: "✅" }),
+      h("div", { text: "No active notifications" }),
+    ));
+  } else {
+    const list = h("div", { class: "notif-list" });
+    notes.forEach((n, i) => {
+      const expanded = ctx.ui.expandedNotifId === n.id;
+      const row = h("div", { class: "notif-item" + (i < notes.length - 1 ? " split" : "") });
+      row.append(h("button", {
+        class: "notif-row" + (expanded ? " on" : ""),
+        type: "button",
+        onclick: () => { ctx.ui.expandedNotifId = expanded ? null : n.id; ctx.render(); },
+      },
+        h("span", { class: "notif-ico", text: n.icon || "🔔" }),
+        h("div", { class: "notif-main" },
+          h("div", { class: "notif-subject", text: n.title }),
+          n.tag ? h("div", { class: "notif-tag", text: n.tag }) : null,
+        ),
+        h("span", { class: "notif-chev", text: expanded ? "▲" : "▼" }),
+      ));
+      if (expanded) {
+        const detail = h("div", { class: "notif-detail" },
+          n.body ? h("div", { class: "notif-text", text: n.body }) : null,
+        );
+        if (n.items?.length) {
+          const items = h("div", { class: "notif-items" });
+          for (const item of n.items) {
+            items.append(h("button", {
+              class: "notif-subitem",
+              type: "button",
+              onclick: () => { close(); item.onClick?.(ctx, item); },
+              text: item.label,
+            }));
+          }
+          detail.append(items);
+        }
+        if (n.action) {
+          detail.append(btn(n.action.label, {
+            kind: n.action.color || "primary",
+            onClick: () => { close(); runAlertAction(ctx, n); },
+          }));
+        }
+        row.append(detail);
+      }
+      list.append(row);
+    });
+    modal.append(list);
+  }
+  overlay.append(modal);
+  return overlay;
+}
+
 let gPending = false;
 let gTimer = null;
 window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && ctx.ui?.notifOpen) {
+    e.preventDefault();
+    ctx.ui.notifOpen = false;
+    ctx.ui.expandedNotifId = null;
+    ctx.render();
+    return;
+  }
   const tag = document.activeElement?.tagName;
   if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || document.activeElement?.isContentEditable) return;
   if (document.querySelector(".scrim")) return;
