@@ -560,6 +560,29 @@ export function setCategory(budget, cat) {
   return touch(budget, { categories: budget.categories.map((c) => c.id === cat.id ? cat : c) });
 }
 
+export function expiredDateGoals(budget, today = monthKey()) {
+  return (budget.categories || []).filter((c) => c.goal?.type === "date" && c.goal.targetDate && c.goal.targetDate < today && !c.archived);
+}
+
+export function validateNewDateGoal({ date, amount, todayMonth }) {
+  if (!date) return "Please select a target date.";
+  if (!amount || amount <= 0) return "Please enter a target amount.";
+  if (date <= todayMonth) return "Target date must be in the future.";
+  return "";
+}
+
+export function applyExpiredGoalResolutions(budget, resolutions) {
+  let next = budget;
+  for (const [id, res] of Object.entries(resolutions || {})) {
+    if (!res) continue;
+    const cat = (next.categories || []).find((c) => c.id === id);
+    if (!cat) continue;
+    if (res === "remove") next = setCategory(next, { ...cat, goal: null, rollover: "rollover" });
+    else next = setCategory(next, { ...cat, goal: { type: "date", target: Number(res.amount), targetDate: res.date } });
+  }
+  return next;
+}
+
 export function addCategory(budget, { name, groupId, rollover, rolloverMax }) {
   const titled = toTitleCase(name.trim());
   if (!titled || !groupId) return { budget, error: "Name and group are required." };

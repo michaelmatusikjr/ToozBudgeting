@@ -2258,3 +2258,31 @@ kbd.sc-key {
   box-shadow: 0 1px 0 rgba(0,0,0,0.15);
 }
 .sc-note { font-size: 11px; color: var(--muted); margin-top: 14px; text-align: center; }
+
+/* WU-10 ExpiredGoalsModal */
+.eg-lede { font-size: 13px; color: var(--ink-2); margin: 0 0 20px; line-height: 1.6; }
+.eg-card {
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  border-radius: 10px;
+  background: var(--red-bg);
+  border: 1.5px solid var(--danger);
+}
+.eg-card.resolved {
+  background: var(--good-soft);
+  border-color: var(--good);
+}
+.eg-card-h { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; }
+.eg-name { font-weight: 700; font-size: 14px; }
+.eg-meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.eg-check { font-size: 18px; line-height: 1; }
+.eg-plan { font-size: 12px; color: var(--good); margin-bottom: 8px; }
+.eg-actions { display: flex; gap: 8px; }
+.eg-actions .btn { flex: 1; }
+.eg-err { font-size: 12px; color: var(--danger); margin: -4px 0 12px; }
+.sheet .btn.good:disabled, .sheet .btn.good[disabled] {
+  background: var(--disabled);
+  color: var(--ink);
+  border-color: transparent;
+  opacity: 0.6;
+}

@@ -3,13 +3,13 @@ import { formatTime } from "../time.js?v=154";
 import { fmt, monthLabel, monthLabelShort, monthKey, prevMonth, nextMonth, todayKey, toTitleCase, uid, round2 } from "../util.js?v=154";
 import {
   budgetSnapshot, getGoalMetrics, trailingAvg, monthAccessible, budgetStart, furthestMonth, readyToAssign,
-  overspentMonths, available, globalFree, ccMismatches, catReturned,
+  overspentMonths, available, globalFree, catReturned,
 } from "../calc.js?v=154";
 import {
   setAssigned, moveMoney, coverOverspending, planClawback, applyClawback,
   computeMonthAssignments, applyAssignments, setCategory, addCategory, archiveCategory,
   deleteCategory, setMonthNote, addGroup, renameGroup, deleteGroup, moveGroup, moveCategory,
-  placeGroup, placeCategory,
+  placeGroup, placeCategory, expiredDateGoals, validateNewDateGoal, applyExpiredGoalResolutions,
 } from "../mutate.js?v=154";
 import { collectReminders } from "../notify.js?v=154";
 import { openMissingSide, openTx, applyTxNav } from "./transactions.js?v=154";
@@ -424,47 +424,6 @@ export function renderBudget(root, ctx) {
     h("span", { text: "Available" }),
   );
 
-  const overs = overspentMonths(budget, today).filter((o) => o.month <= today);
-  const notices = h("div", { class: "notices" });
-  if (overs.length) {
-    const oldest = overs[0];
-    const extra = overs.length > 1 ? ` (+${overs.length - 1} more)` : "";
-    notices.append(h("button", { class: "notice", type: "button", onclick: () => { ctx.setMonth(oldest.month); openCover(ctx, oldest.month); } },
-      h("strong", { text: `Overspending in ${monthLabel(oldest.month)}${extra}` }),
-      h("span", { text: "Covering moves money from other categories so those balances come back to zero. Start with the oldest month." }),
-      h("span", { class: "notice-go", text: "Cover" }),
-    ));
-  }
-  for (const cat of expiredDateGoals(budget)) {
-    notices.append(h("button", { class: "notice warn", type: "button", onclick: () => openCategory(ctx, cat) },
-      h("strong", { text: `${cat.name} goal date has passed` }),
-      h("span", { class: "notice-go", text: "Edit" }),
-    ));
-  }
-
-  for (const miss of ccMismatches(budget, today)) {
-    notices.append(h("button", { class: "notice warn", type: "button", onclick: () => {
-      const openPad = () => {
-        const live = ctx.budget();
-        const cat = (live.categories || []).find((c) => c.id === miss.pay.id);
-        if (!cat) return;
-        const cur = Number((live.monthlyBudgets?.[today] || {})[cat.id] || 0);
-        openAmountPad({
-          title: cat.name,
-          value: round2(cur + miss.short),
-          allowNegative: true,
-          onCommit: (val) => commitAssigned(ctx, cat, today, val),
-        });
-      };
-      if (ctx.month !== today) ctx.setMonth(today);
-      openPad();
-    } },
-      h("strong", { text: `${miss.card.name} payment is short ${fmt(miss.short)}` }),
-      h("span", { text: `Balance ${fmt(miss.owed)}. Set aside ${fmt(Math.max(0, miss.setAside))}.` }),
-      h("span", { class: "notice-go", text: "Assign" }),
-    ));
-  }
-
   const groups = h("div", { class: "bud-groups" });
   for (const g of [...(budget.categoryGroups || [])].sort(sortKey)) {
     const cats = (budget.categories || []).filter((c) => c.groupId === g.id && !c.archived).sort(sortKey);
@@ -558,13 +517,14 @@ export function renderBudget(root, ctx) {
     ),
   );
 
-  root.append(h("div", { class: "bud-view" }, tiles, banner, reorderBar, cols, notices, groups, archivedBox, totals));
+  root.append(h("div", { class: "bud-view" }, tiles, banner, reorderBar, cols, groups, archivedBox, totals));
   if (ctx.ui.focusCat) {
     const id = ctx.ui.focusCat;
     ctx.ui.focusCat = null;
     const cat = (budget.categories || []).find((c) => c.id === id);
     if (cat) openCategory(ctx, cat);
   }
+  maybeOpenExpiredGoals(ctx, ro);
 }
 
 function commitAssigned(ctx, cat, month, val) {
@@ -944,58 +904,154 @@ export function openCover(ctx, month, note) {
   });
 }
 
-function expiredDateGoals(budget) {
-  const today = monthKey();
-  return (budget.categories || []).filter((c) => c.goal?.type === "date" && c.goal.targetDate && c.goal.targetDate < today && !c.archived);
+export function maybeOpenExpiredGoals(ctx, ro) {
+  if (ro || !expiredDateGoals(ctx.budget()).length) {
+    ctx.ui.expiredGoalsOpen = false;
+    return;
+  }
+  if (ctx.ui.expiredGoalsOpen || document.querySelector(".scrim")) return;
+  ctx.ui.expiredGoalsOpen = true;
+  queueMicrotask(() => openExpiredGoals(ctx));
 }
 
-function openExpired(ctx, cats, then) {
-  const choices = {};
+function openExpiredGoals(ctx) {
+  const cats = expiredDateGoals(ctx.budget());
+  if (!cats.length) { ctx.ui.expiredGoalsOpen = false; return; }
+  const resolutions = Object.fromEntries(cats.map((c) => [c.id, null]));
+  let subId = null;
+  let newDate = "";
+  let newAmount = 0;
+  let subError = "";
+
   const sheet = openSheet({
-    title: "Goals past their date",
-    body: (host) => {
-      host.append(h("p", { class: "lede", text: "These target-by-date goals have passed. Set a new goal or remove each one before auto-assign continues." }));
-      for (const cat of cats) {
-        const box = h("div", { class: "pair" });
-        const date = h("input", { class: "input", type: "month", min: nextMonth(monthKey()) });
-        let target = cat.goal?.target || 0;
-        box.append(h("strong", { text: cat.name }), h("p", { class: "hint", text: `${fmt(cat.goal.target)} by ${cat.goal.targetDate}` }),
-          field("New month", date), field("New target", moneyButton(target, (n) => { target = n; })),
-          h("div", { class: "row gap wrap" },
-            btn("Use new goal", { kind: "ghost", onClick: () => {
-              if (!date.value || date.value <= monthKey()) { toast("Pick a future month"); return; }
-              if (!(target > 0)) { toast("Enter a target amount"); return; }
-              choices[cat.id] = { date: date.value, amount: target };
-              toast("Noted");
-            } }),
-            btn("Remove goal", { kind: "quiet", onClick: () => { choices[cat.id] = "remove"; toast("Will remove"); } }),
-          ));
-        host.append(box);
-      }
-      host.append(btn("Continue", { block: true, onClick: () => {
-        if (cats.some((c) => !choices[c.id])) { toast("Resolve each goal first"); return; }
-        ctx.updateBudget((b) => ({
-          ...b,
-          categories: b.categories.map((c) => {
-            const res = choices[c.id];
-            if (!res) return c;
-            if (res === "remove") return { ...c, goal: null, rollover: "rollover" };
-            return { ...c, goal: { type: "date", target: res.amount, targetDate: res.date } };
-          }),
-        }));
-        sheet.close();
-        then?.();
-      }}));
-    },
+    title: "🏁 Goals Past Their Date",
+    blocking: true,
+    body: (host) => paint(host),
+    onClose: () => { ctx.ui.expiredGoalsOpen = false; },
   });
+
+  function setTitle(text, host) {
+    const root = host?.closest?.(".sheet") || document.querySelector(".scrim:last-of-type .sheet");
+    const el = root?.querySelector(".sheet-title");
+    if (el) el.textContent = text;
+  }
+
+  function paint(host = sheet.content) {
+    host.replaceChildren();
+    if (subId) {
+      const cat = cats.find((c) => c.id === subId);
+      setTitle(`Set New Goal — ${cat.name}`, host);
+      host.append(h("p", { class: "eg-lede", text: "Enter a new target amount and date. Both are required." }));
+      const amount = amountInput({
+        label: "New Target Amount ($)",
+        value: newAmount || undefined,
+        placeholder: "e.g. 2000",
+        onCommit: (v) => {
+          newAmount = v;
+          subError = "";
+          paint();
+        },
+      });
+      const date = h("input", {
+        class: "input",
+        type: "month",
+        min: nextMonth(monthKey()),
+        value: newDate,
+        oninput: (e) => {
+          newDate = e.target.value;
+          subError = "";
+          const confirmBtn = host.querySelector("[data-eg-confirm]");
+          if (confirmBtn) confirmBtn.disabled = !newDate || !newAmount;
+        },
+      });
+      host.append(amount, field("New Target Date", date));
+      if (subError) host.append(h("div", { class: "eg-err", text: subError }));
+      const confirm = btn("Confirm", {
+        kind: "good",
+        disabled: !newDate || !newAmount,
+        onClick: () => {
+          const err = validateNewDateGoal({ date: newDate, amount: newAmount, todayMonth: monthKey() });
+          if (err) { subError = err; paint(); return; }
+          resolutions[subId] = { date: newDate, amount: newAmount };
+          subId = null;
+          newDate = "";
+          newAmount = 0;
+          subError = "";
+          paint();
+        },
+      });
+      confirm.dataset.egConfirm = "1";
+      host.append(h("div", { class: "btn-row" },
+        btn("← Back", { kind: "ghost", onClick: () => { subId = null; newDate = ""; newAmount = 0; subError = ""; paint(); } }),
+        confirm,
+      ));
+      return;
+    }
+
+    setTitle("🏁 Goals Past Their Date", host);
+    host.append(h("p", { class: "eg-lede", text: "The following categories had target-by-date goals that have passed. Please set a new goal or remove the goal for each one before continuing." }));
+    for (const cat of cats) {
+      const res = resolutions[cat.id];
+      const card = h("div", { class: "eg-card" + (res ? " resolved" : "") });
+      card.append(h("div", { class: "eg-card-h" },
+        h("div", {},
+          h("div", { class: "eg-name", text: cat.name }),
+          h("div", { class: "eg-meta", text: `Goal: ${fmt(cat.goal.target)} by ${cat.goal.targetDate}` }),
+        ),
+        res ? h("div", { class: "eg-check", text: "✅" }) : null,
+      ));
+      if (res) {
+        card.append(h("div", { class: "eg-plan", text: res === "remove"
+          ? "Goal will be removed. Rollover set to Roll Over."
+          : `New goal: ${fmt(res.amount)} by ${res.date}` }));
+      }
+      const setBtn = btn(res && res !== "remove" ? "✏️ Change Goal" : "Set New Goal", {
+        onClick: () => { subId = cat.id; newDate = ""; newAmount = 0; subError = ""; paint(); },
+      });
+      const removeBtn = btn(res === "remove" ? "✓ Removing" : "Remove Goal", {
+        kind: "ghost danger",
+        onClick: () => { resolutions[cat.id] = "remove"; paint(); },
+      });
+      setBtn.classList.add("small");
+      removeBtn.classList.add("small");
+      card.append(h("div", { class: "eg-actions" }, setBtn, removeBtn));
+      host.append(card);
+    }
+    const remaining = cats.filter((c) => !resolutions[c.id]).length;
+    const allResolved = remaining === 0;
+    host.append(btn(
+      allResolved ? "✅ Done — Apply Changes" : `Resolve all ${remaining} remaining to continue`,
+      {
+        kind: "good",
+        block: true,
+        disabled: !allResolved,
+        onClick: () => {
+          if (!allResolved) return;
+          ctx.updateBudget((b) => applyExpiredGoalResolutions(b, resolutions));
+          ctx.ui.expiredGoalsOpen = false;
+          sheet.close();
+        },
+      },
+    ));
+  }
 }
 
 function openAuto(ctx) {
-  const budget = ctx.budget();
-  const month = ctx.month;
-  const expired = expiredDateGoals(budget);
-  if (expired.length) { openExpired(ctx, expired, () => openAuto(ctx)); return; }
-  runAuto(ctx, month, null);
+  const expired = expiredDateGoals(ctx.budget());
+  if (expired.length) {
+    const sheet = openSheet({
+      title: "⚠️ Expired Goals",
+      body: (host) => {
+        host.append(h("p", { class: "eg-lede", text: "Auto-Assign can't run until all expired target-by-date goals are resolved. Please update or remove them first." }));
+        host.append(btnRow(
+          { label: "Cancel", kind: "ghost", onClick: () => sheet.close() },
+          { label: "Resolve Goals →", onClick: () => { sheet.close(); ctx.ui.expiredGoalsOpen = true; openExpiredGoals(ctx); } },
+        ));
+      },
+    });
+    return;
+  }
+  runAuto(ctx, ctx.month, null);
 }
 
 function stillUnderfunded(budget, mk) {
