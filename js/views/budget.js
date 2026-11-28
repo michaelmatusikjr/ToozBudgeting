@@ -1,4 +1,5 @@
 import { h, btn, openSheet, field, textInput, toast, moneyButton, confirmDialog, openAmountPad, isTouchUi, amountInput, bindContextMenu, btnRow } from "../ui.js?v=154";
+import { formatTime } from "../time.js?v=154";
 import { fmt, monthLabel, monthLabelShort, monthKey, prevMonth, nextMonth, todayKey, toTitleCase, uid, round2 } from "../util.js?v=154";
 import {
   budgetSnapshot, getGoalMetrics, trailingAvg, monthAccessible, budgetStart, furthestMonth, readyToAssign,
@@ -1618,11 +1619,8 @@ function openLog(ctx) {
   const label = (type) => type === "cover" ? "Cover Overspending" : type === "cover-future" ? "Cover from Future Months" : type === "assign" ? "Budget Assignment" : "Move Money";
   const typeClass = (type) => (type === "cover" || type === "cover-future") ? "cover" : type === "assign" ? "assign" : "move";
   const when = (ts) => {
-    const d = new Date(ts || 0);
-    if (!ts || Number.isNaN(d.getTime())) return "";
-    const day = d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-    const time = d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
-    return `Moved on: ${day} ${time}`;
+    const s = formatTime(ts, { year: undefined });
+    return s ? `Moved on: ${s}` : "";
   };
   const log = [...(budget.moneyMoveLog || [])].filter((e) => e.month === month).reverse();
   const sheet = openSheet({

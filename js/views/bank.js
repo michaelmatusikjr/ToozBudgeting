@@ -1,5 +1,6 @@
 /** Settings > Bank sync: connect banks through Plaid (owners), map accounts, and sync. Uses the household sign-in. */
 import { h, btn, openSheet, field, textInput, toast, confirmDialog } from "../ui.js?v=154";
+import { formatTime } from "../time.js?v=154";
 import { bankSettings, setBankLink, setBankSettings } from "../bankmap.js?v=154";
 import {
   bankState, bankConfig, setBankConfig, bankAccess, listItems, linkToken, openLink,
@@ -24,7 +25,7 @@ export async function bankSection(ctx) {
     const trouble = items.find((i) => i.status !== "ok");
     if (s.error) text = s.error;
     else if (trouble) text = `${trouble.institution}: ${STATUS[trouble.status]?.[0] || "needs attention"}.`;
-    else if (items.length) text = `${items.length} bank${items.length === 1 ? "" : "s"} connected.${s.lastPull ? ` Checked ${new Date(s.lastPull).toLocaleString()}.` : ""}`;
+    else if (items.length) text = `${items.length} bank${items.length === 1 ? "" : "s"} connected.${s.lastPull ? ` Checked ${formatTime(s.lastPull)}.` : ""}`;
     else text = access.canManage ? "Connect a bank to start." : "No banks connected yet. A household owner can connect them.";
   }
   return [
@@ -108,7 +109,7 @@ async function paint(ctx, host, repaint, sheet) {
     } catch (err) { toast(plainBankError(err)); }
     repaint();
   } }));
-  kids.push(h("p", { class: "hint", text: s.lastPull ? `Last checked ${new Date(s.lastPull).toLocaleString()}. Bank sync also checks when the app opens, and the server checks twice a day.` : "Bank sync checks when the app opens, and the server checks twice a day." }));
+  kids.push(h("p", { class: "hint", text: s.lastPull ? `Last checked ${formatTime(s.lastPull)}. Bank sync also checks when the app opens, and the server checks twice a day.` : "Bank sync checks when the app opens, and the server checks twice a day." }));
   kids.push(btn("Server", { kind: "quiet", block: true, onClick: () => editServer(repaint) }));
   host.replaceChildren(...kids);
   void sheet;
@@ -145,8 +146,8 @@ function itemCard(ctx, item, settings, data, repaint, owner) {
     });
     return field(`${a.name}${a.mask ? ` ••${a.mask}` : ""}`, sel);
   });
-  const when = item.lastSyncAt ? `Last update ${new Date(item.lastSyncAt).toLocaleString()}.` : "Waiting for the first transactions from the bank.";
-  const expires = item.consentExpiresAt ? ` Access ends ${new Date(item.consentExpiresAt).toLocaleDateString()}. Reconnect to renew it.` : "";
+  const when = item.lastSyncAt ? `Last update ${formatTime(item.lastSyncAt)}.` : "Waiting for the first transactions from the bank.";
+  const expires = item.consentExpiresAt ? ` Access ends ${formatTime(item.consentExpiresAt, { hour: undefined, minute: undefined })}. Reconnect to renew it.` : "";
   const newAcc = item.newAccounts ? " The bank has new accounts. Reconnect to add them." : "";
   return h("div", { class: "pair bank-item" },
     h("div", { class: "row gap", style: "justify-content:space-between;align-items:center" },

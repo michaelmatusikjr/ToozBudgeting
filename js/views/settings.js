@@ -1,4 +1,4 @@
-import { h, btn, openSheet, field, textInput, toast, confirmDialog, bindContextMenu, devHooks } from "../ui.js?v=154";
+import { h, btn, openSheet, field, textInput, toast, confirmDialog, bindContextMenu, devHooks, searchableSel } from "../ui.js?v=154";
 import { APP_VERSION, toTitleCase, uid } from "../util.js?v=154";
 import { exportData, deviceGet, deviceSet, importData } from "../store.js?v=154";
 import { freshBudgetShell, copyCategories, addAccount, addCreditCard } from "../mutate.js?v=154";
@@ -9,6 +9,7 @@ import { THEMES, paintTheme, deriveCustom, resolveTheme, customFrom } from "../t
 import { renderGoogleButton, signOut } from "../account.js?v=154";
 import { bankSection, openBankSheet } from "./bank.js?v=154";
 import { householdSection, openPeople, avatar } from "./household.js?v=154";
+import { getTimeZone, getTimeZoneOverride, setTimeZoneOverride, deviceTimeZone, listTimeZones, detectTimeZoneFromLocation, formatTime } from "../time.js?v=154";
 
 export async function renderSettings(root, ctx) {
   const budget = ctx.budget();
@@ -59,6 +60,7 @@ export async function renderSettings(root, ctx) {
       ));
     }
     pane.append(await appearanceSection(ctx, theme));
+    pane.append(timeZoneSection(ctx));
     const notifKids = [
       h("p", { class: "set-profile-hint", text: `Permission: ${perm}.` }),
       isIOS() && !isStandalone() ? h("p", { class: "set-profile-hint", text: "On iPhone, add ToozBudgeting to the Home Screen before notifications can show. iOS 16.4 or later." }) : null,
@@ -239,6 +241,48 @@ function editLocalName(ctx, user, nameBox, current) {
   input.focus();
 }
 
+
+function timeZoneSection(ctx) {
+  const current = getTimeZone();
+  const manual = !!getTimeZoneOverride();
+  const options = listTimeZones().map((z) => ({ value: z, label: z.replace(/_/g, " ") }));
+  const picker = searchableSel({
+    value: current,
+    placeholder: "Search time zones...",
+    options,
+    onChange: async (v) => {
+      setTimeZoneOverride(v);
+      await deviceSet("timeZone", v);
+      ctx.render();
+    },
+  });
+  const hint = h("p", { class: "set-profile-hint", text: manual
+    ? `Showing times in ${current.replace(/_/g, " ")} (manual). Times are stored in UTC.`
+    : `Showing times in ${current.replace(/_/g, " ")} (this device). Times are stored in UTC.` });
+  const useDevice = btn("Use this device's time zone", {
+    kind: "ghost", block: true, disabled: !manual,
+    onClick: async () => {
+      setTimeZoneOverride(null);
+      await deviceSet("timeZone", null);
+      toast(`Using ${deviceTimeZone().replace(/_/g, " ")}`);
+      ctx.render();
+    },
+  });
+  const useLocation = btn("Detect from my location", {
+    kind: "ghost", block: true,
+    onClick: () => {
+      toast("Detecting time zone…");
+      detectTimeZoneFromLocation().then(async (tz) => {
+        setTimeZoneOverride(tz);
+        await deviceSet("timeZone", tz);
+        toast(`Using ${tz.replace(/_/g, " ")}`);
+        ctx.render();
+      }).catch((e) => toast(e.message || "Couldn't detect a time zone. Pick one from the list."));
+    },
+  });
+  return setSec("Time zone", h("div", { class: "set-card set-tz" }, picker, hint, useDevice, useLocation));
+}
+
 async function appearanceSection(ctx, theme) {
   const stored = resolveTheme(theme);
   const customSaved = await deviceGet("customTheme");
@@ -342,7 +386,7 @@ function budgetCard(ctx, b, archived) {
   const card = h("div", { class: `set-budget-card${active ? " on" : ""}${archived ? " archived" : ""}` });
   const meta = active
     ? "✓ Currently active"
-    : (b.createdAt ? `Created ${new Date(b.createdAt).toLocaleDateString()}` : "");
+    : (b.createdAt ? `Created ${formatTime(b.createdAt, { hour: undefined, minute: undefined })}` : "");
   const info = h("div", { class: "set-budget-info" },
     h("div", { class: "set-budget-name", text: b.name }),
     meta ? h("div", { class: `set-budget-meta${active ? " on" : ""}`, text: meta }) : null,

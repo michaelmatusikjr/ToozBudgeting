@@ -1,5 +1,6 @@
 /** Settings > Household: who's signed in, the people in the household, invites, roles, and sync status. */
 import { h, btn, openSheet, field, textInput, toast, confirmDialog } from "../ui.js?v=154";
+import { formatTime } from "../time.js?v=154";
 import {
   account, listMembers, invite, revokeInvite, setMember, removeMember, setMyName,
   renameHousehold, refreshMe, ROLE_LABEL, ROLE_HINT, shareInvite, inviteMessage,
@@ -32,7 +33,7 @@ export function avatar(user, size = 40) {
   return h("span", { class: "avatar", style: `width:${size}px;height:${size}px`, text: initials });
 }
 
-function when(ts) { return ts ? new Date(ts).toLocaleString() : "not yet"; }
+function when(ts) { return ts ? formatTime(ts) : "not yet"; }
 
 /** The Settings block. */
 export async function householdSection(ctx) {
@@ -133,7 +134,7 @@ export function openPeople(ctx) {
         kids.push(h("h3", { class: "kicker", text: "Invited" }));
         for (const inv of data.invites) {
           kids.push(h("div", { class: "pair person invite-row" },
-            h("span", { text: `${inv.email} · ${ROLE_LABEL[inv.role]} · until ${new Date(inv.expiresAt).toLocaleDateString()}` }),
+            h("span", { text: `${inv.email} · ${ROLE_LABEL[inv.role]} · until ${formatTime(inv.expiresAt, { hour: undefined, minute: undefined })}` }),
             h("div", { class: "row-actions" },
               shareButton(inv, me.household?.name),
               btn("Cancel", { kind: "quiet", onClick: async () => { await revokeInvite(inv.id); paint(); } }),
